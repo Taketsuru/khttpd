@@ -30,3 +30,10 @@
 
 # Debug files
 *.dSYM/
+
+# Others
+khttpdcontrol
+modules/khttpd/@
+modules/khttpd/machine
+modules/khttpd/x86
+modules/khttpd/export_syms
