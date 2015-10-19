@@ -31,11 +31,23 @@
 #include <sys/ioccom.h>
 #include <sys/socket.h>
 
+struct khttpd_address_info {
+	struct sockaddr_storage ai_addr;
+	int ai_family;
+	int ai_socktype;
+	int ai_protocol;
+};
+
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_ENABLE	_IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_DISABLE	_IO(KHTTPD_IOC, 1)
-#define KHTTPD_IOC_DEBUG	_IOWINT(KHTTPD_IOC, 2)
+#define KHTTPD_IOC_ENABLE		\
+	_IO(KHTTPD_IOC, 0)
+#define KHTTPD_IOC_DISABLE		\
+	_IO(KHTTPD_IOC, 1)
+#define KHTTPD_IOC_DEBUG		\
+	_IOWINT(KHTTPD_IOC, 2)
+#define KHTTPD_IOC_ADD_SERVER_PORT	\
+	_IOW(KHTTPD_IOC, 3, struct khttpd_address_info)
 
 #define KHTTPD_DEBUG_STATE	0x00000001
 #define KHTTPD_DEBUG_MESSAGE	0x00000002
@@ -56,6 +68,7 @@ enum {
 };
 
 struct kevent;
+struct mbuf;
 
 struct khttpd_request;
 struct khttpd_response;
@@ -73,6 +86,10 @@ typedef int (*khttpd_transmit_body_t)(struct khttpd_socket *,
 typedef void (*khttpd_request_dtor_t)(struct khttpd_request *);
 typedef void (*khttpd_response_dtor_t)(struct khttpd_response *);
 typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
+
+void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
+void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
+void khttpd_mbuf_copy_base64(struct mbuf *output, const char *buf, size_t size);
 
 void khttpd_route_acquire(struct khttpd_route *route);
 void khttpd_route_release(struct khttpd_route *route);

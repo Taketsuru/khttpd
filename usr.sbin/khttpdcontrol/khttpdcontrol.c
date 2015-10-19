@@ -26,27 +26,66 @@
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+
+#include <netinet/in.h>
 
 #include <err.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
+#include <sysexits.h>
 
 #include "../../modules/khttpd/khttpd.h"
 
 int main(int argc, char **argv)
 {
-	int fd;
+	struct sockaddr_storage addr;
+	struct addrinfo ai_hint, *ai_list, *ai_ptr;
+	struct khttpd_address_info kai;
+	int fd, gai_error;
 
 	fd = open("/dev/khttpd", O_RDWR);
 	if (fd == -1)
-		err(EXIT_FAILURE, "failed to open /dev/khttpd");
+		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
 
 	if (ioctl(fd, KHTTPD_IOC_DEBUG, KHTTPD_DEBUG_ALL) == -1)
-		err(EXIT_FAILURE, "failed to set debug level");
+		err(EX_UNAVAILABLE, "failed to set debug level");
+
+	bzero(&ai_hint, sizeof(ai_hint));
+	ai_hint.ai_flags = AI_PASSIVE;
+	ai_hint.ai_family = PF_UNSPEC;
+	ai_hint.ai_socktype = SOCK_STREAM;
+	ai_hint.ai_protocol = 0;
+
+	gai_error = getaddrinfo(NULL, "http", &ai_hint, &ai_list);
+	if (gai_error != 0)
+		errx(EX_UNAVAILABLE, "failed to get address info: %s",
+		    gai_strerror(gai_error));
+
+	for (ai_ptr = ai_list; ai_ptr != NULL; ai_ptr = ai_ptr->ai_next) {
+		if (sizeof(kai.ai_addr) < ai_ptr->ai_addrlen)
+			errx(EX_CONFIG, "address length too long: "
+			    "addrlen=%d, family=%d, socktype=%d, protocol=%d",
+			    ai_ptr->ai_addrlen, ai_ptr->ai_family,
+			    ai_ptr->ai_socktype, ai_ptr->ai_protocol);
+
+		bzero(&kai, sizeof(kai));
+		bcopy(ai_ptr->ai_addr, &kai.ai_addr, ai_ptr->ai_addrlen);
+		kai.ai_family = ai_ptr->ai_family;
+		kai.ai_protocol = ai_ptr->ai_protocol;
+		kai.ai_socktype = ai_ptr->ai_socktype;
+
+		if (ioctl(fd, KHTTPD_IOC_ADD_SERVER_PORT, &kai) == -1)
+			err(EX_UNAVAILABLE, "failed to add server port");
+	}
+
+	freeaddrinfo(ai_list);
 
 	if (ioctl(fd, KHTTPD_IOC_ENABLE) == -1)
-		err(EXIT_FAILURE, "failed to enable the server");
+		err(EX_UNAVAILABLE, "failed to enable the server");
 
 	return (0);
 }
