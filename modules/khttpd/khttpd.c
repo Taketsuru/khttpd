@@ -508,6 +508,29 @@ static const char *khttpd_sysctl_types[] = {
 static const size_t khttpd_sysctl_types_end =
     sizeof(khttpd_sysctl_types) / sizeof(khttpd_sysctl_types[0]);
 
+static const struct {
+	u_int		flag;
+	const char	*field_name;
+} khttpd_sysctl_flags[] = {
+	{ CTLFLAG_RD,		"rd" },
+	{ CTLFLAG_WR,		"wr" },
+	{ CTLFLAG_ANYBODY,	"anybody" },
+	{ CTLFLAG_PRISON,	"prison" },
+	{ CTLFLAG_DYN,		"dyn" },
+	{ CTLFLAG_SKIP,		"skip" },
+	{ CTLFLAG_TUN,		"tun" },
+	{ CTLFLAG_MPSAFE,	"mpsafe" },
+	{ CTLFLAG_VNET,		"vnet" },
+	{ CTLFLAG_DYING,	"dying" },
+	{ CTLFLAG_CAPRD,	"caprd" },
+	{ CTLFLAG_CAPWR,	"capwr" },
+	{ CTLFLAG_STATS,	"stats" },
+	{ CTLFLAG_NOFETCH,	"nofetch" }
+};
+
+static const size_t khttpd_sysctl_flags_count =
+    sizeof(khttpd_sysctl_flags) / sizeof(khttpd_sysctl_flags[0]);
+
 /*
  * khttpd process-local variables
  */
@@ -3726,8 +3749,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 	struct thread *td;
 	size_t cur_oidlen, next_oidlen, strbuflen;
 	u_int kind;
-	int error, i, linelen, type;
-	boolean_t need_comma;
+	int error, i, flag_count, item_count, linelen, type;
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) == sizeof(kind));
 
@@ -3741,8 +3763,9 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 
 	khttpd_mbuf_printf(body, "[");
 
-	need_comma = FALSE;
-	cur_oidlen = 0;
+	item_count = FALSE;
+	cur_oid[0] = 1;
+	cur_oidlen = sizeof(int);
 	next_oidlen = 0;
 	for (;;) {
 		/* Find the next entry of the entry named by cur_oid. */
@@ -3760,13 +3783,13 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 
 		itembuf = m_get(M_WAITOK, MT_DATA);
 
-		/* Print { "href": "/sys/sysctl/1.1" */
-		khttpd_mbuf_printf(itembuf, "%c{\"href\": \"%s",
-		    need_comma ? ',' : ' ', KHTTPD_SYSCTL_PREFIX);
+		/* Print { "href":"/sys/sysctl/1.1" */
+		khttpd_mbuf_printf(itembuf, "%s{\"href\":\"%s",
+		    0 < item_count ? ",\n" : "\n", KHTTPD_SYSCTL_PREFIX);
 		for (i = 0; i < next_oidlen / sizeof(int); ++i)
 			khttpd_mbuf_printf(itembuf, "%c%x",
 			    i == 0 ? '/' : '.', next_oid[i + 2]);
-		m_append(itembuf, 2, "\"");
+		m_append(itembuf, 1, "\"");
 
 		/* Get the name of the next entry. */
 		next_oid[1] = 1; /* name */
@@ -3782,9 +3805,9 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 			goto again;
 		}
 
-		/* Print ,"name": "kern.ostype", */
+		/* Print ,"name":"kern.ostype", */
 		TRACE("name %s", strbuf);
-		khttpd_mbuf_printf(itembuf, ",\"name\": \"%s\"", strbuf);
+		khttpd_mbuf_printf(itembuf, ",\n \"name\":\"%s\"", strbuf);
 
 		/* Get the kind and the format of the next entry. */
 		next_oid[1] = 4; /* oidfmt */
@@ -3801,17 +3824,35 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		}
 
 		kind = *(u_int *)strbuf;
-		type = kind & CTLTYPE;
-		if (type < khttpd_sysctl_types_end) {
-			khttpd_mbuf_printf(itembuf, ",\"type\": \"%s\"",
-			    khttpd_sysctl_types[type]);
+
+		khttpd_mbuf_printf(itembuf, ",\n \"flags\":[");
+		flag_count = 0;
+		for (i = 0; i < khttpd_sysctl_flags_count; ++i) {
+			if ((kind & khttpd_sysctl_flags[i].flag) == 0)
+				continue;
+			khttpd_mbuf_printf(itembuf, "%s\"%s\"",
+			    0 < flag_count ? ", " : "",
+			    khttpd_sysctl_flags[i].field_name);
+			++flag_count;
+		}
+		khttpd_mbuf_printf(itembuf, "]");
+
+		if ((kind & CTLFLAG_SECURE) != 0) {
+			khttpd_mbuf_printf(itembuf, ",\n \"securelevel\":%d",
+			    (kind & CTLMASK_SECURE) >> CTLSHIFT_SECURE);
 		}
 
-		khttpd_mbuf_printf(itembuf, ",\"format\": \"%s\"}",
+		type = kind & CTLTYPE;
+		if (type < khttpd_sysctl_types_end) {
+			khttpd_mbuf_printf(itembuf, ",\n \"type\":\"%s\"",
+			    khttpd_sysctl_types[type - 1]);
+		}
+
+		khttpd_mbuf_printf(itembuf, ",\n \"format\":\"%s\" }",
 		    strbuf + sizeof(kind));
 
 		m_cat(body, itembuf);
-		need_comma = TRUE;
+		++item_count;
 		itembuf = NULL;
 
 		bcopy(next_oid + 2, cur_oid, next_oidlen);
@@ -3822,7 +3863,7 @@ again:
 		itembuf = NULL;
 	}
 
-	khttpd_mbuf_printf(body, "]");
+	khttpd_mbuf_printf(body, 0 < item_count ? "\n]" : "]");
 
 	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
 
@@ -4277,6 +4318,7 @@ error_exit:
 static void
 khttpd_unload(void)
 {
+	struct khttpd_server_port *port;
 	struct proc *proc;
 
 	if (khttpd_dev != NULL) {
@@ -4313,6 +4355,11 @@ khttpd_unload(void)
 	while ((proc = pfind(khttpd_pid)) != NULL) {
 		PROC_UNLOCK(proc);
 		pause("khttpd-exit", hz);
+	}
+
+	while ((port = SLIST_FIRST(&khttpd_server_ports)) != NULL) {
+		SLIST_REMOVE_HEAD(&khttpd_server_ports, link);
+		free(port, M_KHTTPD);
 	}
 
 	khttpd_route_clear_all();
