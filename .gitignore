@@ -37,3 +37,4 @@ modules/khttpd/@
 modules/khttpd/machine
 modules/khttpd/x86
 modules/khttpd/export_syms
+modules/khttpd/.depend

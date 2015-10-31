@@ -40,14 +40,10 @@ struct khttpd_address_info {
 
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_ENABLE		\
-	_IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_DISABLE		\
-	_IO(KHTTPD_IOC, 1)
 #define KHTTPD_IOC_DEBUG		\
-	_IOWINT(KHTTPD_IOC, 2)
+	_IOWINT(KHTTPD_IOC, 0)
 #define KHTTPD_IOC_ADD_SERVER_PORT	\
-	_IOW(KHTTPD_IOC, 3, struct khttpd_address_info)
+	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
 
 #define KHTTPD_DEBUG_STATE	0x00000001
 #define KHTTPD_DEBUG_MESSAGE	0x00000002
@@ -90,13 +86,6 @@ typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
 void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
 void khttpd_mbuf_copy_base64(struct mbuf *output, const char *buf, size_t size);
-
-void khttpd_route_acquire(struct khttpd_route *route);
-void khttpd_route_release(struct khttpd_route *route);
-int  khttpd_route_add(char *path, khttpd_received_header_t received_header);
-void khttpd_route_remove(struct khttpd_route *route);
-void khttpd_route_clear_all(void);
-struct khttpd_route *khttpd_route_find(char *target);
 
 void khttpd_send_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);

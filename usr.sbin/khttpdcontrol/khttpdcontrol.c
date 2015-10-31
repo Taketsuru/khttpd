@@ -84,8 +84,5 @@ int main(int argc, char **argv)
 
 	freeaddrinfo(ai_list);
 
-	if (ioctl(fd, KHTTPD_IOC_ENABLE) == -1)
-		err(EX_UNAVAILABLE, "failed to enable the server");
-
 	return (0);
 }
