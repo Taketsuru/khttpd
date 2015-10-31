@@ -2299,6 +2299,9 @@ khttpd_send_response(struct khttpd_socket *socket,
 
 	TRACE("%p %p %p", socket, request, response);
 
+	KASSERT(response->status != -1,
+	    ("status for %p has not been set.", response));
+
 	if (response->status / 100 == 1 ||
 	    response->status == 204 ||
 	    response->status == 304 ||
@@ -3598,6 +3601,7 @@ again:
 
 	khttpd_header_add(&response->header, "Content-Type: application/json");
 
+	response->status = 200;
 	khttpd_send_response(socket, request, response);
 
 	if (itembuf != NULL)
@@ -3813,6 +3817,7 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 
 	khttpd_header_add(&response->header, "Content-Type: application/json");
 
+	response->status = 200;
 	khttpd_send_response(socket, request, response);
 	return;
 
