@@ -392,7 +392,6 @@ static void khttpd_asterisc_received_header(struct khttpd_socket * socket,
 static int khttpd_open_server_port(void *arg);
 static int khttpd_add_server_port(struct khttpd_address_info *ai);
 
-static void khttpd_shutdown(void *arg, int howto);
 static void khttpd_free_released_sockets(void);
 static int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
 static void khttpd_set_state(int state);
@@ -4059,14 +4058,6 @@ khttpd_add_server_port(struct khttpd_address_info *ai)
 /* ------------------------------------------------------------ khttpd daemon */
 
 static void
-khttpd_shutdown(void *arg, int howto)
-{
-	STATE_LOG("shutdown");
-	KASSERT(curproc != khttpd_proc, ("khttpd try to shutdown itself."));
-	kproc_shutdown(arg, howto);
-}
-
-static void
 khttpd_free_released_sockets(void)
 {
 	LIST_HEAD(, khttpd_socket) worklist;
@@ -4151,7 +4142,6 @@ khttpd_main(void *arg)
 	sigset_t sigmask;
 	struct sigaction sigact;
 	struct kevent event;
-	eventhandler_tag pre_sync_tag;
 	struct khttpd_command *command;
 	struct khttpd_socket *socket;
 	struct khttpd_server_port *port;
@@ -4162,9 +4152,6 @@ khttpd_main(void *arg)
 
 	td = curthread;
 	error = 0;
-
-	pre_sync_tag = EVENTHANDLER_REGISTER(shutdown_pre_sync,
-	    khttpd_shutdown, khttpd_proc, SHUTDOWN_PRI_DEFAULT);
 
 	khttpd_route_zone = uma_zcreate("khttp-route",
 	    sizeof(struct khttpd_route),
@@ -4323,8 +4310,6 @@ enter_loop:
 	uma_zdestroy(khttpd_socket_zone);
 	uma_zdestroy(khttpd_route_node_zone);
 	uma_zdestroy(khttpd_route_zone);
-
-	EVENTHANDLER_DEREGISTER(shutdown_pre_sync, pre_sync_tag);
 
 	kproc_exit(0);
 }
