@@ -1090,12 +1090,7 @@ khttpd_kevent_get(int kq, struct kevent *event)
 		khttpd_kevent_copyin	
 	};
 
-	struct timespec timeout = {
-		.tv_sec = 15,	/* less than the timeout of kproc_suspend */
-		.tv_nsec = 0
-	};
-
-	error = kern_kevent(curthread, kq, 0, 1, &k_ops, &timeout);
+	error = kern_kevent(curthread, kq, 0, 1, &k_ops, NULL);
 
 	if (error == 0 && curthread->td_retval[0] == 0)
 		error = ETIMEDOUT;
