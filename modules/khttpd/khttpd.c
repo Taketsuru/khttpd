@@ -76,7 +76,7 @@
 #endif
 
 #ifndef KHTTPD_SYSCTL_PREFIX
-#define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "/sysctl"
+#define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "/sysctl/"
 #endif
 
 #if 0
@@ -1178,7 +1178,7 @@ khttpd_route_find(struct khttpd_route_node *root, const char *target,
 {
 	struct khttpd_route_node *ptr;
 	struct khttpd_route *last_leaf;
-	const char *cp;
+	const char *cp, *last_suffix;
 	unsigned char ch;
 	int matchlen, prefixlen;
 
@@ -1190,19 +1190,25 @@ khttpd_route_find(struct khttpd_route_node *root, const char *target,
 	cp = target;
 	ptr = root;
 	last_leaf = NULL;
+	last_suffix = NULL;
 	while (ptr != NULL) {
 		matchlen = khttpd_find_first_discrepancy(ptr->prefix, cp);
 		prefixlen = ptr->prefix_len;
 
-		if (matchlen < prefixlen)
-			return (NULL);
-
 		ch = cp[matchlen];
-		last_leaf = ptr->leaf;
 
-		if (ch == '\0') {
+		if (matchlen < prefixlen &&
+		    !(matchlen == prefixlen - 1 &&
+			ptr->prefix[matchlen] == '/' &&
+			(ch == '\0' || ch == '?')))
+			break;
+
+		last_leaf = ptr->leaf;
+		last_suffix = cp + matchlen;
+
+		if (ch == '\0' || ch == '?') {
 			if (suffix != NULL)
-				*suffix = cp;
+				*suffix = last_suffix;
 			return (last_leaf);
 		}
 
@@ -1211,8 +1217,8 @@ khttpd_route_find(struct khttpd_route_node *root, const char *target,
 		cp += prefixlen;
 	}
 
-	if (suffix != NULL)
-		*suffix = cp;
+	if (suffix != NULL && last_suffix != NULL)
+		*suffix = last_suffix;
 
 	return (last_leaf);
 }
@@ -3505,8 +3511,8 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		khttpd_mbuf_printf(itembuf, "%s{\"href\":\"%s",
 		    0 < item_count ? ",\n" : "\n", KHTTPD_SYSCTL_PREFIX);
 		for (i = 0; i < next_oidlen / sizeof(int); ++i)
-			khttpd_mbuf_printf(itembuf, "%c%x",
-			    i == 0 ? '/' : '.', next_oid[i + 2]);
+			khttpd_mbuf_printf(itembuf, i == 0 ? "%x": ".%x",
+			    next_oid[i + 2]);
 		m_append(itembuf, 1, "\"");
 
 		/* Get the name of the next entry. */
@@ -3768,14 +3774,17 @@ khttpd_sysctl_parse_oid(const char *name, int *oid)
 
 static void
 khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
-    struct khttpd_request *request, const char *name)
+    struct khttpd_request *request)
 {
 	int oid[CTL_MAXNAME];
 	char buf[32];
 	struct mbuf *body;
 	struct khttpd_response *response;
+	const char *name;
 	size_t oidlen;
 	int error, linelen;
+
+	name = request->target_suffix;
 
 	TRACE("enter %p %p %s", socket, request, name);
 
@@ -3825,23 +3834,15 @@ static void
 khttpd_sysctl_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-	const char *name;
+	const char *suffix;
 
 	TRACE("enter %p %p", socket, request);
 
-	name = request->target + sizeof(KHTTPD_SYSCTL_PREFIX) - 1;
-	if (*name == '\0' || (name[0] == '/' && name[1] == '\0'))
+	suffix = request->target_suffix;
+	if (*suffix == '\0' || *suffix == '?')
 		khttpd_sysctl_get_or_head_index(socket, request);
-
-	else if (*name != '/')
-		/*
-		 * The last path components of the target and the prefix are
-		 * different with each other.
-		 */
-		khttpd_send_not_found_response(socket, request, FALSE);
-
 	else
-		khttpd_sysctl_get_or_head_leaf(socket, request, name + 1);
+		khttpd_sysctl_get_or_head_leaf(socket, request);
 }
 
 static void
@@ -3878,7 +3879,8 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 	writeable = FALSE;
 
 	name = request->target + sizeof(KHTTPD_SYSCTL_PREFIX) - 1;
-	if (*name == '\0' || (name[0] == '/' && name[1] == '\0'))
+	if (*name == '\0' || *name == '?' ||
+	    (name[0] == '/' && (name[1] == '\0' || name[1] == '?')))
 		/*
 		 * The target is the same as the route prefix or only "/"
 		 * follows the prefix.
