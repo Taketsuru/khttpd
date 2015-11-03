@@ -52,20 +52,36 @@ struct khttpd_address_info {
 
 #ifdef _KERNEL
 
+struct khttpd_mbuf_iter {
+	struct mbuf	*ptr;
+	int		off;
+	int		unget;
+};
+
 enum {
-   KHTTPD_TRANSFER_CODING_UNKNOWN,
+	KHTTPD_TRANSFER_CODING_UNKNOWN,
 
-   KHTTPD_TRANSFER_CODING_CHUNKED,
-   KHTTPD_TRANSFER_CODING_COMPRESS,
-   KHTTPD_TRANSFER_CODING_DEFLATE,
-   KHTTPD_TRANSFER_CODING_GZIP,
+	KHTTPD_TRANSFER_CODING_CHUNKED,
+	KHTTPD_TRANSFER_CODING_COMPRESS,
+	KHTTPD_TRANSFER_CODING_DEFLATE,
+	KHTTPD_TRANSFER_CODING_GZIP,
 
-   KHTTPD_TRANSFER_CODING_COUNT
+	KHTTPD_TRANSFER_CODING_COUNT
+};
+
+enum {
+	KHTTPD_JSON_ARRAY = 1,
+	KHTTPD_JSON_OBJECT,
+	KHTTPD_JSON_INTEGER,
+	KHTTPD_JSON_BOOL,
+	KHTTPD_JSON_STRING,
+	KHTTPD_JSON_NULL,
 };
 
 struct kevent;
 struct mbuf;
 
+struct khttpd_json;
 struct khttpd_request;
 struct khttpd_response;
 struct khttpd_route;
@@ -74,7 +90,7 @@ struct khttpd_socket;
 typedef void (*khttpd_received_header_t)(struct khttpd_socket *,
     struct khttpd_request *);
 typedef void (*khttpd_received_body_t)(struct khttpd_socket *,
-    struct khttpd_request *, char *begin, char *end);
+    struct khttpd_request *, const char *begin, const char *end);
 typedef void (*khttpd_end_of_message_t)(struct khttpd_socket *,
     struct khttpd_request *);
 typedef int (*khttpd_transmit_body_t)(struct khttpd_socket *,
@@ -85,7 +101,42 @@ typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
 
 void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
-void khttpd_mbuf_copy_base64(struct mbuf *output, const char *buf, size_t size);
+void khttpd_base64_encode_to_mbuf(struct mbuf *output, const char *buf,
+    size_t size);
+int khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter,
+    void **buf_out, size_t *size_out);
+void khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr,
+    int off);
+int khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter);
+void khttpd_mbuf_ungetc(struct khttpd_mbuf_iter *iter, int ch);
+void khttpd_mbuf_skip_json_ws(struct khttpd_mbuf_iter *iter);
+
+void khttpd_json_hold(struct khttpd_json *value);
+void khttpd_json_free(struct khttpd_json *value);
+int khttpd_json_type(struct khttpd_json *value);
+struct khttpd_json *khttpd_json_integer_new(int64_t value);
+int64_t khttpd_json_integer_value(struct khttpd_json *value);
+struct khttpd_json *khttpd_json_string_new(void);
+const char *khttpd_json_string_data(struct khttpd_json *value);
+int khttpd_json_string_size(struct khttpd_json *value);
+void khttpd_json_string_append(struct khttpd_json *value, const char *begin,
+    const char *end);
+void khttpd_json_string_append_char(struct khttpd_json *value, int ch);
+void khttpd_json_string_append_utf8(struct khttpd_json *value, int code);
+struct khttpd_json *khttpd_json_array_new(void);
+int khttpd_json_array_size(struct khttpd_json *value);
+void khttpd_json_array_add(struct khttpd_json *value, struct khttpd_json *elem);
+struct khttpd_json *khttpd_json_array_get(struct khttpd_json *value, int index);
+struct khttpd_json *khttpd_json_object_new(int size_hint);
+void khttpd_json_object_add(struct khttpd_json *value, struct khttpd_json *name,
+    struct khttpd_json *elem);
+struct khttpd_json *khttpd_json_object_get(struct khttpd_json *value,
+    const char *name);
+struct khttpd_json *khttpd_json_object_get_at(struct khttpd_json *value,
+    int index, struct khttpd_json **name_out);
+int khttpd_json_object_size(struct khttpd_json *value);
+int khttpd_json_parse(struct khttpd_mbuf_iter *iter,
+    struct khttpd_json **value_out, int depth_limit);
 
 void khttpd_send_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
@@ -96,8 +147,8 @@ void khttpd_socket_release(struct khttpd_socket *socket);
 void khttpd_ready_to_send(struct khttpd_socket *socket);
 
 void khttpd_send_static_response(struct khttpd_socket *socket,
-    struct khttpd_request *request, int status, const char *content,
-    boolean_t close);
+    struct khttpd_request *request, struct khttpd_response *response,
+    int status, const char *content, boolean_t close);
 
 void khttpd_send_bad_request_response(struct khttpd_socket *socket,
     struct khttpd_request *request);
@@ -106,6 +157,11 @@ void khttpd_send_payload_too_large_response(struct khttpd_socket *socket,
 void khttpd_send_not_implemented_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close);
 void khttpd_send_not_found_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, boolean_t close);
+void khttpd_send_method_not_allowed_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, boolean_t close,
+    const char *allowed_methods);
+void khttpd_send_conflict_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close);
 void khttpd_send_internal_error_response(struct khttpd_socket *socket,
     struct khttpd_request *request);
