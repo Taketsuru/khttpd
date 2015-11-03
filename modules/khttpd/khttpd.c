@@ -37,6 +37,7 @@
 #include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
+#include <sys/fcntl.h>
 #include <sys/conf.h>
 #include <sys/ioccom.h>
 #include <sys/socket.h>
@@ -105,24 +106,14 @@
 #define	DTR6(d, p1, p2, p3, p4, p5, p6)	(void)0
 #endif
 
-#define LOG(type, fmt, ...) \
-	do {								\
-		struct timeval tv;					\
-		microuptime(&tv);					\
-		printf("[khttpd] " #type " %ld.%06ld %d %s " fmt "\n",	\
-		    tv.tv_sec, tv.tv_usec, curthread->td_tid,		\
-		    __func__, ## __VA_ARGS__);				\
-	} while (0)
-
-#define ERROR(fmt, ...) LOG(error, fmt, ## __VA_ARGS__)
-#define DEBUG(fmt, ...) LOG(debug, fmt, ## __VA_ARGS__)
-
-#define STATE_LOG(fmt, ...)				\
-	if ((khttpd_debug & KHTTPD_DEBUG_STATE) != 0)	\
-		DEBUG(fmt, ## __VA_ARGS__)
+#define ERROR(fmt, ...) \
+	khttpd_log(KHTTPD_LOG_ERROR, fmt, ## __VA_ARGS__)
+#define DEBUG(fmt, ...) \
+	khttpd_log(KHTTPD_LOG_DEBUG, fmt, __func__, ## __VA_ARGS__)
 
 #define TRACE(fmt, ...)					\
-	if ((khttpd_debug & KHTTPD_DEBUG_TRACE) != 0)	\
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &  \
+		KHTTPD_LOG_DEBUG_TRACE) != 0)	        \
 		DEBUG(fmt, ## __VA_ARGS__)
 
 /* --------------------------------------------------------- Type definitions */
@@ -284,6 +275,12 @@ struct khttpd_sysctl_put_leaf_request {
 	u_int		kind;
 	int		oidlen;
 	int		oid[CTL_MAXNAME];
+};
+
+struct khttpd_log_state {
+	int	type;
+	u_int	mask;
+	int	fd;
 };
 
 /* ---------------------------------------------------- prototype declrations */
@@ -466,6 +463,27 @@ static struct khttpd_json khttpd_json_false = {
 	.ivalue = 0
 };
 
+static struct khttpd_log_state khttpd_log_state[] = {
+	{ /* KHTTPD_LOG_DEBUG */
+		.mask = 0,
+		.fd = -1
+	},
+	{ /* KHTTPD_LOG_ERROR */
+		.mask = 0,
+		.fd = -1
+	},
+	{ /* KHTTPD_LOG_ACCESS */
+		.mask = 0,
+		.fd = -1
+	},
+};
+
+static const u_int khttpd_log_conf_valid_masks[] = {
+	KHTTPD_LOG_DEBUG_ALL,	/* KHTTPD_LOG_DEBUG */
+	0,			/* KHTTPD_LOG_ERROR */
+	0,			/* KHTTPD_LOG_ACCESS */
+};
+
 static struct mtx khttpd_lock;
 static struct cdev *khttpd_dev;
 static struct proc *khttpd_proc;
@@ -473,7 +491,8 @@ static pid_t khttpd_pid;
 static int khttpd_listen_backlog = KHTTPD_LISTEN_BACKLOG;
 static int khttpd_state;
 static int khttpd_server_status;
-static int khttpd_debug = KHTTPD_DEBUG_ALL;
+static boolean_t khttpd_log_writing, khttpd_log_waiting;
+static char khttpd_log_buffer[1024];
 
 static char khttpd_crlf[] = { '\r', '\n' };
 
@@ -481,13 +500,6 @@ static struct cdevsw khttpd_cdevsw = {
 	.d_version = D_VERSION,
 	.d_ioctl   = khttpd_ioctl,
 	.d_name	   = "khttpd"
-};
-
-static const char *khttpd_state_labels[] = {
-	"loading",
-	"unloading",
-	"failed",
-	"ready",
 };
 
 static const struct {
@@ -619,6 +631,58 @@ static uma_zone_t khttpd_header_field_zone;
 static int khttpd_kqueue;
 
 /* ----------------------------------------------------- Function definitions */
+
+static
+void khttpd_log(int type, const char *fmt, ...)
+{
+	struct uio auio;
+	struct iovec iov[2];
+	struct timeval tv;
+	va_list vl;
+	int len;
+
+	mtx_lock(&khttpd_lock);
+	while (khttpd_log_writing) {
+		khttpd_log_waiting = TRUE;
+		mtx_sleep(&khttpd_log_writing, &khttpd_lock, 0, "khttpd-log", 0);
+	}
+	khttpd_log_writing = TRUE;
+	mtx_unlock(&khttpd_lock);
+
+	microuptime(&tv);
+
+	va_start(vl, fmt);
+	len = type == KHTTPD_LOG_DEBUG
+	    ? snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
+		"%ld.%06ld %d %s ",
+		tv.tv_sec, tv.tv_usec, curthread->td_tid, va_arg(vl, char *))
+	    : snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
+		"%ld.%06ld ", tv.tv_sec, tv.tv_usec);
+
+	len += vsnprintf((char *)khttpd_log_buffer + len,
+	    sizeof(khttpd_log_buffer) - len, fmt, vl);
+	va_end(vl);
+
+	iov[0].iov_base = (void *)khttpd_log_buffer;
+	iov[0].iov_len = len;
+
+	iov[1].iov_base = khttpd_crlf + 1;
+	iov[1].iov_len = 1;
+
+	auio.uio_iov = iov;
+	auio.uio_iovcnt = 2;
+	auio.uio_resid = iov[0].iov_len + 1;
+	auio.uio_segflg = UIO_SYSSPACE;
+	kern_writev(curthread, khttpd_log_state[KHTTPD_LOG_DEBUG].fd, &auio);
+
+	mtx_lock(&khttpd_lock);
+	khttpd_log_writing = FALSE;
+	if (khttpd_log_waiting) {
+		khttpd_log_waiting = FALSE;
+		wakeup(&khttpd_log_writing);
+	}
+	mtx_unlock(&khttpd_lock);
+}
 
 /*
  * string manipulation functions
@@ -2678,7 +2742,8 @@ khttpd_header_get_uint64(struct khttpd_header *header,
 		value = 0;
 		for (cp = begin; cp < end; ++cp) {
 			if (!isdigit(*cp)) {
-				if ((khttpd_debug & KHTTPD_DEBUG_TRACE) != 0) {
+				if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+					KHTTPD_LOG_DEBUG_TRACE) != 0) {
 					buf = khttpd_dup_first_line(cp);
 					TRACE("error isdigit: %s", buf);
 					free(buf, M_KHTTPD);
@@ -3249,7 +3314,8 @@ khttpd_socket_readline(struct khttpd_socket *socket, char *buf)
 		--end;
 	*end = '\0';
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0)
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0)
 		DEBUG("< '%s'", buf);
 
 	return (0);
@@ -3675,7 +3741,8 @@ khttpd_transmit_trailer(struct khttpd_socket *socket,
 
 	socket->transmit = khttpd_transmit_end;
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0) {
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0) {
 		end = response->header.end;
 		for (cp = response->header.trailer_begin;
 		     cp < end; cp = lf + 1) {
@@ -3732,7 +3799,8 @@ khttpd_transmit_chunk(struct khttpd_socket *socket,
 	    snprintf(socket->xmit_line, sizeof(socket->xmit_line),
 		"%jx\r\n", (uintmax_t)size);
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0) {
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0) {
 		line = khttpd_dup_first_line(socket->xmit_line);
 		DEBUG("> '%s'", line);
 		free(line, M_KHTTPD);
@@ -3817,7 +3885,8 @@ khttpd_transmit_body(struct khttpd_socket *socket,
 	if (error != 0)
 		return (error);
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0)
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0)
 		DEBUG("> <body>");
 
 	return (0);
@@ -3875,7 +3944,8 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 	socket->xmit_uio.uio_resid = len;
 	socket->xmit_uio.uio_segflg = UIO_SYSSPACE;
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0) {
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0) {
 		line = khttpd_dup_first_line(socket->xmit_line);
 		DEBUG("> '%s'", line);
 		free(line, M_KHTTPD);
@@ -4134,7 +4204,8 @@ khttpd_receive_body(struct kevent *event)
 	TRACE("enter %td %#jx %d", event->ident,
 	    (uintmax_t)socket->recv_residual, socket->recv_chunked);
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0)
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0)
 		DEBUG("< <body>");
 
 	if (socket->recv_skip != KHTTPD_NO_SKIP)
@@ -4233,7 +4304,8 @@ khttpd_receive_header_or_trailer(struct kevent *event)
 		return (error);
 	}
 
-	if ((khttpd_debug & KHTTPD_DEBUG_MESSAGE) != 0) {
+	if ((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &
+		KHTTPD_LOG_DEBUG_MESSAGE) != 0) {
 		len = (0 < iovcnt ? iov[0].iov_len : 0) +
 		    (1 < iovcnt ? iov[1].iov_len : 0) + 1;
 		buf = malloc(len, M_KHTTPD, M_WAITOK);
@@ -4363,7 +4435,7 @@ khttpd_accept_client(struct kevent *event)
 	struct khttpd_socket *socket;
 	struct thread *td;
 	socklen_t namelen;
-	int error;
+	int error, fd;
 
 	TRACE("enter %td", event->ident);
 
@@ -4376,12 +4448,13 @@ khttpd_accept_client(struct kevent *event)
 		TRACE("accept %d", error);
 		return;
 	}
+	fd = td->td_retval[0];
 
-	TRACE("ident %d", (int)td->td_retval[0]);
+	TRACE("ident %d", fd);
 
 	socket = (struct khttpd_socket *)
 	    uma_zalloc(khttpd_socket_zone, M_WAITOK);
-	socket->fd = td->td_retval[0];
+	socket->fd = fd;
 	bcopy(name, &socket->peer_addr, namelen);
 
 	error = khttpd_kevent_add_read_write(khttpd_kqueue, socket->fd,
@@ -5275,7 +5348,7 @@ khttpd_open_server_port(void *arg)
 	port = (struct khttpd_server_port *)arg;
 	td = curthread;
 
-	TRACE("enter %p", port);
+	TRACE("enter", port);
 
 	KASSERT(port->fd == -1, ("port->fd=%d", port->fd));
 
@@ -5284,15 +5357,16 @@ khttpd_open_server_port(void *arg)
 	socket_args.protocol = port->addrinfo.ai_protocol;
 	error = sys_socket(td, &socket_args);
 	if (error != 0) {
-		ERROR("socket() failed: %d", error);
+		TRACE("error socket %d", error);
 		return (error);
 	}
 	port->fd = td->td_retval[0];
+	TRACE("fd %d", port->fd);
 
 	error = kern_bind(td, port->fd,
 	    (struct sockaddr *)&port->addrinfo.ai_addr);
 	if (error != 0) {
-		ERROR("bind() failed: %d", error);
+		TRACE("error bind %d", error);
 		goto fail;
 	}
 
@@ -5300,14 +5374,14 @@ khttpd_open_server_port(void *arg)
 	listen_args.backlog = khttpd_listen_backlog;
 	error = sys_listen(td, &listen_args);
 	if (error != 0) {
-		ERROR("listen() failed: %d", error);
+		TRACE("error listen %d", error);
 		goto fail;
 	}
 
 	error = khttpd_kevent_add_read(khttpd_kqueue, port->fd,
 	    &port->event_type);
 	if (error != 0) {
-		ERROR("kevent(EVFILT_READ) failed: %d", error);
+		TRACE("error kevent %d", error);
 		goto fail;
 	}
 
@@ -5323,23 +5397,44 @@ fail:
 }
 
 static int
-khttpd_add_server_port(struct khttpd_address_info *ai)
+khttpd_set_log_conf(void *argument)
 {
-	struct khttpd_server_port *port;
-	int error;
+	struct khttpd_log_conf *conf;
+	struct khttpd_log_state *state;
+	struct thread *td;
+	u_int mask;
+	int error, fd, type;
 
-	TRACE("enter %d %d %d",
-	    ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+	conf = (struct khttpd_log_conf *)argument;
+	td = curthread;
 
-	port = malloc(sizeof(*port), M_KHTTPD, M_WAITOK);
-	port->event_type.handle_event = khttpd_accept_client;
-	bcopy(ai, &port->addrinfo, sizeof(port->addrinfo));
-	port->fd = -1;
+	type = conf->type;
+	if (type < KHTTPD_LOG_DEBUG || KHTTPD_LOG_ACCESS < type) {
+		ERROR("ioctl(LOG_CONF): invalid type %d", type);
+		return (EINVAL);
+	}
 
-	error = khttpd_run_proc(khttpd_open_server_port, port);
+	mask = conf->mask;
+	if ((mask & khttpd_log_conf_valid_masks[type]) != mask) {
+		ERROR("ioctl(LOG_CONF): invalid mask %#x", mask);
+		return (EINVAL);
+	}
 
-	if (error != 0)
-		free(port, M_KHTTPD);
+	error = kern_open(td, conf->path, UIO_SYSSPACE,
+	    O_WRONLY | O_APPEND | O_CREAT, 0644);
+	if (error != 0) {
+		ERROR("ioctl(LOG_CONF): open %d", error);
+		return (error);
+	}
+	fd = td->td_retval[0];
+
+	state = khttpd_log_state + type;
+	if (state->fd != -1)
+		kern_close(curthread, state->fd);
+
+	state->type = type;
+	state->mask = mask;
+	state->fd = fd;
 
 	return (0);
 }
@@ -5405,24 +5500,18 @@ khttpd_set_state(int state)
 {
 	int old_state;
 
-	TRACE("enter %d", state);
-
 	mtx_assert(&khttpd_lock, MA_OWNED);
 
 	old_state = khttpd_state;
 	if (old_state == state)
 		return;
 	if (old_state == KHTTPD_READY && khttpd_proc != NULL) {
-		TRACE("signal");
 		PROC_LOCK(khttpd_proc);
 		kern_psignal(khttpd_proc, SIGUSR1);
 		PROC_UNLOCK(khttpd_proc);
 	}
 	khttpd_state = state;
 	wakeup(&khttpd_state);
-
-	STATE_LOG("state-change %s %s",
-	    khttpd_state_labels[old_state], khttpd_state_labels[state]);
 }
 
 static void
@@ -5506,6 +5595,7 @@ khttpd_main(void *arg)
 		goto enter_loop;
 	}
 	khttpd_kqueue = td->td_retval[0];
+	TRACE("kqueue %d", khttpd_kqueue);
 
 	error = khttpd_kevent_add_signal(khttpd_kqueue, SIGUSR1,
 	    &khttpd_stop_request_type);
@@ -5608,22 +5698,49 @@ enter_loop:
 	kproc_exit(0);
 }
 
+/* ------------------------------------------------------------- ioctl handlers */
+
+static int
+khttpd_add_server_port(struct khttpd_address_info *ai)
+{
+	struct khttpd_server_port *port;
+	int error;
+
+	port = malloc(sizeof(*port), M_KHTTPD, M_WAITOK);
+	port->event_type.handle_event = khttpd_accept_client;
+	bcopy(ai, &port->addrinfo, sizeof(port->addrinfo));
+	port->fd = -1;
+
+	error = khttpd_run_proc(khttpd_open_server_port, port);
+
+	if (error != 0)
+		free(port, M_KHTTPD);
+
+	return (error);
+}
+
+static int
+khttpd_configure_log(struct khttpd_log_conf *conf)
+{
+	char path[PATH_MAX];
+	int error;
+
+	error = copyinstr(conf->path, path, sizeof(path), NULL);
+	if (error != 0)
+		return (error);
+	conf->path = path;
+
+	return (khttpd_run_proc(khttpd_set_log_conf, conf));
+}
+
 static int
 khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
 {
-	int value;
-
-	TRACE("enter %p %#lx %p %#x", dev, cmd, data, fflag);
-
 	switch (cmd) {
 
-	case KHTTPD_IOC_DEBUG:
-		value = *(int *)data;
-		if (value != (value & KHTTPD_DEBUG_ALL))
-			return (EINVAL);
-		khttpd_debug = value;
-		return (0);
+	case KHTTPD_IOC_CONFIGURE_LOG:
+		return (khttpd_configure_log((struct khttpd_log_conf *)data));
 
 	case KHTTPD_IOC_ADD_SERVER_PORT:
 		return (khttpd_add_server_port

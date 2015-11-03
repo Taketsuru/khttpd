@@ -44,6 +44,7 @@ int main(int argc, char **argv)
 {
 	struct sockaddr_storage addr;
 	struct addrinfo ai_hint, *ai_list, *ai_ptr;
+	struct khttpd_log_conf log_conf;
 	struct khttpd_address_info kai;
 	int fd, gai_error;
 
@@ -51,8 +52,11 @@ int main(int argc, char **argv)
 	if (fd == -1)
 		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
 
-	if (ioctl(fd, KHTTPD_IOC_DEBUG, KHTTPD_DEBUG_ALL) == -1)
-		err(EX_UNAVAILABLE, "failed to set debug level");
+	log_conf.type = KHTTPD_LOG_DEBUG;
+	log_conf.mask = KHTTPD_LOG_DEBUG_ALL;
+	log_conf.path = "/home/taketsuru/work/khttpd/debug.log";
+	if (ioctl(fd, KHTTPD_IOC_CONFIGURE_LOG, &log_conf) == -1)
+		err(EX_UNAVAILABLE, "failed to configure debug log");
 
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;

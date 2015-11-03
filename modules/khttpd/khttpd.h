@@ -38,17 +38,30 @@ struct khttpd_address_info {
 	int ai_protocol;
 };
 
+enum {
+	KHTTPD_LOG_DEBUG,
+	KHTTPD_LOG_ERROR,
+	KHTTPD_LOG_ACCESS,
+
+	KHTTPD_LOG_COUNT
+};
+
+struct khttpd_log_conf {
+	int	type;
+	u_int	mask;
+	char	*path;
+};
+
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_DEBUG		\
-	_IOWINT(KHTTPD_IOC, 0)
+#define KHTTPD_IOC_CONFIGURE_LOG	\
+	_IOW(KHTTPD_IOC, 0, struct khttpd_log_conf)
 #define KHTTPD_IOC_ADD_SERVER_PORT	\
 	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
 
-#define KHTTPD_DEBUG_STATE	0x00000001
-#define KHTTPD_DEBUG_MESSAGE	0x00000002
-#define KHTTPD_DEBUG_TRACE	0x00000004
-#define KHTTPD_DEBUG_ALL	0x00000007
+#define KHTTPD_LOG_DEBUG_MESSAGE	0x00000001
+#define KHTTPD_LOG_DEBUG_TRACE		0x00000002
+#define KHTTPD_LOG_DEBUG_ALL		0x00000003
 
 #ifdef _KERNEL
 
