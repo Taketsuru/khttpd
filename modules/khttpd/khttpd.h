@@ -146,10 +146,11 @@ void khttpd_socket_release(struct khttpd_socket *socket);
 
 void khttpd_ready_to_send(struct khttpd_socket *socket);
 
+void khttpd_send_continue_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response);
 void khttpd_send_static_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response,
     int status, const char *content, boolean_t close);
-
 void khttpd_send_bad_request_response(struct khttpd_socket *socket,
     struct khttpd_request *request);
 void khttpd_send_payload_too_large_response(struct khttpd_socket *socket,
