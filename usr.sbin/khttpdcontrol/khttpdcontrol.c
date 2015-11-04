@@ -52,6 +52,7 @@ int main(int argc, char **argv)
 	if (fd == -1)
 		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
 
+#if 0
 	log_conf.type = KHTTPD_LOG_DEBUG;
 	log_conf.mask = KHTTPD_LOG_DEBUG_ALL;
 	log_conf.fd = open("debug.log", O_WRONLY | O_APPEND | O_CREAT, 0666);
@@ -59,6 +60,7 @@ int main(int argc, char **argv)
 		err(EX_UNAVAILABLE, "failed to open debug log");
 	if (ioctl(fd, KHTTPD_IOC_CONFIGURE_LOG, &log_conf) == -1)
 		err(EX_UNAVAILABLE, "failed to configure debug log");
+#endif
 
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;
@@ -84,7 +86,7 @@ int main(int argc, char **argv)
 		kai.ai_protocol = ai_ptr->ai_protocol;
 		kai.ai_socktype = ai_ptr->ai_socktype;
 
-		if (ioctl(fd, KHTTPD_IOC_ADD_SERVER_PORT, &kai) == -1)
+		if (ioctl(fd, KHTTPD_IOC_ADD_PORT, &kai) == -1)
 			err(EX_UNAVAILABLE, "failed to add server port");
 	}
 

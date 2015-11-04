@@ -43,7 +43,7 @@ enum {
 	KHTTPD_LOG_ERROR,
 	KHTTPD_LOG_ACCESS,
 
-	KHTTPD_LOG_COUNT
+	KHTTPD_LOG_END
 };
 
 struct file;
@@ -59,9 +59,9 @@ struct khttpd_log_conf {
 
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_CONFIGURE_LOG	\
+#define KHTTPD_IOC_CONFIGURE_LOG			\
 	_IOW(KHTTPD_IOC, 0, struct khttpd_log_conf)
-#define KHTTPD_IOC_ADD_SERVER_PORT	\
+#define KHTTPD_IOC_ADD_PORT				\
 	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
 
 #define KHTTPD_LOG_DEBUG_MESSAGE	0x00000001
@@ -177,11 +177,13 @@ void khttpd_send_not_implemented_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close);
 void khttpd_send_not_found_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close);
+void khttpd_send_conflict_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, boolean_t close);
 void khttpd_send_method_not_allowed_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close,
     const char *allowed_methods);
-void khttpd_send_conflict_response(struct khttpd_socket *socket,
-    struct khttpd_request *request, boolean_t close);
+void khttpd_send_request_header_field_too_large_response
+(struct khttpd_socket *socket, struct khttpd_request *request);
 void khttpd_send_internal_error_response(struct khttpd_socket *socket,
     struct khttpd_request *request);
 void khttpd_send_options_response(struct khttpd_socket *socket,
