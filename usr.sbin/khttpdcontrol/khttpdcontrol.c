@@ -54,7 +54,9 @@ int main(int argc, char **argv)
 
 	log_conf.type = KHTTPD_LOG_DEBUG;
 	log_conf.mask = KHTTPD_LOG_DEBUG_ALL;
-	log_conf.path = "/home/taketsuru/work/khttpd/debug.log";
+	log_conf.fd = open("debug.log", O_WRONLY | O_APPEND | O_CREAT, 0666);
+	if (log_conf.fd == -1)
+		err(EX_UNAVAILABLE, "failed to open debug log");
 	if (ioctl(fd, KHTTPD_IOC_CONFIGURE_LOG, &log_conf) == -1)
 		err(EX_UNAVAILABLE, "failed to configure debug log");
 

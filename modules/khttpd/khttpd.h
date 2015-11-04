@@ -46,10 +46,15 @@ enum {
 	KHTTPD_LOG_COUNT
 };
 
+struct file;
+
 struct khttpd_log_conf {
 	int	type;
 	u_int	mask;
-	char	*path;
+	union {
+		int		fd;
+		struct filedescent *fde;
+	};
 };
 
 #define KHTTPD_IOC 'h'
@@ -154,8 +159,8 @@ int khttpd_json_parse(struct khttpd_mbuf_iter *iter,
 void khttpd_send_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
-void khttpd_socket_acquire(struct khttpd_socket *socket);
-void khttpd_socket_release(struct khttpd_socket *socket);
+void khttpd_socket_hold(struct khttpd_socket *socket);
+void khttpd_socket_free(struct khttpd_socket *socket);
 
 void khttpd_ready_to_send(struct khttpd_socket *socket);
 
