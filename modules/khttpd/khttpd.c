@@ -3613,90 +3613,86 @@ khttpd_send_static_response(struct khttpd_socket *socket,
 }
 
 void
+khttpd_send_error_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response,
+    int status, const char *reason, const char *description, boolean_t close)
+{
+	static const char fmt[] = "<!DOCTYPE html>"
+	    "<html lang='en'>"
+		"<head>"
+		    "<meta charset='US-ASCII' />"
+		    "<title>%d %s</title>"
+		"</head>"
+		"<body>"
+		    "<h1>%s</h1>"
+		    "<p>%s</p>"
+		"</body>"
+	    "</html>";
+
+	struct mbuf *mbuf;
+
+	if (response == NULL)
+		response = uma_zalloc(khttpd_response_zone, M_WAITOK);
+
+	KASSERT(response->transmit_body == NULL,
+	    ("transmit_body has already been set %p", response->transmit_body));
+
+	response->status = status;
+
+	response->transmit_body = khttpd_transmit_mbuf_data;
+	response->data[0] = response->data[1] = mbuf = m_get(M_WAITOK, MT_DATA);
+	khttpd_mbuf_printf(mbuf, fmt, status, reason, reason, description);
+
+	khttpd_header_add_content_length(response->header,
+	    m_length(mbuf, NULL));
+	khttpd_header_add(response->header,
+	    "Content-Type: text/html; charset=US-ASCII");
+
+	if (close)
+		khttpd_header_add(response->header, "Connection: close");
+
+	khttpd_send_response(socket, request, response);
+}
+
+void
 khttpd_send_bad_request_response(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-	TRACE("enter %p %p", socket, request);
-
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>400 Bad Reqeust</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Bad Request</h1>\n"
-		"    <p>A request that "
-		"	this server could not understand was sent.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
-	khttpd_send_static_response(socket, request, NULL, 400, content, TRUE);
+	TRACE("enter");
+	khttpd_send_error_response(socket, request, NULL, 400,
+	    "Bad Reqeust",
+	    "A request that this server could not understand was sent.", TRUE);
 }
 
 void
 khttpd_send_payload_too_large_response(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-	TRACE("enter %p %p", socket, request);
-
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>413 Payload Too Large</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Payload Too Large</h1>\n"
-		"    <p>The request payload is larger than "
-		"	this server could handle.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
-	khttpd_send_static_response(socket, request, NULL, 413, content, TRUE);
+	TRACE("enter");
+	khttpd_send_error_response(socket, request, NULL, 413,
+	    "Payload Too Large",
+	    "The request payload is larger than this server could handle.",
+	    TRUE);
 }
 
 void
 khttpd_send_not_implemented_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close)
 {
-	TRACE("enter %p %p %d", socket, request, close);
-
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>501 Not Implemented</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Not Implemented</h1>\n"
-		"    <p>The server does not support "
-		"	the requested functionality.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
-	khttpd_send_static_response(socket, request, NULL, 501, content, close);
+	TRACE("enter");
+	khttpd_send_error_response(socket, request, NULL, 501,
+	    "Not Implemented",
+	    "The server does not support the requested functionality.", close);
 }
 
 void
 khttpd_send_not_found_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close)
 {
-	TRACE("enter %p %p %d", socket, request, close);
-
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>404 Not Found</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Not Found</h1>\n"
-		"    <p>The server does not have the requested resource.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
-	khttpd_send_static_response(socket, request, NULL, 404, content, close);
+	TRACE("enter");
+	khttpd_send_error_response(socket, request, NULL, 404,
+	    "Not Found",
+	    "The server does not have the requested resource.", close);
 }
 
 void
@@ -3706,24 +3702,12 @@ khttpd_send_method_not_allowed_response(struct khttpd_socket *socket,
 {
 	struct khttpd_response *response;
 
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>405 Method Not Allowed</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Method Not Allowed</h1>\n"
-		"    <p>The requested method is not supported "
-	        "       by the target resource.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
-	TRACE("enter %d %s", close, allowed_methods);
-
+	TRACE("enter");
 	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
 	khttpd_header_add_allow(response->header, allowed_methods);
-	khttpd_send_static_response(socket, request, response, 405, content,
+	khttpd_send_error_response(socket, request, response, 405,
+	    "Method Not Allowed",
+	    "The requested method is not supported by the target resource.",
 	    close);
 }
 
@@ -3731,62 +3715,32 @@ void
 khttpd_send_conflict_response(struct khttpd_socket *socket,
     struct khttpd_request *request, boolean_t close)
 {
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>409 Conflict</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Conflict</h1>\n"
-		"    <p>The request could not be completed due to a conflict "
-	        "       with the current state of the target resource.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
 	TRACE("enter");
-	khttpd_send_static_response(socket, request, NULL, 404, content, close);
+	khttpd_send_error_response(socket, request, NULL, 404,
+	    "Conflict",
+	    "The request could not be completed due to a conflict with the "
+	    "current state of the target resource.", close);
 }
 
 void
 khttpd_send_request_header_field_too_large_response
 (struct khttpd_socket *socket, struct khttpd_request *request)
 {
-	static const char content[] = "<!DOCTYPE html>\n"
-		"<html lang='en'>\n"
-		"  <head>\n"
-		"    <meta charset='US-ASCII' />\n"
-		"    <title>431 Request Header Fields Too Large</title>\n"
-		"  </head>\n"
-		"  <body>\n"
-		"    <h1>Request Header Fields Too Large</h1>\n"
-		"    <p>The header fields in the request is too large.</p>\n"
-		"  </body>\n"
-		"</html>\n";
-
 	TRACE("enter");
-	khttpd_send_static_response(socket, request, NULL, 431, content, TRUE);
+	khttpd_send_error_response(socket, request, NULL, 431,
+	    "Request Header Fields Too Large",
+	    "The header fields in the request is too large.", TRUE);
 }
 
 void
 khttpd_send_internal_error_response(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-	static const char content[] = "<!DOCTYPE html>\n"
-	    "<html lang='en'>\n"
-	    "  <head>\n"
-	    "	 <meta charset='US-ASCII' />\n"
-	    "	 <title>500 Internal Server Error</title>\n"
-	    "  </head>\n"
-	    "  <body>\n"
-	    "	 <h1>Internal Server Error</h1>\n"
-	    "	 <p>The server encountered an unexpected condition "
-	    "	    that prevent it from fulfilling the reqeust.</p>\n"
-	    "  </body>\n"
-	    "</html>\n";
-
 	TRACE("enter");
-	khttpd_send_static_response(socket, request, NULL, 500, content, TRUE);
+	khttpd_send_error_response(socket, request, NULL, 500,
+	    "Internal Server Error",
+	    "The server encountered an unexpected condition "
+	    "that prevent it from fulfilling the reqeust.", TRUE);
 }
 
 void
@@ -3801,10 +3755,7 @@ khttpd_send_options_response(struct khttpd_socket *socket,
 
 	response->status = 200;
 
-	/*
-	 * RFC7231 section 4.3.7 mandates the server to generate
-	 * Content-Length field with a value of 0.
-	 */
+	/* RFC7231 section 4.3.7 mandates to send Content-Length: 0 */
 	response->data[0] = (void *)"";
 	response->transmit_body = khttpd_transmit_static_data;
 	khttpd_header_add(response->header, "Content-Length: 0");
@@ -4722,7 +4673,7 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 	oidlen = khttpd_sysctl_parse_oid(name, oid);
 	if (oidlen == -1) {
 		TRACE("error parse_oid");
-		khttpd_send_internal_error_response(socket, request);
+		khttpd_send_not_found_response(socket, request, FALSE);
 		return;
 	}
 
