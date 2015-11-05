@@ -119,6 +119,8 @@ typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
 
 void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
+struct mbuf *khttpd_mbuf_append(struct mbuf *output, const char *begin,
+    const char *end);
 void khttpd_base64_encode_to_mbuf(struct mbuf *output, const char *buf,
     size_t size);
 int khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter,

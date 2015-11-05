@@ -51,7 +51,6 @@ int main(int argc, char **argv)
 	fd = open("/dev/khttpd", O_RDWR);
 	if (fd == -1)
 		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
-
 #if 0
 	log_conf.type = KHTTPD_LOG_DEBUG;
 	log_conf.mask = KHTTPD_LOG_DEBUG_ALL;
@@ -61,7 +60,6 @@ int main(int argc, char **argv)
 	if (ioctl(fd, KHTTPD_IOC_CONFIGURE_LOG, &log_conf) == -1)
 		err(EX_UNAVAILABLE, "failed to configure debug log");
 #endif
-
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;
 	ai_hint.ai_family = PF_UNSPEC;
