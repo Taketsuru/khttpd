@@ -72,7 +72,7 @@
 /* The maximum size of a message excluding message body */
 #ifndef KHTTPD_MAX_HEADER_SIZE
 #define KHTTPD_MAX_HEADER_SIZE \
-	(8192 - (sizeof(void *) * (KHTTPD_HEADER_HASH_SIZE + 2)))
+	(8192 - (sizeof(void *) * (KHTTPD_HEADER_HASH_SIZE * 2 + 2)))
 #endif
 
 #ifndef KHTTPD_PREFIX
@@ -229,10 +229,10 @@ struct khttpd_header {
 struct khttpd_request {
 	STAILQ_ENTRY(khttpd_request) link;
 	STAILQ_HEAD(, khttpd_response) responses;
-	struct khttpd_header	header;
 	khttpd_request_dtor_t	dtor;
 	khttpd_received_body_t	received_body;
 	khttpd_end_of_message_t	end_of_message;
+	struct khttpd_header	*header;
 	struct khttpd_route	*route;
 	void		*data[2];
 	const char	*target;
@@ -247,10 +247,10 @@ struct khttpd_request {
 
 struct khttpd_response {
 	STAILQ_ENTRY(khttpd_response) link;
-	struct khttpd_header	header;
 	uint64_t		content_length;
 	khttpd_response_dtor_t	dtor;
 	khttpd_transmit_body_t	transmit_body;
+	struct khttpd_header	*header;
 	void		*data[2];
 	unsigned	chunked:1;
 	short		status;
@@ -462,6 +462,7 @@ static uma_zone_t khttpd_route_node_zone;
 static uma_zone_t khttpd_socket_zone;
 static uma_zone_t khttpd_request_zone;
 static uma_zone_t khttpd_response_zone;
+static uma_zone_t khttpd_header_zone;
 static uma_zone_t khttpd_header_field_zone;
 static int khttpd_kqueue;
 
@@ -479,7 +480,8 @@ void khttpd_log(int type, const char *fmt, ...)
 	mtx_lock(&khttpd_lock);
 	while (khttpd_log_writing) {
 		khttpd_log_waiting = TRUE;
-		mtx_sleep(&khttpd_log_writing, &khttpd_lock, 0, "khttpd-log", 0);
+		mtx_sleep(&khttpd_log_writing, &khttpd_lock, 0, "khttpd-log",
+		    0);
 	}
 	khttpd_log_writing = TRUE;
 	mtx_unlock(&khttpd_lock);
@@ -2281,12 +2283,12 @@ khttpd_route_clear_all(struct khttpd_route_node **rootp)
  */
 
 static int
-khttpd_header_ctor(struct khttpd_header *header)
+khttpd_header_ctor(void *mem, int size, void *arg, int flags)
 {
+	struct khttpd_header *header;
 	int i;
 
-	TRACE("enter");
-
+	header = (struct khttpd_header *)mem;
 	for (i = 0; i < KHTTPD_HEADER_HASH_SIZE; ++i)
 		STAILQ_INIT(&header->index[i]);
 	header->end = header->buffer;
@@ -2296,13 +2298,13 @@ khttpd_header_ctor(struct khttpd_header *header)
 }
 
 static void
-khttpd_header_dtor(struct khttpd_header *header)
+khttpd_header_dtor(void *mem, int size, void *arg)
 {
+	struct khttpd_header *header;
 	struct khttpd_header_field *field;
 	int i;
 
-	TRACE("enter");
-
+	header = (struct khttpd_header *)mem;
 	for (i = 0; i < KHTTPD_HEADER_HASH_SIZE; ++i)
 		while ((field = STAILQ_FIRST(&header->index[i])) != NULL) {
 			STAILQ_REMOVE_HEAD(&header->index[i], hash_link);
@@ -2757,10 +2759,11 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	request->received_body = khttpd_received_body_null;
 	request->end_of_message = khttpd_end_of_message_null;
 	bzero(request->data, sizeof(request->data));
+	request->header = uma_zalloc(khttpd_header_zone, M_WAITOK);
 	request->route = NULL;
 	request->transfer_codings_count = 0;
 
-	return (khttpd_header_ctor(&request->header));
+	return (0);
 }
 
 static void
@@ -2782,7 +2785,7 @@ khttpd_request_dtor(void *mem, int size, void *arg)
 		khttpd_route_free(route);
 	}
 
-	khttpd_header_dtor(&request->header);
+	uma_zfree(khttpd_header_zone, request->header);
 }
 
 /*
@@ -2802,11 +2805,12 @@ khttpd_response_ctor(void *mem, int size, void *arg, int flags)
 	response = (struct khttpd_response *)mem;
 	response->dtor = khttpd_response_dtor_null;
 	response->transmit_body = NULL;
+	response->header = uma_zalloc(khttpd_header_zone, M_WAITOK);
 	bzero(response->data, sizeof(response->data));
 	response->status = -1;
 	response->version_major = 1;
 	response->version_minor = 1;
-	return (khttpd_header_ctor(&response->header));
+	return (0);
 }
 
 static void
@@ -2816,7 +2820,7 @@ khttpd_response_dtor(void *mem, int size, void *arg)
 
 	response = (struct khttpd_response *)mem;
 	response->dtor(response);
-	khttpd_header_dtor(&response->header);
+	uma_zfree(khttpd_header_zone, response->header);
 }
 
 /*
@@ -3234,7 +3238,7 @@ khttpd_send_response(struct khttpd_socket *socket,
 
 	transfer_codings_count = sizeof(transfer_codings) /
 	    sizeof(transfer_codings[0]);
-	error = khttpd_header_get_transfer_encoding(&response->header,
+	error = khttpd_header_get_transfer_encoding(response->header,
 	    transfer_codings, &transfer_codings_count);
 	switch (error) {
 
@@ -3248,7 +3252,7 @@ khttpd_send_response(struct khttpd_socket *socket,
 			panic("%s: unsupported transfer coding: %p(%d)",
 			    __func__, transfer_codings, transfer_codings_count);
 
-		error = khttpd_header_get_uint64(&response->header,
+		error = khttpd_header_get_uint64(response->header,
 		    "Content-Length", &response->content_length, FALSE);
 		if (error != ENOENT)
 			panic("%s: both Transfer-Encoding and Content-Length "
@@ -3271,7 +3275,7 @@ khttpd_send_response(struct khttpd_socket *socket,
 		panic("%s: unknown error: %d", __func__, error);
 	}
 
-	error = khttpd_header_get_uint64(&response->header, "Content-Length",
+	error = khttpd_header_get_uint64(response->header, "Content-Length",
 	    &response->content_length, FALSE);
 	switch (error) {
 
@@ -3319,7 +3323,7 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 	continue_response = 100 <= response->status && response->status < 200;
 
 	close = !continue_response &&
-	    khttpd_header_value_includes(&response->header,
+	    khttpd_header_value_includes(response->header,
 		"Connection", "close", FALSE);
 
 	STAILQ_REMOVE_HEAD(&request->responses, link);
@@ -3348,9 +3352,9 @@ khttpd_transmit_trailer(struct khttpd_socket *socket,
 
 	TRACE("enter %d", socket->fd);
 
-	socket->xmit_iov[0].iov_base = response->header.trailer_begin;
-	len = socket->xmit_iov[1].iov_len = response->header.end -
-	    response->header.trailer_begin;
+	socket->xmit_iov[0].iov_base = response->header->trailer_begin;
+	len = socket->xmit_iov[1].iov_len = response->header->end -
+	    response->header->trailer_begin;
 
 	socket->xmit_iov[1].iov_base = (void *)khttpd_crlf;
 	len += socket->xmit_iov[1].iov_len = sizeof(khttpd_crlf);
@@ -3363,8 +3367,8 @@ khttpd_transmit_trailer(struct khttpd_socket *socket,
 	socket->transmit = khttpd_transmit_end;
 
 	if (DEBUG_ENABLED(MESSAGE)) {
-		end = response->header.end;
-		for (cp = response->header.trailer_begin;
+		end = response->header->end;
+		for (cp = response->header->trailer_begin;
 		     cp < end; cp = lf + 1) {
 			lf = khttpd_find_ch(cp, '\n');
 			buf = khttpd_dup_first_line(cp);
@@ -3522,10 +3526,10 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 	socket->xmit_iov[0].iov_base = socket->xmit_line;
 	socket->xmit_iov[0].iov_len = len;
 
-	socket->xmit_iov[1].iov_base = response->header.buffer;
+	socket->xmit_iov[1].iov_base = response->header->buffer;
 	len += socket->xmit_iov[1].iov_len =
-	    MIN(response->header.end, response->header.trailer_begin) -
-	    response->header.buffer;
+	    MIN(response->header->end, response->header->trailer_begin) -
+	    response->header->buffer;
 
 	socket->xmit_iov[2].iov_base = (void *)khttpd_crlf;
 	len += socket->xmit_iov[2].iov_len = sizeof(khttpd_crlf);
@@ -3540,8 +3544,9 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 		DEBUG("> '%s'", line);
 		free(line, M_KHTTPD);
 
-		ep = MIN(response->header.end, response->header.trailer_begin);
-		for (cp = response->header.buffer; cp < ep; cp = lf + 1) {
+		ep = MIN(response->header->end,
+		    response->header->trailer_begin);
+		for (cp = response->header->buffer; cp < ep; cp = lf + 1) {
 			lf = khttpd_find_ch(cp, '\n');
 			line = khttpd_dup_first_line(cp);
 			DEBUG("> '%s'", line);
@@ -3589,7 +3594,7 @@ khttpd_send_static_response(struct khttpd_socket *socket,
 	response->status = status;
 
 	if (close) {
-		khttpd_header_add(&response->header, "Connection: close");
+		khttpd_header_add(response->header, "Connection: close");
 		socket->receive = khttpd_socket_drain;
 	}
 
@@ -3597,8 +3602,8 @@ khttpd_send_static_response(struct khttpd_socket *socket,
 		response->data[0] = (void *)content;
 		len = strlen(content);
 
-		khttpd_header_add_content_length(&response->header, len);
-		khttpd_header_add(&response->header,
+		khttpd_header_add_content_length(response->header, len);
+		khttpd_header_add(response->header,
 		    "Content-Type: text/html; charset=US-ASCII");
 
 		response->transmit_body = khttpd_transmit_static_data;
@@ -3717,7 +3722,7 @@ khttpd_send_method_not_allowed_response(struct khttpd_socket *socket,
 	TRACE("enter %d %s", close, allowed_methods);
 
 	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
-	khttpd_header_add_allow(&response->header, allowed_methods);
+	khttpd_header_add_allow(response->header, allowed_methods);
 	khttpd_send_static_response(socket, request, response, 405, content,
 	    close);
 }
@@ -3802,9 +3807,9 @@ khttpd_send_options_response(struct khttpd_socket *socket,
 	 */
 	response->data[0] = (void *)"";
 	response->transmit_body = khttpd_transmit_static_data;
-	khttpd_header_add(&response->header, "Content-Length: 0");
+	khttpd_header_add(response->header, "Content-Length: 0");
 
-	khttpd_header_add_allow(&response->header, allowed_methods);
+	khttpd_header_add_allow(response->header, allowed_methods);
 
 	khttpd_send_response(socket, request, response);
 }
@@ -4008,7 +4013,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 
 	TRACE("enter");
 
-	error = khttpd_header_get_uint64(&request->header, "Content-Length",
+	error = khttpd_header_get_uint64(request->header, "Content-Length",
 	    &request->content_length, FALSE);
 	if (error != 0)
 		TRACE("error get_content_length %d", error);
@@ -4037,7 +4042,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 
 	request->transfer_codings_count = sizeof request->transfer_codings /
 	    sizeof request->transfer_codings[0];
-	error = khttpd_header_get_transfer_encoding(&request->header,
+	error = khttpd_header_get_transfer_encoding(request->header,
 	    request->transfer_codings, &request->transfer_codings_count);
 	if (error != 0)
 		TRACE("error get_transfer_encoding %d", error);
@@ -4083,7 +4088,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 	socket->recv_chunked = chunked;
 
 	if (chunked) {
-		khttpd_header_start_trailer(&request->header);
+		khttpd_header_start_trailer(request->header);
 		socket->receive = khttpd_receive_chunk;
 		request->content_length = 0;
 
@@ -4164,7 +4169,7 @@ khttpd_receive_header_or_trailer(struct kevent *event)
 		free(buf, M_KHTTPD);
 	}
 
-	error = khttpd_header_addv(&request->header, iov, iovcnt);
+	error = khttpd_header_addv(request->header, iov, iovcnt);
 	switch (error) {
 
 	case ENOMSG:
@@ -4526,10 +4531,10 @@ again:
 	response->transmit_body = khttpd_transmit_mbuf_data;
 	response->data[0] = response->data[1] = body;
 
-	khttpd_header_add_content_length(&response->header,
+	khttpd_header_add_content_length(response->header,
 	    m_length(body, NULL));
 
-	khttpd_header_add(&response->header, "Content-Type: application/json");
+	khttpd_header_add(response->header, "Content-Type: application/json");
 
 	response->status = 200;
 	khttpd_send_response(socket, request, response);
@@ -4736,9 +4741,9 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 	response->transmit_body = khttpd_transmit_mbuf_data;
 	response->data[0] = response->data[1] = body;
 
-	khttpd_header_add_content_length(&response->header,
+	khttpd_header_add_content_length(response->header,
 	    m_length(body, NULL));
-	khttpd_header_add(&response->header, "Content-Type: application/json");
+	khttpd_header_add(response->header, "Content-Type: application/json");
 
 	response->status = 200;
 	khttpd_send_response(socket, request, response);
@@ -5006,7 +5011,7 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	}
 
 	if (request->version_major == 1 && request->version_minor == 1) {
-		error = khttpd_header_is_continue_expected(&request->header,
+		error = khttpd_header_is_continue_expected(request->header,
 		    &continue_expected);
 		if (error != 0) {
 			TRACE("error is_continue_expected %d", error);
@@ -5240,6 +5245,11 @@ khttpd_main(void *arg)
 	    khttpd_response_ctor, khttpd_response_dtor, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
 
+	khttpd_header_zone = uma_zcreate("khttpd-header",
+	    sizeof(struct khttpd_header),
+	    khttpd_header_ctor, khttpd_header_dtor, NULL, NULL,
+	    UMA_ALIGN_PTR, UMA_ZONE_OFFPAGE | UMA_ZONE_VTOSLAB);
+
 	khttpd_header_field_zone = uma_zcreate("khttpd-header-field",
 	    sizeof(struct khttpd_header_field),
 	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
@@ -5375,6 +5385,7 @@ cont:
 		}
 
 	uma_zdestroy(khttpd_header_field_zone);
+	uma_zdestroy(khttpd_header_zone);
 	uma_zdestroy(khttpd_response_zone);
 	uma_zdestroy(khttpd_request_zone);
 	uma_zdestroy(khttpd_socket_zone);
