@@ -65,13 +65,14 @@
 #define KHTTPD_LINE_MAX 4096
 #endif
 
-/* The maximum size of a message excluding message body */
-#ifndef KHTTPD_MAX_HEADER_SIZE
-#define KHTTPD_MAX_HEADER_SIZE 8192
-#endif
-
 #ifndef KHTTPD_HEADER_HASH_SIZE
 #define KHTTPD_HEADER_HASH_SIZE 8
+#endif
+
+/* The maximum size of a message excluding message body */
+#ifndef KHTTPD_MAX_HEADER_SIZE
+#define KHTTPD_MAX_HEADER_SIZE \
+	(8192 - (sizeof(void *) * (KHTTPD_HEADER_HASH_SIZE + 2)))
 #endif
 
 #ifndef KHTTPD_PREFIX
@@ -82,8 +83,8 @@
 #define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "sysctl/"
 #endif
 
-#ifndef KHTTPD_JSON_DATA_SIZE
-#define KHTTPD_JSON_DATA_SIZE	(128 - 32)
+#ifndef KHTTPD_JSON_EMBEDDED_DATA_SIZE
+#define KHTTPD_JSON_EMBEDDED_DATA_SIZE	(128 - 32)
 #endif
 
 #ifndef KHTTPD_JSON_DEPTH_MAX
@@ -94,7 +95,7 @@
 #define KHTTPD_SYSCTL_PUT_MAX	4096
 #endif
 
-#if 0
+#ifdef KHTTPD_DEBUG
 #define	DTR0(d)				CTR0(KTR_GEN, d)
 #define	DTR1(d, p1)			CTR1(KTR_GEN, d, p1)
 #define	DTR2(d, p1, p2)			CTR2(KTR_GEN, d, p1, p2)
@@ -112,16 +113,26 @@
 #define	DTR6(d, p1, p2, p3, p4, p5, p6)	(void)0
 #endif
 
+#define ERROR(fmt, ...) \
+	khttpd_log(KHTTPD_LOG_ERROR, fmt, ## __VA_ARGS__)
+
+#ifdef KHTTPD_DEBUG
+
 #define DEBUG_ENABLED(MASK)				\
 	((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &	\
 	    KHTTPD_LOG_DEBUG_ ## MASK) != 0)
-
-#define ERROR(fmt, ...) \
-	khttpd_log(KHTTPD_LOG_ERROR, fmt, ## __VA_ARGS__)
 #define DEBUG(fmt, ...) \
 	khttpd_log(KHTTPD_LOG_DEBUG, fmt, __func__, ## __VA_ARGS__)
 #define TRACE(fmt, ...) \
 	if (DEBUG_ENABLED(TRACE)) DEBUG(fmt, ## __VA_ARGS__)
+
+#else
+
+#define DEBUG_ENABLED(MASK) 0
+#define DEBUG(fmt, ...)
+#define TRACE(fmt, ...)
+
+#endif
 
 /* --------------------------------------------------------- Type definitions */
 
@@ -274,7 +285,7 @@ struct khttpd_json {
 		int64_t		ivalue;
 		char		*storage;
 	};
-	char		data[KHTTPD_JSON_DATA_SIZE];
+	char		data[KHTTPD_JSON_EMBEDDED_DATA_SIZE];
 };		
 
 struct khttpd_sysctl_put_leaf_request {
@@ -3303,7 +3314,7 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 	boolean_t continue_response;
 	boolean_t close;
 
-	TRACE("enter %", socket->fd);
+	TRACE("enter %d", socket->fd);
 
 	continue_response = 100 <= response->status && response->status < 200;
 

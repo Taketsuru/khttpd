@@ -3,7 +3,8 @@ SYSDIR = $(HOME)/src/sys
 SRCS = khttpd.c
 KMOD = khttpd
 
-CFLAGS += -fno-inline -DINVARIANTS -DKTR
+#CFLAGS +=
+CFLAGS += -DINVARIANTS -DKTR -DKHTTPD_DEBUG
 
 EXPORT_SYMS =
 EXPORT_SYMS += khttpd_route_add
