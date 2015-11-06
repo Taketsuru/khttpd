@@ -3961,6 +3961,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 	int error;
 	boolean_t chunked;
 	boolean_t content_length_specified;
+	boolean_t continue_expected;
 
 	TRACE("enter");
 
@@ -4066,6 +4067,20 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 	request->route = route;
 
 	(*route->received_header)(socket, request);
+
+	if (STAILQ_EMPTY(&request->responses) && 
+	    request->version_major == 1 && request->version_minor == 1) {
+		error = khttpd_header_is_continue_expected(request->header,
+		    &continue_expected);
+		if (error != 0) {
+			TRACE("error is_continue_expected %d", error);
+			khttpd_send_internal_error_response(socket, request);
+			return;
+		}
+
+		if (continue_expected)
+			khttpd_send_continue_response(socket, request, NULL);
+	}
 
 	if (!chunked &&
 	    !(content_length_specified && 0 < request->content_length))
@@ -4917,7 +4932,6 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	char *valbuf;
 	size_t vallen;
 	int error;
-	boolean_t continue_expected;
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) ==
 	    sizeof(auxdata->kind));
@@ -4959,18 +4973,6 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	if ((auxdata->kind & CTLFLAG_WR) == 0) {
 		error = EPERM;
 		goto out;
-	}
-
-	if (request->version_major == 1 && request->version_minor == 1) {
-		error = khttpd_header_is_continue_expected(request->header,
-		    &continue_expected);
-		if (error != 0) {
-			TRACE("error is_continue_expected %d", error);
-			goto out;
-		}
-
-		if (continue_expected)
-			khttpd_send_continue_response(socket, request, NULL);
 	}
 
 	auxdata->head = auxdata->tail = m_get(M_WAITOK, MT_DATA);
