@@ -258,22 +258,23 @@ struct khttpd_response {
 	char		version_minor;
 };
 
-struct khttpd_route_node {
-	short		prefix_len;
-	unsigned char	child_count;
-	char		prefix[sizeof(void*) * 30 - sizeof(short) -
-	    		    sizeof(unsigned char)];
-	struct khttpd_route *leaf;
-	struct khttpd_route_node *parent;
-	struct khttpd_route_node *children[256 - 32];
-};
+struct khttpd_route;
+SPLAY_HEAD(khttpd_route_tree, khttpd_route);
+LIST_HEAD(khttpd_route_list, khttpd_route);
 
 struct khttpd_route {
-	SLIST_ENTRY(khttpd_route)	link;
+	LIST_ENTRY(khttpd_route)	children_link;
+	SPLAY_ENTRY(khttpd_route)	children_node;
+	struct khttpd_route_tree	children_tree;
+	struct khttpd_route_list	children_list;
 	khttpd_route_dtor_t		dtor;
 	khttpd_received_header_t	received_header;
-	u_int				refcount;
-	void				*data[2];
+	struct khttpd_route		*parent;
+	const char	*label;
+	char		*path;
+	void		*data[2];
+	u_int		refcount;
+	int		label_len;
 };
 
 struct khttpd_json {
@@ -304,6 +305,8 @@ struct khttpd_log_state {
 
 /* ---------------------------------------------------- prototype declrations */
 
+static int khttpd_route_compare(struct khttpd_route *x, struct khttpd_route *y);
+
 static void khttpd_kevent_nop(struct kevent *event);
 
 static int khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
@@ -318,6 +321,16 @@ static void khttpd_handle_socket_event(struct kevent *event);
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 	       struct thread *td);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+
+SPLAY_PROTOTYPE(khttpd_route_tree, khttpd_route, children_node,
+    khttpd_route_compare);
+SPLAY_GENERATE(khttpd_route_tree, khttpd_route, children_node,
+    khttpd_route_compare);
+
+#pragma clang diagnostic pop
 
 /* ----------------------------------------------------- Variable definitions */
 
@@ -448,7 +461,12 @@ static struct khttpd_event_type khttpd_stop_request_type = {
 	.handle_event = khttpd_kevent_nop
 };
 
-static struct khttpd_route_node *khttpd_route_tree = NULL;
+static struct khttpd_route khttpd_route_root = {
+	.children_tree = SPLAY_INITIALIZER(khttpd_route_root.children_tree),
+	.children_list = LIST_HEAD_INITIALIZER(khttpd_route_root.children_list),
+	.parent = NULL,
+	.refcount = 1,
+};
 
 static SLIST_HEAD(khttpd_server_port_list, khttpd_server_port)
     khttpd_server_ports = SLIST_HEAD_INITIALIZER(khttpd_server_port_list);
@@ -458,7 +476,6 @@ static LIST_HEAD(, khttpd_socket) khttpd_sockets =
 
 static uma_zone_t khttpd_json_zone;
 static uma_zone_t khttpd_route_zone;
-static uma_zone_t khttpd_route_node_zone;
 static uma_zone_t khttpd_socket_zone;
 static uma_zone_t khttpd_request_zone;
 static uma_zone_t khttpd_response_zone;
@@ -710,26 +727,6 @@ khttpd_hash32_str_ci(const char *str)
 		hash = HASHSTEP(hash, tolower(ch));
 
 	return (hash);
-}
-
-static int
-khttpd_find_first_discrepancy(const char *x, const char *y)
-{
-	const char *cpx, *cpy;
-	char chx, chy;
-
-	cpx = x;
-	cpy = y;
-	for (;;) {
-		chx = *cpx;
-		chy = *cpy;
-		if (chx != chy || chx == '\0' || chy == '\0')
-			break;
-		++cpx;
-		++cpy;
-	}
-
-	return (cpx - x);
 }
 
 /*
@@ -1942,6 +1939,8 @@ khttpd_route_ctor(void *mem, int size, void *arg, int flags)
 	struct khttpd_route *route;
 
 	route = (struct khttpd_route *)mem;
+	LIST_INIT(&route->children_list);
+	SPLAY_INIT(&route->children_tree);
 	route->dtor = khttpd_route_dtor_null;
 	route->received_header = (khttpd_received_header_t)arg;
 	route->refcount = 1;
@@ -1956,9 +1955,15 @@ khttpd_route_dtor(void *mem, int size, void *arg)
 	struct khttpd_route *route;
 
 	route = (struct khttpd_route *)mem;
-	KASSERT(route->refcount == 0, 
-	    ("%p->refcount=%d", route, route->refcount));
 
+	TRACE("enter %s", route->path);
+
+	KASSERT(route->refcount == 0,
+	    ("%p->refcount == %d", route, route->refcount));
+	KASSERT(SPLAY_EMPTY(&route->children_tree),
+	    ("%p->children_tree not empty", route));
+	KASSERT(LIST_EMPTY(&route->children_list),
+	    ("%p->children_list not empty", route));
 	route->dtor(route);
 }
 
@@ -1975,307 +1980,210 @@ khttpd_route_free(struct khttpd_route *route)
 		uma_zfree(khttpd_route_zone, route);
 }
 
-#ifdef INVARIANTS
-static void
-khttpd_route_node_dtor(void *mem, int size, void *arg)
+static int
+khttpd_route_compare(struct khttpd_route *x, struct khttpd_route *y)
 {
-	struct khttpd_route_node *node;
-	int i, n;
+	int len, result;
 
-	node = (struct khttpd_route_node *)mem;
-
-	KASSERT(node->child_count == 0,
-	    ("%p->child_count = %d", node, node->child_count));
-	KASSERT(node->leaf == NULL, ("%p->leaf = %p", node, node->leaf));
-	n = sizeof(node->children) / sizeof(node->children[0]);
-	for (i = 0; i < n; ++i)
-		KASSERT(node->children[i] == NULL,
-		    ("%p->children[%d] = %p", node, i, node->children[i]));
+	len = MIN(x->label_len, y->label_len);
+	result = strncmp(x->label, y->label, len);
+	return (result != 0 ? result : x->label_len - y->label_len);
 }
-#endif
 
 static struct khttpd_route *
-khttpd_route_find(struct khttpd_route_node *root, const char *target,
-    const char **suffix)
+khttpd_route_find(struct khttpd_route *root,
+    const char *target, const char **suffix)
 {
-	struct khttpd_route_node *ptr;
-	struct khttpd_route *last_leaf;
-	const char *cp, *last_suffix;
-	unsigned char ch;
-	int matchlen, prefixlen;
+	struct khttpd_route key;
+	struct khttpd_route *ptr, *parent;
+	const char *cp, *end;
 
 	TRACE("enter %s", target);
 
 	KASSERT(curproc == khttpd_proc,
 	    ("curproc = %p, khttpd_proc = %p", curproc, khttpd_proc));
 
+	parent = root;
 	cp = target;
-	ptr = root;
-	last_leaf = NULL;
-	last_suffix = NULL;
-	while (ptr != NULL) {
-		matchlen = khttpd_find_first_discrepancy(ptr->prefix, cp);
-		prefixlen = ptr->prefix_len;
+	end = target + strlen(cp);
+	while (!SPLAY_EMPTY(&parent->children_tree)) {
+		key.label = cp;
+		key.label_len = end - cp;
+		ptr = SPLAY_FIND(khttpd_route_tree, &parent->children_tree, &key);
+		if (ptr != NULL) {
+			if (suffix != NULL)
+				*suffix = end;
+			return (ptr);
+		}
 
-		ch = cp[matchlen];
+		ptr = SPLAY_ROOT(&parent->children_tree);
+		if (0 < khttpd_route_compare(ptr, &key))
+			ptr = LIST_PREV(ptr, &parent->children_list,
+			    khttpd_route, children_link);
 
-		if (matchlen < prefixlen &&
-		    !(matchlen == prefixlen - 1 &&
-			ptr->prefix[matchlen] == '/' &&
-			(ch == '\0' || ch == '?')))
+		if (ptr == NULL ||
+		    strncmp(ptr->label, cp, ptr->label_len) != 0)
 			break;
 
-		last_leaf = ptr->leaf;
-		last_suffix = cp + matchlen;
-
-		if (ch == '\0' || ch == '?') {
-			if (suffix != NULL)
-				*suffix = last_suffix;
-			return (last_leaf);
-		}
-
-		KASSERT(32 <= ch, ("invalid character %#02x", ch));
-		ptr = ptr->children[ch - 32];
-		cp += prefixlen;
+		parent = ptr;
+		cp += ptr->label_len;
 	}
 
-	if (suffix != NULL && last_suffix != NULL)
-		*suffix = last_suffix;
+	if (parent == root)
+		return (NULL);
 
-	return (last_leaf);
-}
+	if (suffix != NULL)
+		*suffix = cp;
 
-static void
-khttpd_route_add_leaf(struct khttpd_route_node *node, const char *cp,
-    const char *end, struct khttpd_route *route)
-{
-	struct khttpd_route_node *parent;
-	int len;
-	unsigned char ch;
-
-	TRACE("enter %p %s %p", node, cp, route);
-
-	while (cp < end) {
-		if (end - cp + 1 <= sizeof(node->prefix)) {
-			bcopy(cp, node->prefix, end - cp + 1);
-			node->prefix_len = end - cp;
-			node->leaf = route;
-			return;
-		}
-
-		len = sizeof(node->prefix) - 1;
-		node->prefix_len = len;
-		bcopy(cp, node->prefix, len);
-		node->prefix[len] = '\0';
-		cp += len;
-
-		parent = node;
-		node = uma_zalloc(khttpd_route_node_zone, M_WAITOK);
-		node->parent = parent;
-		ch = cp[len];
-		KASSERT(32 <= ch, ("invalid character %#02x", ch));
-		parent->children[ch - 32] = node;
-		++parent->child_count;
-	}
+	return (parent);
 }
 
 static int
-khttpd_route_add(struct khttpd_route_node **rootp, char *path,
+khttpd_route_add(struct khttpd_route *root, char *path,
     khttpd_received_header_t received_header_fn)
 {
-	struct khttpd_route *route;
-	struct khttpd_route_node *newptr1, *newptr2, *ptr, **backptr;
-	const char *cp, *end;
-	int matchlen, prefixlen;
-	unsigned char ch;
+	struct khttpd_route key;
+	struct khttpd_route *next, *parent, *ptr, *prev, *route;
+	const char *lbegin, *lend;
+	size_t len;
 
-	TRACE("enter");
+	TRACE("enter %s", path);
 
 	route = uma_zalloc_arg(khttpd_route_zone, received_header_fn, M_WAITOK);
-	newptr1 = uma_zalloc(khttpd_route_node_zone, M_WAITOK);
-	cp = path;
-	end = path + strlen(path);
+	lbegin = route->path = path;
+	len = strlen(lbegin);
+	lend = lbegin + len;
+	route->label = lbegin;
+	route->label_len = len;
 
-	ptr = *rootp;
-	if (ptr == NULL) {
-		TRACE("empty");
-		*rootp = newptr1;
-		newptr1->parent = NULL;
-		khttpd_route_add_leaf(newptr1, cp, end, route);
-		return (0);
-	}
+	parent = root;
 
-	backptr = rootp;
 	for (;;) {
-		prefixlen = ptr->prefix_len;
-		matchlen = khttpd_find_first_discrepancy(ptr->prefix, cp);
-
-		if (matchlen < prefixlen ||
-		    (ch = (unsigned char)cp[prefixlen]) == '\0')
+		if (SPLAY_EMPTY(&parent->children_tree)) {
+			LIST_INSERT_HEAD(&parent->children_list,
+			    route, children_link);
 			break;
-
-		KASSERT(32 <= ch, ("invalid character %#02x", ch));
-
-		if (ptr->children[ch - 32] == NULL)
-			break;
-
-		cp += prefixlen;
-		backptr = &ptr->children[ch - 32];
-		ptr = *backptr;
-	}
-
-	if (matchlen == prefixlen) {
-		if (ch == '\0') {
-			if (ptr->leaf != NULL) {
-				TRACE("eexist");
-				khttpd_route_free(route);
-				uma_zfree(khttpd_route_node_zone, newptr1);
-				return (EEXIST);
-			}
-
-			ptr->leaf = route;
-			uma_zfree(khttpd_route_node_zone, newptr1);
-			return (0);
 		}
 
-		ptr->children[ch - 32] = newptr1;
-		newptr1->parent = ptr;
-		khttpd_route_add_leaf(newptr1, cp, end, route);
-		return (0);
+		len = lend - lbegin;
+		key.label = lbegin;
+		key.label_len = len;
+		ptr = SPLAY_FIND(khttpd_route_tree, &parent->children_tree, &key);
+		if (ptr == NULL) {
+			ptr = SPLAY_ROOT(&parent->children_tree);
+			if (0 < khttpd_route_compare(ptr, &key))
+				ptr = LIST_PREV(ptr, &parent->children_list,
+				    khttpd_route, children_link);
+
+			if (ptr == NULL ||
+			    strncmp(ptr->label, lbegin, ptr->label_len) != 0) {
+				if (ptr == NULL)
+					LIST_INSERT_HEAD(&parent->children_list,
+					    route, children_link);
+				else
+					LIST_INSERT_AFTER(ptr, route,
+					    children_link);
+
+				for (ptr = LIST_NEXT(route, children_link),
+					 prev = NULL;
+				     ptr != NULL &&
+					 strncmp(ptr->label, lbegin, len) == 0;
+				     prev = ptr, ptr = next) {
+					next = LIST_NEXT(ptr, children_link);
+
+					SPLAY_REMOVE(khttpd_route_tree,
+					    &parent->children_tree, next);
+					LIST_REMOVE(ptr, children_link);
+
+					ptr->parent = route;
+					ptr->label += len;
+					ptr->label_len -= len;
+
+					SPLAY_INSERT(khttpd_route_tree,
+					    &route->children_tree, ptr);
+					if (prev == NULL)
+						LIST_INSERT_AFTER(prev, ptr,
+						    children_link);
+					else
+						LIST_INSERT_HEAD
+						    (&route->children_list, ptr,
+							children_link);
+					prev = ptr;
+				}
+
+				break;
+			}
+		}
+
+		lbegin += len;
+
+		if (lbegin == lend) {
+			khttpd_route_free(route);
+			return (EEXIST);
+		}
+
+		parent = ptr;
 	}
 
-	if (0 < matchlen) {
-		bcopy(ptr->prefix, newptr1->prefix, matchlen);
-		bcopy(ptr->prefix + matchlen, ptr->prefix,
-		    prefixlen - matchlen);
-		ptr->prefix_len = prefixlen - matchlen;
-	}
-	newptr1->prefix[matchlen] = '\0';
-	newptr1->prefix_len = matchlen;
-
-	newptr1->parent = ptr->parent;
-	*backptr = newptr1;
-
-	ch = (unsigned char)ptr->prefix[0];
-	KASSERT(32 <= ch, ("invalid character %#02x", ch));
-	backptr = &newptr1->children[ch - 32];
-	*backptr = ptr;
-	ptr->parent = newptr1;
-
-	ch = (unsigned char)cp[matchlen];
-	if (ch == '\0') {
-		newptr1->child_count = 1;
-		newptr1->leaf = route;
-		return (0);
-	}
-
-	newptr1->child_count = 2;
-
-	newptr2 = uma_zalloc(khttpd_route_node_zone, M_WAITOK);
-	newptr2->parent = newptr1;
-
-	KASSERT(32 <= ch, ("invalid character %#02x", ch));
-	backptr = &newptr1->children[ch - 32];
-	*backptr = newptr2;
-
-	khttpd_route_add_leaf(newptr2, cp + matchlen, end, route);
+	route->parent = parent;
+	SPLAY_INSERT(khttpd_route_tree, &parent->children_tree, route);
 
 	return (0);
 }
 
-static int
-khttpd_route_remove(struct khttpd_route_node **rootp, const char *path)
+static void
+khttpd_route_remove(struct khttpd_route *route)
 {
-	struct khttpd_route_node *ptr, *tmpptr;
-	const char *cp;
-	int matchlen, prefixlen;
-	unsigned char ch;
+	struct khttpd_route *parent, *ptr;
+	size_t len;
 
-	TRACE("enter %s", path);
+	TRACE("enter %s", route->path);
 
-	cp = path;
-	ptr = *rootp;
-	while (ptr != NULL) {
-		prefixlen = ptr->prefix_len;
-		matchlen = khttpd_find_first_discrepancy(ptr->prefix, cp);
+	len = route->label_len;
+	parent = route->parent;
+	SPLAY_REMOVE(khttpd_route_tree, &parent->children_tree, route);
 
-		if (matchlen < prefixlen)
-			return (ENOENT);
+	SPLAY_INIT(&route->children_tree);
+	while ((ptr = LIST_FIRST(&route->children_list)) != NULL) {
+		LIST_REMOVE(ptr, children_link);
 
-		ch = (unsigned char)cp[matchlen];
+		ptr->parent = parent;
+		ptr->label -= len;
+		ptr->label_len += len;
 
-		if (ch == '\0') {
-			khttpd_route_free(ptr->leaf);
-			ptr->leaf = NULL;
-
-			while (ptr->child_count == 0 && ptr->leaf == NULL) {
-				ch = (unsigned char)ptr->prefix[0];
-
-				tmpptr = ptr;
-				ptr = ptr->parent;
-				uma_zfree(khttpd_route_node_zone, tmpptr);
-
-				if (ptr == NULL) {
-					*rootp = NULL;
-					break;
-				}
-
-				KASSERT(32 <= ch,
-				    ("invalid character %#02x", ch));
-				ptr->children[ch - 32] = NULL;
-				--ptr->child_count;
-			}
-
-			return (0);
-		}
-
-		KASSERT(32 <= ch, ("invalid character %#02x", ch));
-		ptr = ptr->children[ch - 32];
-		cp += prefixlen;
+		SPLAY_INSERT(khttpd_route_tree, &parent->children_tree, ptr);
+		LIST_INSERT_AFTER(route, ptr, children_link);
 	}
 
-	return (ENOENT);
+	LIST_REMOVE(route, children_link);
+
+	khttpd_route_free(route);
 }
 
 static void
-khttpd_route_clear_all(struct khttpd_route_node **rootp)
+khttpd_route_clear_all(struct khttpd_route *root)
 {
-	struct khttpd_route_node *ptr, *tmpptr, *child;
-	int i;
-	unsigned char ch;
+	struct khttpd_route *parent, *ptr;
 
 	TRACE("enter");
 
-	ptr = *rootp;
-	i = 0;
-	while (ptr != NULL) {
-		if (0 < ptr->child_count) {
-			for (; (child = ptr->children[i]) == NULL; ++i)
-				; 	/* nothing */
-
-			ptr->children[i] = NULL;
-			--ptr->child_count;
-			ptr = child;
-			i = 0;
-
-		} else {
-			if (ptr->leaf != NULL) {
-				khttpd_route_free(ptr->leaf);
-				ptr->leaf = NULL;
-			}
-
-			tmpptr = ptr;
-			ptr = ptr->parent;
-			if (ptr != NULL) {
-				ch = (unsigned char)tmpptr->prefix[0];
-				KASSERT(32 <= ch, 
-				    ("invalid character %#02x", ch));
-				i = ch - 32 + 1;
-			}
-
-			uma_zfree(khttpd_route_node_zone, tmpptr);
+	SPLAY_INIT(&root->children_tree);
+	parent = root;
+	for (;;) {
+		if ((ptr = LIST_FIRST(&parent->children_list)) != NULL) {
+			SPLAY_INIT(&ptr->children_tree);
+			LIST_REMOVE(ptr, children_link);
+			parent = ptr;
+			continue;
 		}
-	}				
+
+		ptr = parent;
+		parent = ptr->parent;
+		if (parent == NULL)
+			break;
+
+		khttpd_route_free(ptr);
+	}
 }
 
 /*
@@ -3520,7 +3428,7 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 	TRACE("enter %d", socket->fd);
 
 	len = snprintf(socket->xmit_line, sizeof(socket->xmit_line),
-	    "HTTP/%d.%d %d N/A\r\n",
+	    "HTTP/%d.%d %d n/a\r\n",
 	    response->version_major, response->version_minor, response->status);
 
 	socket->xmit_iov[0].iov_base = socket->xmit_line;
@@ -4054,7 +3962,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 
 	}
 
-	route = khttpd_route_find(khttpd_route_tree, request->target,
+	route = khttpd_route_find(&khttpd_route_root, request->target,
 	    &request->target_suffix);
 	if (route == NULL) {
 		TRACE("no route");
@@ -4069,7 +3977,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 	(*route->received_header)(socket, request);
 
 	if (STAILQ_EMPTY(&request->responses) && 
-	    request->version_major == 1 && request->version_minor == 1) {
+	    request->version_major == 1 && 1 <= request->version_minor) {
 		error = khttpd_header_is_continue_expected(request->header,
 		    &continue_expected);
 		if (error != 0) {
@@ -5172,17 +5080,6 @@ khttpd_main(void *arg)
 	    khttpd_route_ctor, khttpd_route_dtor, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
 
-	khttpd_route_node_zone = uma_zcreate("khttp-route-node",
-	    sizeof(struct khttpd_route_node),
-	    NULL, 
-#ifdef INVARIANTS
-	    khttpd_route_node_dtor,
-#else
-	    NULL,
-#endif
-	    NULL, NULL, UMA_ALIGN_PTR, 
-	    UMA_ZONE_ZINIT | UMA_ZONE_OFFPAGE | UMA_ZONE_VTOSLAB);
-
 	khttpd_socket_zone = uma_zcreate("khttpd-socket",
 	    sizeof(struct khttpd_socket),
 	    khttpd_socket_ctor, khttpd_socket_dtor, NULL, NULL,
@@ -5262,14 +5159,14 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 
-	error = khttpd_route_add(&khttpd_route_tree, "*",
+	error = khttpd_route_add(&khttpd_route_root, "*",
 	    khttpd_asterisc_received_header);
 	if (error != 0) {
 		printf("khttpd: failed to add route '*': %d\n", error);
 		goto cont;
 	}
 
-	error = khttpd_route_add(&khttpd_route_tree, KHTTPD_SYSCTL_PREFIX, 
+	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX, 
 	    khttpd_sysctl_received_header);
 	if (error != 0) {
 		printf("khttpd: failed to add route '"
@@ -5329,7 +5226,7 @@ cont:
 	if (khttpd_kqueue != -1)
 		kern_close(td, khttpd_kqueue);
 
-	khttpd_route_clear_all(&khttpd_route_tree);
+	khttpd_route_clear_all(&khttpd_route_root);
 
 	for (i = 0; i < KHTTPD_LOG_END; ++i)
 		if (khttpd_log_state[i].fd != -1) {
@@ -5342,7 +5239,6 @@ cont:
 	uma_zdestroy(khttpd_response_zone);
 	uma_zdestroy(khttpd_request_zone);
 	uma_zdestroy(khttpd_socket_zone);
-	uma_zdestroy(khttpd_route_node_zone);
 	uma_zdestroy(khttpd_route_zone);
 	uma_zdestroy(khttpd_json_zone);
 
