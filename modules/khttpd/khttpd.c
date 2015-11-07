@@ -244,10 +244,8 @@ struct khttpd_request {
 	char		*query;
 	uint64_t	content_length;
 	int		method;
-	int		transfer_codings_count;
 	char		version_major;
 	char		version_minor;
-	char		transfer_codings[KHTTPD_TRANSFER_CODING_COUNT];
 };
 
 struct khttpd_response {
@@ -2770,19 +2768,27 @@ khttpd_end_of_message_null(struct khttpd_socket *socket,
 }
 
 static int
-khttpd_request_ctor(void *mem, int size, void *arg, int flags)
+khttpd_request_init(void *mem, int size, int flags)
 {
 	struct khttpd_request *request;
 
 	request = (struct khttpd_request *)mem;
 	STAILQ_INIT(&request->responses);
+
+	return (0);
+}
+
+static int
+khttpd_request_ctor(void *mem, int size, void *arg, int flags)
+{
+	struct khttpd_request *request;
+
+	request = (struct khttpd_request *)mem;
 	request->dtor = khttpd_request_dtor_null;
 	request->received_body = khttpd_received_body_null;
 	request->end_of_message = khttpd_end_of_message_null;
-	bzero(request->data, sizeof(request->data));
 	request->header = uma_zalloc(khttpd_header_zone, M_WAITOK);
 	request->route = NULL;
-	request->transfer_codings_count = 0;
 	request->target = NULL;
 	request->query = NULL;
 
@@ -2803,15 +2809,13 @@ khttpd_request_dtor(void *mem, int size, void *arg)
 
 	request->dtor(request);
 
-	if ((route = request->route) != NULL) {
-		request->route = NULL;
+	route = request->route;
+	if (route != NULL)
 		khttpd_route_free(route);
-	}
-
-	uma_zfree(khttpd_header_zone, request->header);
 
 	free(request->target, M_KHTTPD);
 	free(request->query, M_KHTTPD);
+	uma_zfree(khttpd_header_zone, request->header);
 }
 
 /*
@@ -3985,6 +3989,8 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 {
 	struct khttpd_route *route;
 	int error;
+	int transfer_codings_count;
+	char transfer_codings[KHTTPD_TRANSFER_CODING_COUNT];
 	boolean_t chunked;
 	boolean_t content_length_specified;
 	boolean_t continue_expected;
@@ -4018,10 +4024,10 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 		return;
 	}
 
-	request->transfer_codings_count = sizeof request->transfer_codings /
-	    sizeof request->transfer_codings[0];
+	transfer_codings_count = sizeof transfer_codings /
+	    sizeof transfer_codings[0];
 	error = khttpd_header_get_transfer_encoding(request->header,
-	    request->transfer_codings, &request->transfer_codings_count);
+	    transfer_codings, &transfer_codings_count);
 	if (error != 0)
 		TRACE("error get_transfer_encoding %d", error);
 	switch (error) {
@@ -4031,19 +4037,17 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 		 * The server doesn't support transfer encodings other than
 		 * 'chunked'.
 		 */
-		if (2 <= request->transfer_codings_count ||
-		    (request->transfer_codings_count == 1 &&
-		     request->transfer_codings[0] !=
-			 KHTTPD_TRANSFER_CODING_CHUNKED)) {
+		if (2 <= transfer_codings_count ||
+		    (transfer_codings_count == 1 &&
+		     transfer_codings[0] != KHTTPD_TRANSFER_CODING_CHUNKED)) {
 			TRACE("error unsupported");
 			khttpd_send_not_implemented_response(socket, request,
 			    TRUE);
 			return;
 		}
 
-		chunked = 0 < request->transfer_codings_count &&
-		    request->transfer_codings[
-			request->transfer_codings_count - 1] ==
+		chunked = 0 < transfer_codings_count &&
+		    transfer_codings[transfer_codings_count - 1] ==
 		    KHTTPD_TRANSFER_CODING_CHUNKED;
 
 		content_length_specified = FALSE;
@@ -5227,29 +5231,29 @@ khttpd_main(void *arg)
 	    khttpd_route_ctor, khttpd_route_dtor, khttpd_route_init, NULL,
 	    UMA_ALIGN_PTR, 0);
 
-	khttpd_socket_zone = uma_zcreate("khttpd-socket",
-	    sizeof(struct khttpd_socket),
-	    khttpd_socket_ctor, khttpd_socket_dtor, NULL, NULL,
-	    UMA_ALIGN_PTR, 0);
-
-	khttpd_request_zone = uma_zcreate("khttpd-request",
-	    sizeof(struct khttpd_request),
-	    khttpd_request_ctor, khttpd_request_dtor, NULL, NULL,
-	    UMA_ALIGN_PTR, 0);
-
-	khttpd_response_zone = uma_zcreate("khttpd-response",
-	    sizeof(struct khttpd_response),
-	    khttpd_response_ctor, khttpd_response_dtor, NULL, NULL,
-	    UMA_ALIGN_PTR, 0);
+	khttpd_header_field_zone = uma_zcreate("khttpd-header-field",
+	    sizeof(struct khttpd_header_field),
+	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
 
 	khttpd_header_zone = uma_zcreate("khttpd-header",
 	    sizeof(struct khttpd_header),
 	    khttpd_header_ctor, khttpd_header_dtor, khttpd_header_init, NULL,
 	    UMA_ALIGN_PTR, UMA_ZONE_OFFPAGE | UMA_ZONE_VTOSLAB);
 
-	khttpd_header_field_zone = uma_zcreate("khttpd-header-field",
-	    sizeof(struct khttpd_header_field),
-	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
+	khttpd_response_zone = uma_zcreate("khttpd-response",
+	    sizeof(struct khttpd_response),
+	    khttpd_response_ctor, khttpd_response_dtor, NULL, NULL,
+	    UMA_ALIGN_PTR, 0);
+
+	khttpd_request_zone = uma_zcreate("khttpd-request",
+	    sizeof(struct khttpd_request),
+	    khttpd_request_ctor, khttpd_request_dtor, khttpd_request_init, NULL,
+	    UMA_ALIGN_PTR, 0);
+
+	khttpd_socket_zone = uma_zcreate("khttpd-socket",
+	    sizeof(struct khttpd_socket),
+	    khttpd_socket_ctor, khttpd_socket_dtor, NULL, NULL,
+	    UMA_ALIGN_PTR, 0);
 
 	khttpd_kqueue = -1;
 
@@ -5381,11 +5385,11 @@ cont:
 			khttpd_log_state[i].fd = -1;
 		}
 
-	uma_zdestroy(khttpd_header_field_zone);
-	uma_zdestroy(khttpd_header_zone);
-	uma_zdestroy(khttpd_response_zone);
-	uma_zdestroy(khttpd_request_zone);
 	uma_zdestroy(khttpd_socket_zone);
+	uma_zdestroy(khttpd_request_zone);
+	uma_zdestroy(khttpd_response_zone);
+	uma_zdestroy(khttpd_header_zone);
+	uma_zdestroy(khttpd_header_field_zone);
 	uma_zdestroy(khttpd_route_zone);
 	uma_zdestroy(khttpd_json_zone);
 
