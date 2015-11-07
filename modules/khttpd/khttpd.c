@@ -5072,13 +5072,13 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 	writeable = FALSE;
 
 	suffix = request->target_suffix;
-	if (*suffix == '\0' || *suffix == '?')
-		/* the target is "/sys/sysctl/" */
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
+		/* target is "/sys/sysctl/" */
 		writeable = FALSE;
 
 	else {
 		/* the target is "/sys/sysctl/<oid>" */
-		oidlen = khttpd_sysctl_parse_oid(suffix, oid + 2);
+		oidlen = khttpd_sysctl_parse_oid(suffix + 1, oid + 2);
 		if (oidlen == -1) {
 			khttpd_send_not_found_response(socket, request, FALSE);
 			return;
