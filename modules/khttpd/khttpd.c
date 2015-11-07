@@ -2025,17 +2025,26 @@ khttpd_route_dtor_null(struct khttpd_route *route)
 }
 
 static int
-khttpd_route_ctor(void *mem, int size, void *arg, int flags)
+khttpd_route_init(void *mem, int size, int flags)
 {
 	struct khttpd_route *route;
 
 	route = (struct khttpd_route *)mem;
 	LIST_INIT(&route->children_list);
 	SPLAY_INIT(&route->children_tree);
+
+	return (0);
+}
+
+static int
+khttpd_route_ctor(void *mem, int size, void *arg, int flags)
+{
+	struct khttpd_route *route;
+
+	route = (struct khttpd_route *)mem;
 	route->dtor = khttpd_route_dtor_null;
 	route->received_header = (khttpd_received_header_t)arg;
 	route->refcount = 1;
-	bzero(route->data, sizeof(route->data));
 
 	return (0);
 }
@@ -5215,7 +5224,7 @@ khttpd_main(void *arg)
 
 	khttpd_route_zone = uma_zcreate("khttp-route",
 	    sizeof(struct khttpd_route),
-	    khttpd_route_ctor, khttpd_route_dtor, NULL, NULL,
+	    khttpd_route_ctor, khttpd_route_dtor, khttpd_route_init, NULL,
 	    UMA_ALIGN_PTR, 0);
 
 	khttpd_socket_zone = uma_zcreate("khttpd-socket",
