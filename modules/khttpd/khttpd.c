@@ -80,7 +80,7 @@
 #endif
 
 #ifndef KHTTPD_SYSCTL_PREFIX
-#define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "sysctl/"
+#define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "sysctl"
 #endif
 
 #ifndef KHTTPD_JSON_EMBEDDED_DATA_SIZE
@@ -271,7 +271,7 @@ struct khttpd_route {
 	khttpd_received_header_t	received_header;
 	struct khttpd_route		*parent;
 	const char	*label;
-	char		*path;
+	const char	*path;
 	void		*data[2];
 	u_int		refcount;
 	int		label_len;
@@ -2022,7 +2022,8 @@ khttpd_route_find(struct khttpd_route *root,
 			    khttpd_route, children_link);
 
 		if (ptr == NULL ||
-		    strncmp(ptr->label, cp, ptr->label_len) != 0)
+		    strncmp(ptr->label, cp, ptr->label_len) != 0 ||
+		    (cp + ptr->label_len < end && cp[ptr->label_len] != '/'))
 			break;
 
 		parent = ptr;
@@ -2076,7 +2077,9 @@ khttpd_route_add(struct khttpd_route *root, char *path,
 				    khttpd_route, children_link);
 
 			if (ptr == NULL ||
-			    strncmp(ptr->label, lbegin, ptr->label_len) != 0) {
+			    strncmp(ptr->label, lbegin, ptr->label_len) != 0 ||
+			    (lbegin + ptr->label_len < lend &&
+				lbegin[ptr->label_len] != '/')) {
 				if (ptr == NULL)
 					LIST_INSERT_HEAD(&parent->children_list,
 					    route, children_link);
@@ -4592,7 +4595,7 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 
 	TRACE("enter %s", request->target_suffix);
 
-	name = request->target_suffix;
+	name = request->target_suffix + 1;
 	oidlen = khttpd_sysctl_parse_oid(name, oid);
 	if (oidlen == -1) {
 		TRACE("error parse_oid");
@@ -4632,7 +4635,7 @@ khttpd_sysctl_get_or_head(struct khttpd_socket *socket,
 	TRACE("enter %d %s", socket->fd, request->target_suffix);
 
 	suffix = request->target_suffix;
-	if (*suffix == '\0' || *suffix == '?')
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
 		khttpd_sysctl_get_or_head_index(socket, request);
 	else
 		khttpd_sysctl_get_or_head_leaf(socket, request);
@@ -4668,7 +4671,7 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	TRACE("enter %s", request->target_suffix);
 
-	name = request->target_suffix;
+	name = request->target_suffix + 1;
 	td = curthread;
 	auxdata = (struct khttpd_sysctl_put_leaf_request *)request->data[0];
 	kind = auxdata->kind;
@@ -4851,7 +4854,7 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	request->data[0] = auxdata =
 	    malloc(sizeof(*auxdata), M_KHTTPD, M_WAITOK);
 
-	auxdata->oidlen = khttpd_sysctl_parse_oid(request->target_suffix,
+	auxdata->oidlen = khttpd_sysctl_parse_oid(request->target_suffix + 1,
 	    auxdata->oid);
 	if (auxdata->oidlen == -1) {
 		TRACE("error parse_oid");
@@ -4924,7 +4927,7 @@ khttpd_sysctl_put(struct khttpd_socket *socket,
 	TRACE("enter");
 
 	suffix = request->target_suffix;
-	if (*suffix == '\0' || *suffix == '?')
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
 		khttpd_send_method_not_allowed_response(socket, request, FALSE,
 		    "OPTIONS, HEAD, GET");
 	else
