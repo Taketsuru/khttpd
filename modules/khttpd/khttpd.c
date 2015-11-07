@@ -65,6 +65,10 @@
 #define KHTTPD_LINE_MAX 4096
 #endif
 
+#ifndef KHTTPD_METHOD_HASH_SIZE
+#define KHTTPD_METHOD_HASH_SIZE	64
+#endif
+
 #ifndef KHTTPD_HEADER_HASH_SIZE
 #define KHTTPD_HEADER_HASH_SIZE 8
 #endif
@@ -75,12 +79,12 @@
 	(8192 - (sizeof(void *) * (KHTTPD_HEADER_HASH_SIZE * 2 + 2)))
 #endif
 
-#ifndef KHTTPD_PREFIX
-#define KHTTPD_PREFIX "/sys/"
+#ifndef KHTTPD_SYS_PREFIX
+#define KHTTPD_SYS_PREFIX "/sys"
 #endif
 
 #ifndef KHTTPD_SYSCTL_PREFIX
-#define KHTTPD_SYSCTL_PREFIX KHTTPD_PREFIX "sysctl"
+#define KHTTPD_SYSCTL_PREFIX KHTTPD_SYS_PREFIX "/sysctl"
 #endif
 
 #ifndef KHTTPD_JSON_EMBEDDED_DATA_SIZE
@@ -208,7 +212,7 @@ struct khttpd_socket {
 	unsigned	recv_chunked:1;
 	char		recv_skip;
 	char		recv_buf[KHTTPD_LINE_MAX + 1];
-	char		recv_line[KHTTPD_LINE_MAX];
+	char		recv_line[KHTTPD_LINE_MAX + 1];
 	char		xmit_line[KHTTPD_LINE_MAX];
 };
 
@@ -235,14 +239,15 @@ struct khttpd_request {
 	struct khttpd_header	*header;
 	struct khttpd_route	*route;
 	void		*data[2];
-	const char	*target;
+	char		*target;
 	const char	*target_suffix;
+	char		*query;
 	uint64_t	content_length;
+	int		method;
 	int		transfer_codings_count;
 	char		version_major;
 	char		version_minor;
 	char		transfer_codings[KHTTPD_TRANSFER_CODING_COUNT];
-	char		request_line[KHTTPD_LINE_MAX + 1];
 };
 
 struct khttpd_response {
@@ -381,6 +386,55 @@ static const u_int khttpd_log_conf_valid_masks[] = {
 	0,			/* KHTTPD_LOG_ERROR */
 	0,			/* KHTTPD_LOG_ACCESS */
 };
+
+static struct khttpd_method {
+	const char	name[24];
+	SLIST_ENTRY(khttpd_method) link;
+} khttpd_methods[] = {
+	{ "ACL" },
+	{ "BASELINE-CONTROL" },
+	{ "BIND" },
+	{ "CHECKIN" },
+	{ "CHECKOUT" },
+	{ "CONNECT" },
+	{ "COPY" },
+	{ "DELETE" },
+	{ "GET" },
+	{ "HEAD" },
+	{ "LABEL" },
+	{ "LINK" },
+	{ "LOCK" },
+	{ "MERGE" },
+	{ "MKACTIVITY" },
+	{ "MKCALENDAR" },
+	{ "MKCOL" },
+	{ "MKREDIRECTREF" },
+	{ "MKWORKSPACE" },
+	{ "MOVE" },
+	{ "OPTIONS" },
+	{ "ORDERPATCH" },
+	{ "PATCH" },
+	{ "POST" },
+	{ "PRI" },
+	{ "PROPFIND" },
+	{ "PROPPATCH" },
+	{ "PUT" },
+	{ "REBIND" },
+	{ "REPORT" },
+	{ "SEARCH" },
+	{ "TRACE" },
+	{ "UNBIND" },
+	{ "UNCHECKOUT" },
+	{ "UNLINK" },
+	{ "UNLOCK" },
+	{ "UPDATE" },
+	{ "UPDATEREDIRECTREF" },
+	{ "VERSION-CONTROL" },
+};
+
+SLIST_HEAD(khttpd_method_list, khttpd_method);
+static struct khttpd_method_list
+    khttpd_method_hash_table[KHTTPD_METHOD_HASH_SIZE];
 
 static struct mtx khttpd_lock;
 static struct cdev *khttpd_dev;
@@ -543,12 +597,13 @@ void khttpd_log(int type, const char *fmt, ...)
  */
 
 static char *
-khttpd_find_ch(const char *begin, const char ch)
+khttpd_find_ch(const char *begin, const char search)
 {
 	const char *ptr;
+	char ch;
 
-	for (ptr = begin; ; ++ptr)
-		if (*ptr == ch)
+	for (ptr = begin; (ch = *ptr) != '\0'; ++ptr)
+		if (ch == search)
 			return ((char *)ptr);
 
 	return (NULL);
@@ -727,6 +782,42 @@ khttpd_hash32_str_ci(const char *str)
 		hash = HASHSTEP(hash, tolower(ch));
 
 	return (hash);
+}
+
+/*
+ * method name lookup
+ */
+
+static void
+khttpd_method_init(void)
+{
+	uint32_t h;
+	int i, n;
+
+	for (i = 0; i < KHTTPD_METHOD_HASH_SIZE; ++i)
+		SLIST_INIT(&khttpd_method_hash_table[i]);
+
+	n = sizeof(khttpd_methods) / sizeof(khttpd_methods[0]);
+	for (i = 0; i < n; ++i) {
+		h = hash32_str(khttpd_methods[i].name, 0) %
+		    KHTTPD_METHOD_HASH_SIZE;
+		SLIST_INSERT_HEAD(&khttpd_method_hash_table[h],
+		    &khttpd_methods[i], link);
+	}
+}
+
+static int
+khttpd_method_find(const char *begin, const char *end)
+{
+	struct khttpd_method *ptr;
+
+	uint32_t h = hash32_buf(begin, end - begin, 0) % KHTTPD_METHOD_HASH_SIZE;
+	SLIST_FOREACH(ptr, &khttpd_method_hash_table[h], link) {
+		if (strncmp(begin, ptr->name, end - begin) == 0)
+			return (ptr - khttpd_methods);
+	}
+
+	return (-1);
 }
 
 /*
@@ -2673,6 +2764,8 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	request->header = uma_zalloc(khttpd_header_zone, M_WAITOK);
 	request->route = NULL;
 	request->transfer_codings_count = 0;
+	request->target = NULL;
+	request->query = NULL;
 
 	return (0);
 }
@@ -2697,6 +2790,9 @@ khttpd_request_dtor(void *mem, int size, void *arg)
 	}
 
 	uma_zfree(khttpd_header_zone, request->header);
+
+	free(request->target, M_KHTTPD);
+	free(request->query, M_KHTTPD);
 }
 
 /*
@@ -3141,7 +3237,7 @@ khttpd_send_response(struct khttpd_socket *socket,
 	if (response->status / 100 == 1 ||
 	    response->status == 204 ||
 	    response->status == 304 ||
-	    strcmp(request->request_line, "HEAD") == 0) {
+	    request->method == KHTTPD_METHOD_HEAD) {
 		response->content_length = 0;
 		response->chunked = FALSE;
 		goto body_fixed;
@@ -4079,7 +4175,7 @@ khttpd_receive_request_line(struct kevent *event)
 {
 	struct khttpd_request *request;
 	struct khttpd_socket *socket;
-	char *sep, *target, *target_end, *version;
+	char *query, *query_end, *sep, *target, *target_end, *version;
 	int error;
 
 	TRACE("enter %td", event->ident);
@@ -4090,7 +4186,7 @@ khttpd_receive_request_line(struct kevent *event)
 
 	request = uma_zalloc_arg(khttpd_request_zone, event->udata, M_WAITOK);
 
-	error = khttpd_socket_readline(socket, request->request_line);
+	error = khttpd_socket_readline(socket, socket->recv_line);
 	if (error != 0)
 		TRACE("error readline %d", error);
 	if (error == EWOULDBLOCK)
@@ -4098,27 +4194,50 @@ khttpd_receive_request_line(struct kevent *event)
 	if (error != 0)
 		goto reject;
 
-	sep = (char *)khttpd_find_ch(request->request_line, ' ');
-	if (sep == NULL || sep == request->request_line) {
+	sep = khttpd_find_ch(socket->recv_line, ' ');
+	if (sep == NULL || sep == socket->recv_line) {
 		TRACE("error method-separator");
 		goto reject;
 	}
-	*sep = '\0';
+	request->method = khttpd_method_find(socket->recv_line, sep);
+	TRACE("method %d", request->method);
 
-	request->target = target = sep + 1;
-	sep = (char *)khttpd_find_ch(target, ' ');
+	target = sep + 1;
+	sep = khttpd_find_ch(target, ' ');
 	if (sep == NULL || sep == target) {
 		TRACE("error request-target-separator");
 		goto reject;
 	}
-	target_end = khttpd_unquote_uri((char *)target, sep);
-	if (target_end == NULL) {
-		TRACE("error unquote_uri");
-		goto reject;
-	}
-	*target_end = '\0';
 
 	version = sep + 1;
+
+	query = khttpd_find_ch(target, '?');
+	if (query == NULL) {
+		target_end = sep;
+
+	} else  {
+		target_end = query++;
+		query_end = khttpd_unquote_uri(query, sep);
+		if (query_end == NULL) {
+			TRACE("error unquote_uri1");
+			goto reject;
+		}
+
+		request->query =
+		    malloc(query_end - query + 1, M_KHTTPD, M_WAITOK);
+		bcopy(query, request->query, query_end - query);
+		request->query[query_end - query] = '\0';
+	}
+
+	target_end = khttpd_unquote_uri(target, target_end);
+	if (target_end == NULL) {
+		TRACE("error unquote_uri2");
+		goto reject;
+	}
+
+	request->target = malloc(target_end - target + 1, M_KHTTPD, M_WAITOK);
+	bcopy(target, request->target, target_end - target);
+	request->target[target_end - target] = '\0';
 
 	if (strlen(version) != 8 ||
 	    strncmp(version, "HTTP/", 5) != 0 ||
@@ -4998,23 +5117,24 @@ khttpd_sysctl_received_header(struct khttpd_socket *socket,
 {
 	TRACE("enter %d", socket->fd);
 
-	if (strcmp(request->request_line, "GET") == 0 ||
-	    strcmp(request->request_line, "HEAD") == 0) {
+	switch (request->method) {
+
+	case KHTTPD_METHOD_GET:
+	case KHTTPD_METHOD_HEAD:
 		khttpd_sysctl_get_or_head(socket, request);
-		return;
-	}
+		break;
 
-	if (strcmp(request->request_line, "PUT") == 0) {
+	case KHTTPD_METHOD_PUT:
 		khttpd_sysctl_put(socket, request);
-		return;
-	}
+		break;
 
-	if (strcmp(request->request_line, "OPTIONS") == 0) {
+	case KHTTPD_METHOD_OPTIONS:
 		khttpd_sysctl_options(socket, request);
-		return;
-	}
+		break;
 
-	khttpd_send_not_implemented_response(socket, request, FALSE);
+	default:
+		khttpd_send_not_implemented_response(socket, request, FALSE);
+	}
 }
 
 /* ----------------------------------------------------------------- asterisc */
@@ -5025,13 +5145,16 @@ khttpd_asterisc_received_header(struct khttpd_socket *socket,
 {
 	TRACE("enter %d", socket->fd);
 
-	if (strcmp(request->request_line, "OPTIONS") != 0) {
-		khttpd_send_not_implemented_response(socket, request, FALSE);
-		return;
-	}
+	switch (request->method) {
 
-	khttpd_send_options_response(socket, request, NULL,
-	    "OPTIONS, HEAD, GET, PUT, POST, DELETE");
+	case KHTTPD_METHOD_OPTIONS:
+		khttpd_send_not_implemented_response(socket, request, FALSE);
+		break;
+
+	default:
+		khttpd_send_options_response(socket, request, NULL,
+		    "OPTIONS, HEAD, GET, PUT, POST, DELETE");
+	}
 }
 
 /* ------------------------------------------------------------ khttpd daemon */
@@ -5073,6 +5196,8 @@ khttpd_main(void *arg)
 	STAILQ_INIT(&worklist);
 	td = curthread;
 	error = 0;
+
+	khttpd_method_init();
 
 	khttpd_json_zone = uma_zcreate("khttp-json",
 	    sizeof(struct khttpd_json),
