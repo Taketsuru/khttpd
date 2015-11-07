@@ -2285,7 +2285,7 @@ khttpd_route_clear_all(struct khttpd_route *root)
  */
 
 static int
-khttpd_header_ctor(void *mem, int size, void *arg, int flags)
+khttpd_header_init(void *mem, int size, int flags)
 {
 	struct khttpd_header *header;
 	int i;
@@ -2293,6 +2293,16 @@ khttpd_header_ctor(void *mem, int size, void *arg, int flags)
 	header = (struct khttpd_header *)mem;
 	for (i = 0; i < KHTTPD_HEADER_HASH_SIZE; ++i)
 		STAILQ_INIT(&header->index[i]);
+
+	return (0);
+}
+
+static int
+khttpd_header_ctor(void *mem, int size, void *arg, int flags)
+{
+	struct khttpd_header *header;
+
+	header = (struct khttpd_header *)mem;
 	header->end = header->buffer;
 	header->trailer_begin = header->buffer + sizeof(header->buffer);
 
@@ -5225,7 +5235,7 @@ khttpd_main(void *arg)
 
 	khttpd_header_zone = uma_zcreate("khttpd-header",
 	    sizeof(struct khttpd_header),
-	    khttpd_header_ctor, khttpd_header_dtor, NULL, NULL,
+	    khttpd_header_ctor, khttpd_header_dtor, khttpd_header_init, NULL,
 	    UMA_ALIGN_PTR, UMA_ZONE_OFFPAGE | UMA_ZONE_VTOSLAB);
 
 	khttpd_header_field_zone = uma_zcreate("khttpd-header-field",
