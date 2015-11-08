@@ -244,7 +244,6 @@ struct khttpd_request {
 	char		*query;
 	uint64_t	content_length;
 	int		method;
-	char		version_major;
 	char		version_minor;
 };
 
@@ -257,7 +256,6 @@ struct khttpd_response {
 	void		*data[2];
 	unsigned	chunked:1;
 	short		status;
-	char		version_major;
 	char		version_minor;
 };
 
@@ -2838,7 +2836,6 @@ khttpd_response_ctor(void *mem, int size, void *arg, int flags)
 	response->header = uma_zalloc(khttpd_header_zone, M_WAITOK);
 	bzero(response->data, sizeof(response->data));
 	response->status = -1;
-	response->version_major = 1;
 	response->version_minor = 1;
 	return (0);
 }
@@ -3550,8 +3547,8 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 	TRACE("enter %d", socket->fd);
 
 	len = snprintf(socket->xmit_line, sizeof(socket->xmit_line),
-	    "HTTP/%d.%d %d n/a\r\n",
-	    response->version_major, response->version_minor, response->status);
+	    "HTTP/1.%d %d n/a\r\n",
+	    response->version_minor, response->status);
 
 	socket->xmit_iov[0].iov_base = socket->xmit_line;
 	socket->xmit_iov[0].iov_len = len;
@@ -4098,8 +4095,7 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 
 	(*route->received_header)(socket, request);
 
-	if (STAILQ_EMPTY(&request->responses) && 
-	    request->version_major == 1 && 1 <= request->version_minor) {
+	if (STAILQ_EMPTY(&request->responses) && 1 <= request->version_minor) {
 		error = khttpd_header_is_continue_expected(request->header,
 		    &continue_expected);
 		if (error != 0) {
@@ -4262,13 +4258,11 @@ khttpd_receive_request_line(struct kevent *event)
 	bcopy(target, request->target, target_end - target);
 	request->target[target_end - target] = '\0';
 
-	if (strlen(version) != 8 ||
-	    strncmp(version, "HTTP/", 5) != 0 ||
-	    !isdigit(version[5]) || version[6] != '.' || !isdigit(version[7])) {
+	if (strlen(version) != 8 || strncmp(version, "HTTP/1.", 7) != 0 ||
+	    !isdigit(version[7])) {
 		TRACE("error HTTP-version %zd %s", strlen(version), version);
 		goto reject;
 	}
-	request->version_major = version[5] - '0';
 	request->version_minor = version[7] - '0';
 
 	socket->receive = khttpd_receive_header_or_trailer;
