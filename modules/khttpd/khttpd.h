@@ -31,13 +31,6 @@
 #include <sys/ioccom.h>
 #include <sys/socket.h>
 
-struct khttpd_address_info {
-	struct sockaddr_storage ai_addr;
-	int ai_family;
-	int ai_socktype;
-	int ai_protocol;
-};
-
 enum {
 	KHTTPD_LOG_DEBUG,
 	KHTTPD_LOG_ERROR,
@@ -98,7 +91,14 @@ enum {
 	KHTTPD_METHOD_VERSION_CONTROL
 };
 
-struct file;
+struct filedescent;
+
+struct khttpd_address_info {
+	struct sockaddr_storage ai_addr;
+	int ai_family;
+	int ai_socktype;
+	int ai_protocol;
+};
 
 struct khttpd_log_conf {
 	int	type;
@@ -109,12 +109,22 @@ struct khttpd_log_conf {
 	};
 };
 
+struct khttpd_mount_args {
+	char	*prefix;
+	union {
+		int			dirfd;
+		struct filedescent	*fde;
+	};
+};
+
 #define KHTTPD_IOC 'h'
 
 #define KHTTPD_IOC_CONFIGURE_LOG			\
 	_IOW(KHTTPD_IOC, 0, struct khttpd_log_conf)
 #define KHTTPD_IOC_ADD_PORT				\
 	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
+#define KHTTPD_IOC_MOUNT				\
+	_IOW(KHTTPD_IOC, 2, struct khttpd_mount_args)
 
 #define KHTTPD_LOG_DEBUG_MESSAGE	0x00000001
 #define KHTTPD_LOG_DEBUG_TRACE		0x00000002

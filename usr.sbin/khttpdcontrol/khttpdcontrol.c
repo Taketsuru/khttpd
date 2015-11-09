@@ -46,6 +46,7 @@ int main(int argc, char **argv)
 	struct addrinfo ai_hint, *ai_list, *ai_ptr;
 	struct khttpd_log_conf log_conf;
 	struct khttpd_address_info kai;
+	struct khttpd_mount_args mount_args;
 	int fd, gai_error;
 
 	fd = open("/dev/khttpd", O_RDWR);
@@ -60,6 +61,14 @@ int main(int argc, char **argv)
 	if (ioctl(fd, KHTTPD_IOC_CONFIGURE_LOG, &log_conf) == -1)
 		err(EX_UNAVAILABLE, "failed to configure debug log");
 #endif
+
+	mount_args.prefix = "/sys/ui";
+	mount_args.dirfd = open("sysui", O_EXEC | O_DIRECTORY);
+	if (mount_args.dirfd == -1)
+		err(EX_NOINPUT, "failed to open /sys/ui root directory.");
+	if (ioctl(fd, KHTTPD_IOC_MOUNT, &mount_args) == -1)
+		err(EX_UNAVAILABLE, "failed to mount /sys/ui.");
+
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;
 	ai_hint.ai_family = PF_UNSPEC;

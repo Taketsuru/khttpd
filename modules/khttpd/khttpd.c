@@ -38,6 +38,8 @@
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/fcntl.h>
+#include <sys/stat.h>
+#include <sys/capsicum.h>
 #include <sys/conf.h>
 #include <sys/ioccom.h>
 #include <sys/socket.h>
@@ -48,11 +50,11 @@
 #include <sys/syscallsubr.h>
 #include <sys/sysctl.h>
 
+#include <machine/stdarg.h>
+
 #include <vm/uma.h>
 
 #include <netinet/in.h>
-
-#include <machine/stdarg.h>
 
 #include "khttpd.h"
 
@@ -302,6 +304,18 @@ struct khttpd_sysctl_put_leaf_request {
 struct khttpd_log_state {
 	u_int	mask;
 	int	fd;
+};
+
+struct khttpd_mount_route_data {
+	int	dirfd;
+};
+
+struct khttpd_mount_request_data {
+	off_t	xmit_offset;
+	off_t	xmit_residual;
+	size_t	pathsize;
+	int	fd;
+	char	path[];
 };
 
 /* ---------------------------------------------------- prototype declrations */
@@ -778,6 +792,92 @@ khttpd_hash32_str_ci(const char *str)
 		hash = HASHSTEP(hash, tolower(ch));
 
 	return (hash);
+}
+
+static int
+khttpd_path_normalize(const char *path, char *buf, size_t bufsize)
+{
+	const char *src, *segend;
+	char *dst, *dstend;
+
+	src = path;
+	dst = buf;
+	dstend = dst + bufsize;
+
+	for (;;) {
+
+		/* consecutive slashes are replaced with a slash */
+		if (*src == '/') {
+			while (*++src == '/')
+				; /* nothing */
+
+			if (dstend <= dst)
+				return (ENOMEM);
+			*dst++ = '/';
+		}
+
+again:
+		if (*src == '\0')
+			break;
+
+		if (src[0] == '.' && src[1] == '\0') {
+			if (buf < dst)
+				--dst;
+			break;
+		}
+
+		if (src[0] == '.' && src[1] == '/') {
+			src += 2;
+			while (*src == '/')
+				++src;
+			if (*src == '\0')
+				break;
+		}
+
+		segend = khttpd_find_ch(src, '/');
+		if (segend == NULL)
+			segend = src + strlen(src);
+
+		if (segend - src == 2 && 
+		    src[0] == '.' && src[1] == '.') {
+			if (dst <= buf)
+				return (EINVAL);
+			--dst;
+			while (dst < buf && dst[-1] != '/')
+				--dst;
+
+			if (src[2] == '\0') {
+				if (dst <= buf)
+					return (EINVAL);
+				--dst;
+				break;
+			}
+
+			for (src = segend + 1; *src == '/'; ++src)
+				; /* nothing */
+			goto again;
+		}
+
+		if (dstend - dst < segend - src + 1)
+			return (ENOMEM);
+
+		bcopy(src, dst, segend - src);
+		dst += segend - src;
+
+		src = segend;
+	}
+
+	if (buf == dst) {
+		if (dstend <= dst)
+			return (ENOMEM);
+		*dst++ = '.';
+	}
+
+	if (dstend <= dst)
+		return (ENOMEM);
+	*dst = '\0';
+
+	return (0);
 }
 
 /*
@@ -5606,6 +5706,310 @@ out:
 }
 
 static int
+khttpd_mount_transmit_body(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response)
+{
+	cap_rights_t rights;
+	struct khttpd_mount_request_data *data;
+	struct file *fp;
+	struct thread *td;
+	off_t sent;
+	int error;
+
+	td = curthread;
+	data = (struct khttpd_mount_request_data *)request->data[0];
+
+	TRACE("enter %d %s", socket->fd, data->path);
+
+	error = fget_read(td, data->fd, cap_rights_init(&rights, CAP_PREAD),
+	    &fp);
+	if (error != 0) {
+		TRACE("error fget_read %d", error);
+		return (error);
+	}
+
+	error = fo_sendfile(fp, socket->fd, NULL, NULL, data->xmit_offset,
+	    data->xmit_residual, NULL, 0, 0, td);
+	if (error != 0)
+		TRACE("error sendfile %d", error);
+
+	fdrop(fp, td);
+
+	if (error == 0) {
+		TRACE("sent=%d, residual=%zd, offset=%zd",
+		    sent, data->xmit_residual, data->xmit_offset);
+		if ((data->xmit_residual -= sent) == 0)
+			socket->transmit = khttpd_transmit_end;
+		else {
+			data->xmit_offset += sent;
+			error = EWOULDBLOCK;
+		}
+	}
+
+	return (error);
+}
+
+static struct khttpd_mount_request_data *
+khttpd_mount_request_data_alloc(const char *path)
+{
+	struct khttpd_mount_request_data *data;
+	size_t pathsize;
+
+	pathsize = strlen(path) + 1;
+	data = malloc(sizeof(*data) + pathsize, M_KHTTPD, M_WAITOK);
+	data->pathsize = pathsize;
+	data->fd = -1;
+
+	return (data);
+}
+
+static void
+khttpd_mount_request_data_free(struct khttpd_mount_request_data *data)
+{
+	struct thread *td;
+
+	td = curthread;
+	if (data->fd != -1)
+		kern_close(td, data->fd);
+	free(data, M_KHTTPD);
+}
+
+static void
+khttpd_mount_request_dtor(struct khttpd_request *request)
+{
+	khttpd_mount_request_data_free((struct khttpd_mount_request_data *)
+	    request->data[0]);
+}
+
+static void
+khttpd_mount_get_or_head(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct stat statbuf;
+	struct khttpd_mount_request_data *data;
+	struct khttpd_mount_route_data *route_data;
+	struct khttpd_response *response;
+	struct khttpd_route *route;
+	struct thread *td;
+	int error, fd;
+
+	TRACE("enter %d %s", socket->fd, request->target_suffix);
+
+	td = curthread;
+	route = request->route;
+	route_data = (struct khttpd_mount_route_data *)route->data[0];
+	data = khttpd_mount_request_data_alloc(request->target_suffix);
+
+	error = khttpd_path_normalize(request->target_suffix,
+	    data->path, data->pathsize);
+	if (error != 0) {
+		TRACE("error normalize %d", error);
+		khttpd_send_not_found_response(socket, request, FALSE);
+		return;
+	}
+
+	TRACE("path %s", data->path);
+	request->data[0] = data;
+	request->dtor = khttpd_mount_request_dtor;
+
+	error = kern_openat(td, route_data->dirfd,
+	    data->path[0] == '/' ? data->path + 1 : data->path,
+	    UIO_SYSSPACE, O_RDONLY, 0);
+	if (error != 0)
+		TRACE("error open %d", error);
+	switch (error) {
+
+	case 0:
+		data->fd = fd = td->td_retval[0];
+		break;
+
+	case ENAMETOOLONG:
+	case ENOENT:
+		khttpd_send_not_found_response(socket, request, FALSE);
+		return;
+
+	case EACCES:
+	case EPERM:
+		khttpd_send_conflict_response(socket, request, FALSE);
+		return;
+
+	default:
+		khttpd_send_internal_error_response(socket, request);
+		return;
+	}
+
+	error = kern_fstat(td, fd, &statbuf);
+	if (error != 0) {
+		TRACE("error fstat %d", error);
+		khttpd_send_internal_error_response(socket, request);
+		return;
+	}
+
+	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
+	response->status = 200;
+	response->transmit_body = khttpd_mount_transmit_body;
+	data->xmit_offset = 0;
+	data->xmit_residual = statbuf.st_size;
+	khttpd_header_add_content_length(response->header, statbuf.st_size);
+	khttpd_header_add(response->header,
+	    "Content-Type: application/octet-stream");
+	khttpd_send_response(socket, request, response);
+}
+
+static void
+khttpd_mount_received_header(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	TRACE("enter %s", request->target);
+
+	switch (request->method) {
+
+	case KHTTPD_METHOD_GET:
+	case KHTTPD_METHOD_HEAD:
+		khttpd_mount_get_or_head(socket, request);
+		break;
+
+	default:
+		khttpd_send_not_implemented_response(socket, request, FALSE);
+	}
+}
+
+static void
+khttpd_mount_route_dtor(struct khttpd_route *route)
+{
+	struct khttpd_mount_route_data *route_data;
+	struct thread *td;
+
+	route_data = (struct khttpd_mount_route_data *)route->data[0];
+	td = curthread;
+
+	TRACE("enter %s %d", route->path, route_data->dirfd);
+
+	kern_close(td, route_data->dirfd);
+	free(route_data, M_KHTTPD);
+	free((char *)route->path, M_KHTTPD);
+	route->path = NULL;
+}
+
+static int
+khttpd_mount_proc(void *data)
+{
+	struct stat statbuf;
+	struct khttpd_mount_args *args;
+	struct filedescent *dstfde, *srcfde;
+	struct filedesc *fdp;
+	struct khttpd_route *route;
+	struct khttpd_mount_route_data *route_data;
+	struct thread *td;
+	int error, newfd;
+
+	args = (struct khttpd_mount_args *)data;
+	td = curthread;
+	fdp = td->td_proc->p_fd;
+
+	error = khttpd_route_add(&khttpd_route_root, args->prefix,
+	    khttpd_mount_received_header);
+	if (error != 0)
+		goto failed;
+
+	FILEDESC_XLOCK(fdp);
+
+	error = fdalloc(td, 0, &newfd);
+	if (error != 0) {
+		TRACE("error fdalloc %d", error);
+		FILEDESC_XUNLOCK(fdp);
+		goto failed;
+	}
+
+	srcfde = args->fde;
+	dstfde = &fdp->fd_ofiles[newfd];
+	dstfde->fde_file = srcfde->fde_file;
+	filecaps_move(&srcfde->fde_caps, &dstfde->fde_caps);
+
+	FILEDESC_XUNLOCK(fdp);
+
+	error = kern_fstat(td, newfd, &statbuf);
+	if (error != 0) {
+		TRACE("error stat %d", error);
+		goto failed;
+	}
+
+	if ((statbuf.st_mode & S_IFDIR) == 0) {
+		TRACE("error nodir");
+		error = ENOTDIR;
+		goto failed;
+	}
+
+	route = khttpd_route_find(&khttpd_route_root, args->prefix, NULL);
+	route->dtor = khttpd_mount_route_dtor;
+	args->prefix = NULL;
+
+	route->data[0] = route_data =
+	    malloc(sizeof(struct khttpd_mount_route_data), M_KHTTPD, M_WAITOK);
+	route_data->dirfd = newfd;
+	
+	return (0);
+
+failed:
+	fdrop(args->fde->fde_file, td);
+	free(args->prefix, M_KHTTPD);
+
+	return (error);
+}
+
+static int
+khttpd_mount(struct khttpd_mount_args *args)
+{
+	char pathbuf[PATH_MAX];
+	struct filedesc *fdp;
+	struct file *fp;
+	struct filedescent fde, *fdep;
+	struct thread *td;
+	int error, fd;
+	size_t pathlen;
+
+	td = curthread;
+	fdp = td->td_proc->p_fd;
+	fd = args->dirfd;
+
+	error = copyinstr(args->prefix, pathbuf, sizeof(pathbuf), &pathlen);
+	if (error != 0)
+		return (error);
+	if (pathbuf[0] != '/' || pathbuf[pathlen - 2] == '/')
+		return (EINVAL);
+
+	FILEDESC_SLOCK(fdp);
+
+	fdep = &fdp->fd_ofiles[fd];
+
+	if (fd < 0 || fdp->fd_lastfile < fd || (fp = fdep->fde_file) == NULL) {
+		error = EBADF;
+		goto out;
+	}
+
+	if (!(fp->f_ops->fo_flags & DFLAG_PASSABLE)) {
+		error = EOPNOTSUPP;
+		goto out;
+	}
+
+	fhold(fp);
+
+	fde.fde_file = fp;
+	filecaps_copy(&fdep->fde_caps, &fde.fde_caps);
+	FILEDESC_SUNLOCK(fdp);
+
+	args->prefix = strdup(pathbuf, M_KHTTPD);
+	args->fde = &fde;
+
+	return (khttpd_run_proc(khttpd_mount_proc, args));
+
+out:
+	FILEDESC_SUNLOCK(fdp);
+
+	return (error);
+}
+
+static int
 khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
 {
@@ -5616,6 +6020,9 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	case KHTTPD_IOC_ADD_PORT:
 		return (khttpd_add_port((struct khttpd_address_info *)data));
+
+	case KHTTPD_IOC_MOUNT:
+		return (khttpd_mount((struct khttpd_mount_args *)data));
 
 	default:
 		return (ENOIOCTL);
