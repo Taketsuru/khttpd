@@ -1,6 +1,6 @@
-SYSDIR = $(HOME)/src/sys
+SYSDIR = $(HOME)/freebsd/sys
 
-SRCS = khttpd.c
+SRCS = khttpd.c vnode_if.h
 KMOD = khttpd
 
 #CFLAGS +=

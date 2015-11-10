@@ -190,7 +190,7 @@ struct khttpd_server_port {
 	int		fd;
 };
 
-typedef int (*khttpd_receive_t)(struct kevent *);
+typedef int (*khttpd_receive_t)(struct khttpd_socket *socket);
 typedef int (*khttpd_transmit_t)(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
@@ -327,11 +327,12 @@ static void khttpd_kevent_nop(struct kevent *event);
 static int khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
-static int khttpd_receive_chunk(struct kevent *event);
-static int khttpd_receive_body(struct kevent *event);
-static int khttpd_receive_header_or_trailer(struct kevent *event);
-static int khttpd_receive_request_line(struct kevent *event);
+static int khttpd_receive_chunk(struct khttpd_socket *socket);
+static int khttpd_receive_body(struct khttpd_socket *socket);
+static int khttpd_receive_header_or_trailer(struct khttpd_socket *socket);
+static int khttpd_receive_request_line(struct khttpd_socket *socket);
 
+static void khttpd_socket_transmit(struct khttpd_socket *socket);
 static void khttpd_handle_socket_event(struct kevent *event);
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
@@ -2005,7 +2006,7 @@ static int
 khttpd_kevent_enable_write(int kq, int fd, boolean_t enable,
     struct khttpd_event_type *etype)
 {
-	TRACE("enter %d", fd);
+	TRACE("enter %d %d", fd, enable);
 
 	struct kevent change = {
 		.ident	= fd,
@@ -3038,18 +3039,16 @@ khttpd_socket_reset(struct khttpd_socket *socket)
 }
 
 static int
-khttpd_socket_drain(struct kevent *event)
+khttpd_socket_drain(struct khttpd_socket *socket)
 {
 	struct iovec aiov;
 	struct uio auio;
-	struct khttpd_socket *socket;
 	struct thread *td;
 	int error;
 
-	TRACE("enter %td", event->ident);
+	TRACE("enter %td", socket->fd);
 
 	td = curthread;
-	socket = (struct khttpd_socket *)event->udata;
 
 	aiov.iov_base = socket->recv_buf;
 	aiov.iov_len = sizeof socket->recv_buf;
@@ -3422,20 +3421,7 @@ body_fixed:
 	STAILQ_INSERT_TAIL(&request->responses, response, link);
 
 	if (STAILQ_FIRST(&socket->requests) == request)
-		khttpd_ready_to_send(socket);
-}
-
-void
-khttpd_ready_to_send(struct khttpd_socket *socket)
-{
-	TRACE("enter");
-
-	if (socket->xmit_busy)
-		return;
-
-	socket->xmit_busy = TRUE;
-	khttpd_kevent_enable_write(khttpd_kqueue, socket->fd, TRUE,
-	    &socket->event_type);
+		khttpd_socket_transmit(socket);
 }
 
 static int
@@ -3893,16 +3879,14 @@ khttpd_send_options_response(struct khttpd_socket *socket,
 }
 
 static int
-khttpd_receive_crlf_following_chunk_data(struct kevent *event)
+khttpd_receive_crlf_following_chunk_data(struct khttpd_socket *socket)
 {
 	struct khttpd_request *request;
-	struct khttpd_socket  *socket;
 	int error;
 
-	socket = (struct khttpd_socket *)event->udata;
 	request = STAILQ_LAST(&socket->requests, khttpd_request, link);
 
-	TRACE("enter %td", event->ident);
+	TRACE("enter %td", socket->fd);
 
 	KASSERT(socket->recv_chunked, ("recv_chunked must be TRUE"));
 
@@ -3912,7 +3896,7 @@ khttpd_receive_crlf_following_chunk_data(struct kevent *event)
 		return (0);
 	}
 	if (error != 0) {
-		TRACE("error %td", event->ident);
+		TRACE("error %td", socket->fd);
 		return (error);
 	}
 
@@ -3925,19 +3909,17 @@ khttpd_receive_crlf_following_chunk_data(struct kevent *event)
 }
 
 static int
-khttpd_receive_chunk(struct kevent *event)
+khttpd_receive_chunk(struct khttpd_socket *socket)
 {
 	struct khttpd_request *request;
-	struct khttpd_socket  *socket;
 	uint64_t chunk_length;
 	char *sep, *cp;
 	int error, nibble;
 	char ch;
 
-	socket = (struct khttpd_socket *)event->udata;
 	request = STAILQ_LAST(&socket->requests, khttpd_request, link);
 
-	TRACE("enter %td", event->ident);
+	TRACE("enter %td", socket->fd);
 
 	KASSERT(socket->recv_chunked, ("recv_chunked must be TRUE"));
 
@@ -3947,7 +3929,7 @@ khttpd_receive_chunk(struct kevent *event)
 		return (0);
 	}
 	if (error != 0) {
-		TRACE("readline %td", event->ident);
+		TRACE("readline %td", socket->fd);
 		return (error);
 	}
 
@@ -3987,22 +3969,20 @@ khttpd_receive_chunk(struct kevent *event)
 }
 
 static int
-khttpd_receive_body(struct kevent *event)
+khttpd_receive_body(struct khttpd_socket *socket)
 {
 	struct iovec aiov;
 	struct uio auio;
 	struct khttpd_request *request;
-	struct khttpd_socket *socket;
 	struct thread *td;
 	char *bufend, *end;
 	int error, size;
 	boolean_t wrapped;
 
 	td = curthread;
-	socket = (struct khttpd_socket *)event->udata;
 	request = STAILQ_LAST(&socket->requests, khttpd_request, link);
 
-	TRACE("enter %td %#jx %d", event->ident,
+	TRACE("enter %td %#jx %d", socket->fd,
 	    (uintmax_t)socket->recv_residual, socket->recv_chunked);
 
 	if (socket->recv_skip != KHTTPD_NO_SKIP)
@@ -4214,18 +4194,16 @@ khttpd_dispatch_request(struct khttpd_socket *socket,
 }
 
 static int
-khttpd_receive_header_or_trailer(struct kevent *event)
+khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 {
 	struct iovec iov[2];
 	struct khttpd_request *request;
-	struct khttpd_socket  *socket;
 	char *buf, *end;
 	size_t len;
 	int error, i, iovcnt;
 
-	TRACE("enter %td", event->ident);
+	TRACE("enter %td", socket->fd);
 
-	socket = (struct khttpd_socket *)event->udata;
 	request = STAILQ_LAST(&socket->requests, khttpd_request, link);
 
 	error = khttpd_socket_read(socket, '\n', iov, &iovcnt);
@@ -4290,20 +4268,17 @@ khttpd_receive_header_or_trailer(struct kevent *event)
 }
 
 static int
-khttpd_receive_request_line(struct kevent *event)
+khttpd_receive_request_line(struct khttpd_socket *socket)
 {
 	struct khttpd_request *request;
-	struct khttpd_socket *socket;
 	char *query, *query_end, *sep, *target, *target_end, *version;
 	int error;
 
-	TRACE("enter %td", event->ident);
-
-	socket = (struct khttpd_socket *)event->udata;
+	TRACE("enter %td", socket->fd);
 
 	KASSERT(!socket->recv_chunked, ("recv_chunked must be FALSE"));
 
-	request = uma_zalloc_arg(khttpd_request_zone, event->udata, M_WAITOK);
+	request = uma_zalloc_arg(khttpd_request_zone, socket, M_WAITOK);
 
 	error = khttpd_socket_readline(socket, socket->recv_line);
 	if (error != 0)
@@ -4422,85 +4397,101 @@ khttpd_accept_client(struct kevent *event)
 }
 
 static void
-khttpd_handle_socket_event(struct kevent *event)
+khttpd_socket_receive(struct khttpd_socket *socket)
 {
-	struct khttpd_socket *socket;
+	int error;
+
+	while (!socket->eof && (error = socket->receive(socket)) == 0)
+		;	/* nothing */
+
+	if (error != 0 && error != EWOULDBLOCK) {
+		TRACE("error receive %d", error);
+		khttpd_socket_reset(socket);
+	}
+
+	TRACE("eof=%d, fd=%d", socket->eof, socket->fd);
+	if (socket->eof && socket->fd != -1) {
+		TRACE("error receive EOF");
+		khttpd_kevent_delete_read(khttpd_kqueue, socket->fd);
+	}
+}
+
+static void
+khttpd_socket_transmit(struct khttpd_socket *socket)
+{
 	struct khttpd_request *request;
 	struct khttpd_response *response;
 	struct thread *td;
 	int error;
 	boolean_t enable_new, enable_old;
 
-	TRACE("enter %td %d", event->ident, event->filter);
+	TRACE("enter %d", socket->fd);
 
 	td = curthread;
+
+	error = 0;
+	for (;;) {
+		if (0 < socket->xmit_uio.uio_resid) {
+			error = kern_writev(td, socket->fd, &socket->xmit_uio);
+			if (error != 0) {
+				TRACE("error writev %d", error);
+				break;
+			}
+			if (0 < socket->xmit_uio.uio_resid) {
+				TRACE("error writev EWOULDBLOCK %zd",
+				    socket->xmit_uio.uio_resid);
+				error = EWOULDBLOCK;
+				break;
+			}
+		}
+
+		request = STAILQ_FIRST(&socket->requests);
+		if (request == NULL)
+			break;
+
+		response = STAILQ_FIRST(&request->responses);
+		if (response == NULL)
+			break;
+
+		error = socket->transmit(socket, request, response);
+		if (error == EWOULDBLOCK) {
+			error = 0;
+			break;
+		}
+		if (error != 0) {
+			TRACE("error transmit %d", error);
+			break;
+		}
+	}
+
+	enable_old = socket->xmit_busy;
+	socket->xmit_busy = enable_new = error == EWOULDBLOCK;
+
+	if (enable_old != enable_new)
+		khttpd_kevent_enable_write(khttpd_kqueue, socket->fd,
+		    enable_new, (struct khttpd_event_type *)&socket);
+
+	if (error != 0 && error != EWOULDBLOCK)
+		khttpd_socket_reset(socket);
+}
+
+static void
+khttpd_handle_socket_event(struct kevent *event)
+{
+	struct khttpd_socket *socket;
+
+	TRACE("enter %td %d", event->ident, event->filter);
+
 	socket = (struct khttpd_socket *)event->udata;
 
 	switch (event->filter) {
 
 	case EVFILT_READ:
-		while (!socket->eof && (error = socket->receive(event)) == 0)
-			;	/* nothing */
-
-		if (error != 0 && error != EWOULDBLOCK) {
-			TRACE("error receive %d", error);
-			khttpd_socket_reset(socket);
-		}
-
-		if (socket->eof && socket->fd != -1) {
-			TRACE("error receive EOF");
-			khttpd_kevent_delete_read(khttpd_kqueue, socket->fd);
-		}
-
+		khttpd_socket_receive(socket);
 		break;
 
 	case EVFILT_WRITE:
-		error = 0;
-		for (;;) {
-			if (0 < socket->xmit_uio.uio_resid) {
-				error = kern_writev(td, socket->fd,
-				    &socket->xmit_uio);
-				if (error != 0) {
-					TRACE("error writev %d", error);
-					break;
-				}
-				if (0 < socket->xmit_uio.uio_resid) {
-					TRACE("error writev EWOULDBLOCK %zd",
-					    socket->xmit_uio.uio_resid);
-					error = EWOULDBLOCK;
-					break;
-				}
-			}
-
-			request = STAILQ_FIRST(&socket->requests);
-			if (request == NULL)
-				break;
-
-			response = STAILQ_FIRST(&request->responses);
-			if (response == NULL)
-				break;
-
-			error = socket->transmit(socket, request, response);
-			if (error == EWOULDBLOCK) {
-				error = 0;
-				break;
-			}
-			if (error != 0) {
-				TRACE("error transmit %d", error);
-				break;
-			}
-		}
-
-		enable_old = socket->xmit_busy;
-		socket->xmit_busy = enable_new = error == EWOULDBLOCK;
-
-		if (enable_old != enable_new)
-			khttpd_kevent_enable_write(khttpd_kqueue, socket->fd,
-			    enable_new, (struct khttpd_event_type *)&socket);
-
-		if (error != 0 && error != EWOULDBLOCK)
-			khttpd_socket_reset(socket);
-
+		khttpd_socket_transmit(socket);
 		break;
 
 	default:
@@ -5351,7 +5342,8 @@ khttpd_main(void *arg)
 
 	khttpd_kqueue = -1;
 
-	error = kern_open(td, "/dev/console", UIO_SYSSPACE, O_WRONLY, 0666);
+	error = kern_openat(td, AT_FDCWD, "/dev/console", UIO_SYSSPACE,
+	    O_WRONLY, 0666);
 	if (error != 0) {
 		printf("khttpd: failed to open the console: %d\n", error);
 		goto cont;
@@ -5361,10 +5353,18 @@ khttpd_main(void *arg)
 	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
 	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
 
-	do_dup(td, 0, debug_fd, 0, td->td_retval);
+	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
+	if (error != 0) {
+		printf("khttpd: failed to duplicate debug_fd: %d", error);
+		goto cont;
+	}
 	khttpd_log_state[KHTTPD_LOG_ERROR].fd = td->td_retval[0];
 
-	do_dup(td, 0, debug_fd, 0, td->td_retval);
+	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
+	if (error != 0) {
+		printf("khttpd: failed to duplicate debug_fd: %d", error);
+		goto cont;
+	}
 	khttpd_log_state[KHTTPD_LOG_ACCESS].fd = td->td_retval[0];
 
 	bzero(&sigact, sizeof(sigact));
@@ -5553,7 +5553,7 @@ khttpd_open_server_port(void *arg)
 	port->fd = td->td_retval[0];
 	TRACE("fd %d", port->fd);
 
-	error = kern_bind(td, port->fd,
+	error = kern_bindat(td, AT_FDCWD, port->fd,
 	    (struct sockaddr *)&port->addrinfo.ai_addr);
 	if (error != 0) {
 		TRACE("error bind %d", error);
@@ -5692,7 +5692,7 @@ khttpd_configure_log(struct khttpd_log_conf *conf)
 	fhold(fp);
 
 	fde.fde_file = fp;
-	filecaps_copy(&fdep->fde_caps, &fde.fde_caps);
+	filecaps_copy(&fdep->fde_caps, &fde.fde_caps, true);
 	FILEDESC_SUNLOCK(fdp);
 
 	conf->fde = &fde;
@@ -5995,7 +5995,7 @@ khttpd_mount(struct khttpd_mount_args *args)
 	fhold(fp);
 
 	fde.fde_file = fp;
-	filecaps_copy(&fdep->fde_caps, &fde.fde_caps);
+	filecaps_copy(&fdep->fde_caps, &fde.fde_caps, true);
 	FILEDESC_SUNLOCK(fdp);
 
 	args->prefix = strdup(pathbuf, M_KHTTPD);
