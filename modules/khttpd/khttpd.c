@@ -5729,7 +5729,7 @@ khttpd_mount_transmit_body(struct khttpd_socket *socket,
 	}
 
 	error = fo_sendfile(fp, socket->fd, NULL, NULL, data->xmit_offset,
-	    data->xmit_residual, NULL, 0, 0, td);
+	    data->xmit_residual, &sent, 0, 0, td);
 	if (error != 0)
 		TRACE("error sendfile %d", error);
 
