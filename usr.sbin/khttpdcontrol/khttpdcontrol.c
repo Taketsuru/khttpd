@@ -40,6 +40,12 @@
 
 #include "../../modules/khttpd/khttpd.h"
 
+static const char mime_types[] =
+    "application/javascript js\n"
+    "text/html html htm\n"
+    "text/plain txt\n"
+    "text/css css\n";
+
 int main(int argc, char **argv)
 {
 	struct sockaddr_storage addr;
@@ -47,6 +53,7 @@ int main(int argc, char **argv)
 	struct khttpd_log_conf log_conf;
 	struct khttpd_address_info kai;
 	struct khttpd_mount_args mount_args;
+	struct khttpd_set_mime_type_rules_args set_mime_type_rules_args;
 	int fd, gai_error;
 
 	fd = open("/dev/khttpd", O_RDWR);
@@ -68,6 +75,13 @@ int main(int argc, char **argv)
 		err(EX_NOINPUT, "failed to open /sys/ui root directory.");
 	if (ioctl(fd, KHTTPD_IOC_MOUNT, &mount_args) == -1)
 		err(EX_UNAVAILABLE, "failed to mount /sys/ui.");
+
+	set_mime_type_rules_args.mount_point = mount_args.prefix;
+	set_mime_type_rules_args.buf = (void *)mime_types;
+	set_mime_type_rules_args.bufsize = sizeof(mime_types);
+	if (ioctl(fd, KHTTPD_IOC_SET_MIME_TYPE_RULES, 
+		&set_mime_type_rules_args) == -1)
+		err(EX_UNAVAILABLE, "failed to set mime type rules.");
 
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;

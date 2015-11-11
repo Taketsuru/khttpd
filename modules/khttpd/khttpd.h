@@ -92,6 +92,7 @@ enum {
 };
 
 struct filedescent;
+struct khttpd_mime_type_rule_set;
 
 struct khttpd_address_info {
 	struct sockaddr_storage ai_addr;
@@ -117,6 +118,15 @@ struct khttpd_mount_args {
 	};
 };
 
+struct khttpd_set_mime_type_rules_args {
+	char	*mount_point;
+	size_t	bufsize;
+	union {
+		char	*buf;
+		struct khttpd_mime_type_rule_set *rule_set;
+	};
+};
+
 #define KHTTPD_IOC 'h'
 
 #define KHTTPD_IOC_CONFIGURE_LOG			\
@@ -125,6 +135,8 @@ struct khttpd_mount_args {
 	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
 #define KHTTPD_IOC_MOUNT				\
 	_IOW(KHTTPD_IOC, 2, struct khttpd_mount_args)
+#define KHTTPD_IOC_SET_MIME_TYPE_RULES			\
+	_IOW(KHTTPD_IOC, 3, struct khttpd_set_mime_type_rules_args)
 
 #define KHTTPD_LOG_DEBUG_MESSAGE	0x00000001
 #define KHTTPD_LOG_DEBUG_TRACE		0x00000002

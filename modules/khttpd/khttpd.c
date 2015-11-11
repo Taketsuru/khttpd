@@ -306,8 +306,11 @@ struct khttpd_log_state {
 	int	fd;
 };
 
+struct khttpd_mime_type_rule_set;
+
 struct khttpd_mount_route_data {
-	int	dirfd;
+	struct khttpd_mime_type_rule_set *rule_set;
+	int		dirfd;
 };
 
 struct khttpd_mount_request_data {
@@ -316,6 +319,20 @@ struct khttpd_mount_request_data {
 	size_t	pathsize;
 	int	fd;
 	char	path[];
+};
+
+struct khttpd_mime_type_rule {
+	SLIST_ENTRY(khttpd_mime_type_rule) link;
+	const char	*suffix;
+	const char	*type;
+};
+
+SLIST_HEAD(khttpd_mime_type_rule_slist, khttpd_mime_type_rule);
+
+struct khttpd_mime_type_rule_set {
+	char		*buffer;
+	uint32_t	hash_mask;
+	struct khttpd_mime_type_rule_slist hash_table[];
 };
 
 /* ---------------------------------------------------- prototype declrations */
@@ -334,6 +351,13 @@ static int khttpd_receive_request_line(struct khttpd_socket *socket);
 
 static void khttpd_socket_transmit(struct khttpd_socket *socket);
 static void khttpd_handle_socket_event(struct kevent *event);
+
+static struct khttpd_mime_type_rule_set *khttpd_mime_type_rule_set_alloc
+    (uint32_t hash_size, char *buf);
+static void khttpd_mime_type_rule_set_free
+    (struct khttpd_mime_type_rule_set *rule_set);
+static const char *khttpd_mime_type_rule_set_find
+    (struct khttpd_mime_type_rule_set *rule_set, const char *path);
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 	       struct thread *td);
@@ -457,7 +481,8 @@ static int khttpd_server_status;
 static boolean_t khttpd_log_writing, khttpd_log_waiting;
 static char khttpd_log_buffer[1024];
 
-static char khttpd_crlf[] = { '\r', '\n' };
+static const char khttpd_crlf[] = { '\r', '\n' };
+static const char khttpd_content_type[] = "Content-Type: ";
 
 static struct cdevsw khttpd_cdevsw = {
 	.d_version = D_VERSION,
@@ -539,6 +564,7 @@ static SLIST_HEAD(khttpd_server_port_list, khttpd_server_port)
 static LIST_HEAD(, khttpd_socket) khttpd_sockets =
     LIST_HEAD_INITIALIZER(khttpd_sockets);
 
+static uma_zone_t khttpd_mime_type_rule_zone;
 static uma_zone_t khttpd_json_zone;
 static uma_zone_t khttpd_route_zone;
 static uma_zone_t khttpd_socket_zone;
@@ -585,7 +611,7 @@ void khttpd_log(int type, const char *fmt, ...)
 	iov[0].iov_base = (void *)khttpd_log_buffer;
 	iov[0].iov_len = len;
 
-	iov[1].iov_base = khttpd_crlf + 1;
+	iov[1].iov_base = (void *)(khttpd_crlf + 1);
 	iov[1].iov_len = 1;
 
 	auio.uio_iov = iov;
@@ -649,6 +675,17 @@ khttpd_rskip_whitespace(const char *ptr)
 	const char *cp;
 
 	for (cp = ptr; cp[-1] == ' ' || cp[-1] == '\t'; --cp)
+		;		/* nothing */
+
+	return ((char *)cp);
+}
+
+static char *
+khttpd_find_whitespace(const char *ptr, const char *end)
+{
+	const char *cp;
+
+	for (cp = ptr; cp < end && (*cp != ' ' && *cp != '\t'); ++cp)
 		;		/* nothing */
 
 	return ((char *)cp);
@@ -2208,6 +2245,7 @@ khttpd_route_find(struct khttpd_route *root,
 		key.label_len = end - cp;
 		ptr = SPLAY_FIND(khttpd_route_tree, &parent->children_tree, &key);
 		if (ptr != NULL) {
+			TRACE("hit %s", ptr->path);
 			if (suffix != NULL)
 				*suffix = end;
 			return (ptr);
@@ -3529,7 +3567,7 @@ khttpd_transmit_chunk(struct khttpd_socket *socket,
 	}
 	socket->xmit_iov[i].iov_base = last_base;
 	socket->xmit_iov[i].iov_len = last_len;
-	socket->xmit_iov[i + 1].iov_base = khttpd_crlf;
+	socket->xmit_iov[i + 1].iov_base = (void *)khttpd_crlf;
 	socket->xmit_iov[i + 1].iov_len = sizeof(khttpd_crlf);
 	socket->xmit_uio.uio_iovcnt = n + 2;
 
@@ -5307,6 +5345,10 @@ khttpd_main(void *arg)
 
 	khttpd_method_init();
 
+	khttpd_mime_type_rule_zone = uma_zcreate("khttp-mime-type-rule",
+	    sizeof(struct khttpd_mime_type_rule),
+	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
+
 	khttpd_json_zone = uma_zcreate("khttp-json",
 	    sizeof(struct khttpd_json),
 	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
@@ -5486,6 +5528,7 @@ cont:
 	uma_zdestroy(khttpd_header_field_zone);
 	uma_zdestroy(khttpd_route_zone);
 	uma_zdestroy(khttpd_json_zone);
+	uma_zdestroy(khttpd_mime_type_rule_zone);
 
 	kproc_exit(0);
 }
@@ -5785,12 +5828,14 @@ static void
 khttpd_mount_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+	struct iovec type_iov[3];
 	struct stat statbuf;
 	struct khttpd_mount_request_data *data;
 	struct khttpd_mount_route_data *route_data;
 	struct khttpd_response *response;
 	struct khttpd_route *route;
 	struct thread *td;
+	const char *type;
 	int error, fd;
 
 	TRACE("enter %d %s", socket->fd, request->target_suffix);
@@ -5851,8 +5896,19 @@ khttpd_mount_get_or_head(struct khttpd_socket *socket,
 	data->xmit_offset = 0;
 	data->xmit_residual = statbuf.st_size;
 	khttpd_header_add_content_length(response->header, statbuf.st_size);
-	khttpd_header_add(response->header,
-	    "Content-Type: application/octet-stream");
+
+	type = khttpd_mime_type_rule_set_find(route_data->rule_set, data->path);
+
+	type_iov[0].iov_base = (void *)khttpd_content_type;
+	type_iov[0].iov_len = sizeof(khttpd_content_type) - 1;
+	type_iov[1].iov_base = (void *)type;
+	type_iov[1].iov_len = strlen(type);
+	type_iov[2].iov_base = (void *)khttpd_crlf;
+	type_iov[2].iov_len = sizeof(khttpd_crlf);
+
+	khttpd_header_addv(response->header, type_iov,
+	    sizeof(type_iov) / sizeof(type_iov[0]));
+
 	khttpd_send_response(socket, request, response);
 }
 
@@ -5878,14 +5934,12 @@ static void
 khttpd_mount_route_dtor(struct khttpd_route *route)
 {
 	struct khttpd_mount_route_data *route_data;
-	struct thread *td;
+
+	TRACE("enter %s", route->path);
 
 	route_data = (struct khttpd_mount_route_data *)route->data[0];
-	td = curthread;
-
-	TRACE("enter %s %d", route->path, route_data->dirfd);
-
-	kern_close(td, route_data->dirfd);
+	khttpd_mime_type_rule_set_free(route_data->rule_set);
+	kern_close(curthread, route_data->dirfd);
 	free(route_data, M_KHTTPD);
 	free((char *)route->path, M_KHTTPD);
 	route->path = NULL;
@@ -5946,6 +6000,7 @@ khttpd_mount_proc(void *data)
 
 	route->data[0] = route_data =
 	    malloc(sizeof(struct khttpd_mount_route_data), M_KHTTPD, M_WAITOK);
+	route_data->rule_set = khttpd_mime_type_rule_set_alloc(1, NULL);
 	route_data->dirfd = newfd;
 	
 	return (0);
@@ -6009,6 +6064,195 @@ out:
 	return (error);
 }
 
+static struct khttpd_mime_type_rule_set *
+khttpd_mime_type_rule_set_alloc(uint32_t hash_size, char *buf)
+{
+	struct khttpd_mime_type_rule_set *rule_set;
+	uint32_t i;
+
+	rule_set = malloc(sizeof(*rule_set) +
+	    sizeof(struct khttpd_mime_type_rule_slist) * hash_size, M_KHTTPD, 
+	    M_WAITOK);
+	rule_set->buffer = buf;
+	rule_set->hash_mask = hash_size - 1;
+
+	for (i = 0; i < hash_size; ++i)
+		SLIST_INIT(&rule_set->hash_table[i]);
+
+	return (rule_set);
+}
+
+static void
+khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
+{
+	struct khttpd_mime_type_rule *rule;
+	int i;
+	uint32_t hash_size;
+
+	TRACE("enter %p", rule_set);
+
+	if (rule_set == NULL)
+		return;
+
+	hash_size = rule_set->hash_mask + 1;
+	for (i = 0; i < hash_size; ++i)
+		while ((rule = SLIST_FIRST(&rule_set->hash_table[i])) != NULL) {
+			SLIST_REMOVE_HEAD(&rule_set->hash_table[i], link);
+			uma_zfree(khttpd_mime_type_rule_zone, rule);
+		}
+
+	free(rule_set->buffer, M_KHTTPD);
+	free(rule_set, M_KHTTPD);
+}
+
+static const char *
+khttpd_mime_type_rule_set_find(struct khttpd_mime_type_rule_set *rule_set,
+    const char *path)
+{
+	struct khttpd_mime_type_rule *rule;
+	const char *cp;
+	uint32_t hash;
+
+	TRACE("enter %s", path);
+
+	for (cp = path + strlen(path); path < cp && cp[-1] != '.'; --cp)
+		;		/* nothing */
+
+	if (path == cp)
+		return ("application/octet-stream");
+
+	TRACE("suffix %s", cp);
+
+	hash = khttpd_hash32_str_ci(cp) & rule_set->hash_mask;
+	SLIST_FOREACH(rule, &rule_set->hash_table[hash], link)
+		if (strcasecmp(cp, rule->suffix) == 0)
+			return (rule->type);
+
+	return ("application/octet-stream");
+}
+
+static int
+khttpd_set_mime_type_rules_proc(void *data)
+{
+	struct khttpd_set_mime_type_rules_args *args;
+	struct khttpd_route *route;
+	struct khttpd_mount_route_data *route_data;
+	const char *suffix;
+
+	args = (struct khttpd_set_mime_type_rules_args *)data;
+
+	TRACE("enter %s", args->mount_point);
+
+	route = khttpd_route_find(&khttpd_route_root, args->mount_point,
+	    &suffix);
+	if (route == NULL || *suffix != '\0') {
+		TRACE("error enoent %s",
+		    route == NULL ? "<root>" : route->path);
+		return (ENOENT);
+	}
+	if (route->dtor != khttpd_mount_route_dtor) {
+		TRACE("error eopnotsupp");
+		return (EOPNOTSUPP);
+	}
+
+	route_data = (struct khttpd_mount_route_data *)route->data[0];
+	khttpd_mime_type_rule_set_free(route_data->rule_set);
+	route_data->rule_set = args->rule_set;
+
+	return (0);
+}
+
+static int
+khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
+{
+	char mount_point[PATH_MAX];
+	struct khttpd_mime_type_rule_slist rules;
+	struct khttpd_mime_type_rule_set *rule_set;
+	struct khttpd_mime_type_rule *rule, *rp;
+	char *buf, *cp, *end, *last_end, *next, *suffix, *type;
+	size_t bufsize;
+	uint32_t rule_count, hash, hash_size;
+	int error;
+	char dummy;
+
+	rule_set = NULL;
+
+	error = copyinstr(args->mount_point, mount_point,
+	    sizeof(mount_point), NULL);
+	if (error != 0)
+		return (error);
+
+	args->mount_point = mount_point;
+
+	bufsize = args->bufsize;
+	buf = malloc(bufsize, M_KHTTPD, M_WAITOK);
+	error = copyin(args->buf, buf, bufsize);
+	if (error != 0)
+		goto out;
+
+	SLIST_INIT(&rules);
+
+	last_end = &dummy;
+	end = buf + bufsize;
+	rule_count = 0;
+	for (cp = buf; cp < end; cp = next + 1) {
+		next = khttpd_find_ch_in(cp, end, '\n');
+		next = next == NULL ? end : next;
+
+		type = cp = khttpd_skip_whitespace(cp);
+		*last_end = '\0';
+		last_end = cp = khttpd_find_whitespace(cp, next);
+
+		while (cp < next) {
+			suffix = cp = khttpd_skip_whitespace(cp);
+			if (*cp == '\n')
+				break;
+			*last_end = '\0';
+			last_end = cp = khttpd_find_whitespace(cp, next);
+
+			++rule_count;
+			rule = uma_zalloc(khttpd_mime_type_rule_zone, M_WAITOK);
+			rule->type = type;
+			rule->suffix = suffix;
+			SLIST_INSERT_HEAD(&rules, rule, link);
+		}
+	}
+	*last_end = '\0';
+
+	hash_size = rule_count == 0 ? 1 : 1U << (fls(rule_count) - 1);
+
+	rule_set = khttpd_mime_type_rule_set_alloc(hash_size, buf);
+	buf = NULL;
+	args->rule_set = rule_set;
+
+	while ((rule = SLIST_FIRST(&rules)) != NULL) {
+		SLIST_REMOVE_HEAD(&rules, link);
+		hash = khttpd_hash32_str_ci(rule->suffix) & (hash_size - 1);
+
+		SLIST_FOREACH(rp, &rule_set->hash_table[hash], link) {
+			if (strcasecmp(rp->suffix, rule->suffix) != 0)
+				continue;
+
+			printf("ERROR: there are duplicate entries "
+			    "for suffix %s.\n", rule->suffix);
+			error = EEXIST;
+			goto out;
+		}
+
+		SLIST_INSERT_HEAD(&rule_set->hash_table[hash], rule, link);
+	}
+
+	error = khttpd_run_proc(khttpd_set_mime_type_rules_proc, args);
+	if (error == 0)
+		rule_set = NULL;
+
+out:
+	khttpd_mime_type_rule_set_free(rule_set);
+	free(buf, M_KHTTPD);
+
+	return (error);
+}
+
 static int
 khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
@@ -6023,6 +6267,10 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	case KHTTPD_IOC_MOUNT:
 		return (khttpd_mount((struct khttpd_mount_args *)data));
+
+	case KHTTPD_IOC_SET_MIME_TYPE_RULES:
+		return (khttpd_set_mime_type_rules
+		    ((struct khttpd_set_mime_type_rules_args *)data));
 
 	default:
 		return (ENOIOCTL);
