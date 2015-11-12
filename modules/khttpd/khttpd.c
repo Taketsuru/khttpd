@@ -467,6 +467,10 @@ static struct khttpd_method {
 	{ "VERSION-CONTROL" },
 };
 
+static const char *khttpd_index_names[] = {
+	"index.html"
+};
+
 SLIST_HEAD(khttpd_method_list, khttpd_method);
 static struct khttpd_method_list
     khttpd_method_hash_table[KHTTPD_METHOD_HASH_SIZE];
@@ -2645,6 +2649,23 @@ khttpd_header_add_allow(struct khttpd_header *header,
 }
 
 static void
+khttpd_header_add_location(struct khttpd_header *header,
+    const char *location)
+{
+	struct iovec iov[3];
+	static const char name[] = "Location: ";
+
+	iov[0].iov_base = (void *)name;
+	iov[0].iov_len = sizeof(name) - 1;
+	iov[1].iov_base = (void *)location;
+	iov[1].iov_len = strlen(location);
+	iov[2].iov_base = (void *)khttpd_crlf;
+	iov[2].iov_len = sizeof(khttpd_crlf);
+
+	khttpd_header_addv(header, iov, sizeof(iov) / sizeof(iov[0]));
+}
+
+static void
 khttpd_header_add_content_length(struct khttpd_header *header, uint64_t size)
 {
 	char buf[48];
@@ -3802,6 +3823,22 @@ khttpd_send_error_response(struct khttpd_socket *socket,
 		khttpd_header_add(response->header, "Connection: close");
 
 	khttpd_send_response(socket, request, response);
+}
+
+void
+khttpd_send_moved_permanently_response(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response,
+    const char *target)
+{
+	TRACE("enter");
+
+	if (response == NULL)
+		response = uma_zalloc(khttpd_response_zone, M_WAITOK);
+	khttpd_header_add_location(response->header, target);
+
+	khttpd_send_error_response(socket, request, response, 301,
+	    "Moved Permanently",
+	    "The target resource has been assigned a new permanent URI.", FALSE);
 }
 
 void
@@ -5804,7 +5841,7 @@ khttpd_mount_request_data_alloc(const char *path)
 	struct khttpd_mount_request_data *data;
 	size_t pathsize;
 
-	pathsize = strlen(path) + 1;
+	pathsize = MAX(2, strlen(path) + 1);
 	data = malloc(sizeof(*data) + pathsize, M_KHTTPD, M_WAITOK);
 	data->pathsize = pathsize;
 	data->fd = -1;
@@ -5830,6 +5867,88 @@ khttpd_mount_request_dtor(struct khttpd_request *request)
 	    request->data[0]);
 }
 
+static int
+khttpd_mount_open(int dirfd, const char *path, int *fd_out, struct stat *statbuf)
+{
+	struct thread *td;
+	int error, fd;
+
+	td = curthread;
+
+	error = kern_openat(td, dirfd, (char *)path, UIO_SYSSPACE, O_RDONLY, 0);
+	if (error != 0) {
+		TRACE("error open %d", error);
+		return (error);
+	}
+
+	fd = td->td_retval[0];
+
+	error = kern_fstat(td, fd, statbuf);
+	if (error != 0) {
+		TRACE("error fstat %d", error);
+		return (error);
+	}
+
+	if ((statbuf->st_mode & S_IFREG) != 0) {
+		*fd_out = fd;
+		return (0);
+	}
+
+	if ((statbuf->st_mode & S_IFDIR) != 0) {
+		*fd_out = fd;
+		return (EISDIR);
+	}
+
+	return (ENOENT);
+}
+
+static void
+khttpd_mount_redirect_to_index(struct khttpd_socket *socket,
+    struct khttpd_request *request, int fd)
+{
+	struct stat statbuf;
+	struct thread *td;
+	char *path;
+	size_t len, target_len, index_len;
+	int error, i, n, tmpfd;
+
+	TRACE("enter %d %s %d", socket->fd,
+	    ((struct khttpd_mount_request_data *)request->data[0])->path, fd);
+
+	td = curthread;
+
+	n = sizeof(khttpd_index_names) / sizeof(khttpd_index_names[0]);
+	for (i = 0; i < n; ++i) {
+		tmpfd = -1;
+		error = khttpd_mount_open(fd, khttpd_index_names[i], &tmpfd,
+		    &statbuf);
+		kern_close(td, tmpfd);
+		if (error == 0)
+			break;
+	}
+
+	if (i == n) {
+		khttpd_send_not_found_response(socket, request, FALSE);
+		return;
+	}
+
+	target_len = strlen(request->target);
+	index_len = strlen(khttpd_index_names[i]);
+
+	path = malloc(target_len + 1 +index_len + 1, M_KHTTPD, M_WAITOK);
+	bcopy(request->target, path, target_len);
+	len = target_len;
+	if (path[len - 1] != '/')
+		path[len++] = '/';
+	bcopy(khttpd_index_names[i], path + len, index_len);
+	len += index_len;
+	path[len] = '\0';
+
+	khttpd_send_moved_permanently_response(socket, request, NULL, path);
+
+	free(path, M_KHTTPD);
+}
+
 static void
 khttpd_mount_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
@@ -5841,8 +5960,8 @@ khttpd_mount_get_or_head(struct khttpd_socket *socket,
 	struct khttpd_response *response;
 	struct khttpd_route *route;
 	struct thread *td;
-	const char *type;
-	int error, fd;
+	const char *type, *path;
+	int dirfd, error, fd;
 
 	TRACE("enter %d %s", socket->fd, request->target_suffix);
 
@@ -5851,27 +5970,29 @@ khttpd_mount_get_or_head(struct khttpd_socket *socket,
 	route_data = (struct khttpd_mount_route_data *)route->data[0];
 	data = khttpd_mount_request_data_alloc(request->target_suffix);
 
-	error = khttpd_path_normalize(request->target_suffix,
+	error = khttpd_path_normalize(request->target_suffix[0] == '/'
+	    ? request->target_suffix + 1 : request->target_suffix,
 	    data->path, data->pathsize);
 	if (error != 0) {
 		TRACE("error normalize %d", error);
+		khttpd_mount_request_data_free(data);
 		khttpd_send_not_found_response(socket, request, FALSE);
 		return;
 	}
 
-	TRACE("path %s", data->path);
 	request->data[0] = data;
 	request->dtor = khttpd_mount_request_dtor;
 
-	error = kern_openat(td, route_data->dirfd,
-	    data->path[0] == '/' ? data->path + 1 : data->path,
-	    UIO_SYSSPACE, O_RDONLY, 0);
+	dirfd = route_data->dirfd;
+	path = data->path;
+	TRACE("path %s", path);
+
+	error = khttpd_mount_open(dirfd, path, &fd, &statbuf);
 	if (error != 0)
 		TRACE("error open %d", error);
 	switch (error) {
 
 	case 0:
-		data->fd = fd = td->td_retval[0];
 		break;
 
 	case ENAMETOOLONG:
@@ -5884,14 +6005,11 @@ khttpd_mount_get_or_head(struct khttpd_socket *socket,
 		khttpd_send_conflict_response(socket, request, FALSE);
 		return;
 
-	default:
-		khttpd_send_internal_error_response(socket, request);
+	case EISDIR:
+		khttpd_mount_redirect_to_index(socket, request, fd);
 		return;
-	}
 
-	error = kern_fstat(td, fd, &statbuf);
-	if (error != 0) {
-		TRACE("error fstat %d", error);
+	default:
 		khttpd_send_internal_error_response(socket, request);
 		return;
 	}
@@ -5899,20 +6017,21 @@ khttpd_mount_get_or_head(struct khttpd_socket *socket,
 	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
 	response->status = 200;
 	response->transmit_body = khttpd_mount_transmit_body;
+
+	data->fd = fd;
 	data->xmit_offset = 0;
 	data->xmit_residual = statbuf.st_size;
+
 	khttpd_header_add_content_length(response->header, statbuf.st_size);
 
 	type = khttpd_mime_type_rule_set_find(route_data->rule_set, data->path);
-
 	type_iov[0].iov_base = (void *)khttpd_content_type;
 	type_iov[0].iov_len = sizeof(khttpd_content_type) - 1;
 	type_iov[1].iov_base = (void *)type;
 	type_iov[1].iov_len = strlen(type);
 	type_iov[2].iov_base = (void *)khttpd_crlf;
 	type_iov[2].iov_len = sizeof(khttpd_crlf);
-
-	khttpd_header_addv(response->header, type_iov,
+	khttpd_header_addv(response->header, type_iov, 
 	    sizeof(type_iov) / sizeof(type_iov[0]));
 
 	khttpd_send_response(socket, request, response);
