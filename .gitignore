@@ -38,3 +38,6 @@ modules/khttpd/machine
 modules/khttpd/x86
 modules/khttpd/export_syms
 modules/khttpd/.depend
+modules/khttpd/vnode_if.h
+modules/khttpd/vnode_if_newproto.h
+modules/khttpd/vnode_if_typedef.h
