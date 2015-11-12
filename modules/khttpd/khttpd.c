@@ -3028,6 +3028,7 @@ khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
 
 	TRACE("enter");
 
+
 	socket->event_type.handle_event = khttpd_handle_socket_event;
 	STAILQ_INIT(&socket->requests);
 	socket->xmit_uio.uio_resid = 0;
@@ -3062,7 +3063,7 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 }
 
 static void
-khttpd_socket_reset(struct khttpd_socket *socket)
+khttpd_socket_close(struct khttpd_socket *socket)
 {
 	TRACE("enter %d", socket->fd);
 
@@ -3101,27 +3102,9 @@ khttpd_socket_drain(struct khttpd_socket *socket)
 	} while (error == 0 && td->td_retval[0] != 0);
 
 	if (error == 0)
-		khttpd_socket_reset(socket);
+		khttpd_socket_close(socket);
 
 	return (error);
-}
-
-static void
-khttpd_socket_shutdown(struct khttpd_socket *socket)
-{
-	struct shutdown_args args;
-
-	TRACE("enter %d", socket->fd);
-
-	args.s = socket->fd;
-	args.how = SHUT_WR;
-	sys_shutdown(curthread, &args);
-
-	socket->recv_getp = socket->recv_putp = socket->recv_buf;
-	socket->recv_skip = KHTTPD_NO_SKIP;
-	socket->receive = khttpd_socket_drain;
-
-	khttpd_socket_clear_all_requests(socket);
 }
 
 /*
@@ -3466,11 +3449,14 @@ static int
 khttpd_transmit_end(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response)
 {
+	struct shutdown_args shutdown_args;
+	struct thread *td;
 	boolean_t continue_response;
 	boolean_t close;
 
 	TRACE("enter %d", socket->fd);
 
+	td = curthread;
 	continue_response = 100 <= response->status && response->status < 200;
 
 	close = !continue_response &&
@@ -3484,8 +3470,21 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 		STAILQ_REMOVE_HEAD(&socket->requests, link);
 		uma_zfree(khttpd_request_zone, request);
 
-		if (close)
-			khttpd_socket_shutdown(socket);
+		if (socket->eof && STAILQ_EMPTY(&socket->requests))
+			khttpd_socket_close(socket);
+
+		else if (close) {
+			shutdown_args.s = socket->fd;
+			shutdown_args.how = SHUT_WR;
+			sys_shutdown(curthread, &shutdown_args);
+
+			socket->recv_getp = socket->recv_putp =
+			    socket->recv_buf;
+			socket->recv_skip = KHTTPD_NO_SKIP;
+			socket->receive = khttpd_socket_drain;
+
+			khttpd_socket_clear_all_requests(socket);
+		}
 	}
 
 	socket->transmit = khttpd_transmit_status_line_and_header;
@@ -4077,7 +4076,7 @@ khttpd_receive_body(struct khttpd_socket *socket)
 		if (size == 0) {
 			TRACE("eof");
 			socket->eof = TRUE;
-			khttpd_socket_reset(socket);
+			khttpd_socket_close(socket);
 			return (0);
 		}
 
@@ -4323,6 +4322,10 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		TRACE("error readline %d", error);
 	if (error == EWOULDBLOCK)
 		goto out;
+	if (socket->eof) {
+		error = 0;
+		goto out;
+	}
 	if (error != 0)
 		goto reject;
 
@@ -4384,7 +4387,7 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	return (0);
 
 reject:
-	khttpd_socket_reset(socket);
+	khttpd_socket_close(socket);
 	error = 0;
 
 out:
@@ -4444,13 +4447,15 @@ khttpd_socket_receive(struct khttpd_socket *socket)
 
 	if (error != 0 && error != EWOULDBLOCK) {
 		TRACE("error receive %d", error);
-		khttpd_socket_reset(socket);
+		khttpd_socket_close(socket);
 	}
 
 	TRACE("eof=%d, fd=%d", socket->eof, socket->fd);
 	if (socket->eof && socket->fd != -1) {
 		TRACE("error receive EOF");
 		khttpd_kevent_delete_read(khttpd_kqueue, socket->fd);
+		if (STAILQ_EMPTY(&socket->requests))
+			khttpd_socket_close(socket);
 	}
 }
 
@@ -4492,14 +4497,14 @@ khttpd_socket_transmit(struct khttpd_socket *socket)
 			break;
 
 		error = socket->transmit(socket, request, response);
-		if (error == EWOULDBLOCK) {
+		if (error != 0)
+			TRACE("error transmit %d", error);
+		if (error == EINPROGRESS) {
 			error = 0;
 			break;
 		}
-		if (error != 0) {
-			TRACE("error transmit %d", error);
+		if (error != 0)
 			break;
-		}
 	}
 
 	enable_old = socket->xmit_busy;
@@ -4507,10 +4512,10 @@ khttpd_socket_transmit(struct khttpd_socket *socket)
 
 	if (enable_old != enable_new)
 		khttpd_kevent_enable_write(khttpd_kqueue, socket->fd,
-		    enable_new, (struct khttpd_event_type *)&socket);
+		    enable_new, &socket->event_type);
 
 	if (error != 0 && error != EWOULDBLOCK)
-		khttpd_socket_reset(socket);
+		khttpd_socket_close(socket);
 }
 
 static void
@@ -4521,6 +4526,7 @@ khttpd_handle_socket_event(struct kevent *event)
 	TRACE("enter %td %d", event->ident, event->filter);
 
 	socket = (struct khttpd_socket *)event->udata;
+	khttpd_socket_hold(socket);
 
 	switch (event->filter) {
 
@@ -4535,6 +4541,8 @@ khttpd_handle_socket_event(struct kevent *event)
 	default:
 		panic("%s: unknown filter %d", __func__, event->filter);
 	}
+
+	khttpd_socket_free(socket);
 }
 
 /*-------------------------------------------------------------------- sysctl */
@@ -5778,15 +5786,13 @@ khttpd_mount_transmit_body(struct khttpd_socket *socket,
 
 	fdrop(fp, td);
 
-	if (error == 0) {
+	if (error == 0 || error == EWOULDBLOCK) {
 		TRACE("sent=%d, residual=%zd, offset=%zd",
 		    sent, data->xmit_residual, data->xmit_offset);
 		if ((data->xmit_residual -= sent) == 0)
 			socket->transmit = khttpd_transmit_end;
-		else {
+		else
 			data->xmit_offset += sent;
-			error = EWOULDBLOCK;
-		}
 	}
 
 	return (error);
