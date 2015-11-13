@@ -6483,6 +6483,12 @@ bad:
 }
 
 static int
+khttpd_quiesce_proc(void *args)
+{
+	return (LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY);
+}
+
+static int
 khttpd_loader(struct module *m, int what, void *arg)
 {
 	switch (what) {
@@ -6491,8 +6497,12 @@ khttpd_loader(struct module *m, int what, void *arg)
 		return (khttpd_load());
 
 	case MOD_UNLOAD:
+	case MOD_SHUTDOWN:
 		khttpd_unload();
 		return (0);
+
+	case MOD_QUIESCE:
+		return (khttpd_run_proc(khttpd_quiesce_proc, NULL));
 
 	default:
 		return (EOPNOTSUPP);
