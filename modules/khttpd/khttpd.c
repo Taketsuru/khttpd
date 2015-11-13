@@ -6510,3 +6510,4 @@ khttpd_loader(struct module *m, int what, void *arg)
 }
 
 DEV_MODULE(khttpd, khttpd_loader, NULL);
+MODULE_VERSION(khttpd, 1100000);
