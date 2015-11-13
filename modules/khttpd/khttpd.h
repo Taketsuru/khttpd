@@ -31,6 +31,8 @@
 #include <sys/ioccom.h>
 #include <sys/socket.h>
 
+#define KHTTPD_VERSION	1100000
+
 enum {
 	KHTTPD_LOG_DEBUG,
 	KHTTPD_LOG_ERROR,
@@ -142,6 +144,10 @@ struct khttpd_set_mime_type_rules_args {
 #define KHTTPD_LOG_DEBUG_TRACE		0x00000002
 #define KHTTPD_LOG_DEBUG_ALL		0x00000003
 
+#ifndef KHTTPD_SYS_PREFIX
+#define KHTTPD_SYS_PREFIX "/sys"
+#endif
+
 #ifdef _KERNEL
 
 struct khttpd_mbuf_iter {
@@ -167,6 +173,8 @@ struct khttpd_request;
 struct khttpd_response;
 struct khttpd_route;
 struct khttpd_socket;
+struct khttpd_header;
+struct khttpd_header_field;
 
 typedef void (*khttpd_received_header_t)(struct khttpd_socket *,
     struct khttpd_request *);
@@ -176,9 +184,16 @@ typedef void (*khttpd_end_of_message_t)(struct khttpd_socket *,
     struct khttpd_request *);
 typedef int (*khttpd_transmit_body_t)(struct khttpd_socket *,
     struct khttpd_request *, struct khttpd_response *);
-typedef void (*khttpd_request_dtor_t)(struct khttpd_request *);
-typedef void (*khttpd_response_dtor_t)(struct khttpd_response *);
+typedef void (*khttpd_request_dtor_t)(struct khttpd_request *, void *);
+typedef void (*khttpd_response_dtor_t)(struct khttpd_response *, void *);
 typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
+typedef int (*khttpd_command_proc_t)(void *);
+
+int khttpd_route_add(struct khttpd_route *root, char *path,
+    khttpd_received_header_t received_header_fn);
+void khttpd_route_remove(struct khttpd_route *route);
+struct khttpd_route *khttpd_route_find(struct khttpd_route *root,
+    const char *target, const char **suffix);
 
 void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
@@ -224,11 +239,61 @@ int khttpd_json_object_size(struct khttpd_json *value);
 int khttpd_json_parse(struct khttpd_mbuf_iter *iter,
     struct khttpd_json **value_out, int depth_limit);
 
+struct khttpd_header_field *khttpd_header_find(struct khttpd_header *header,
+    char *field_name, boolean_t include_trailer);
+struct khttpd_header_field *khttpd_header_find_next(struct khttpd_header *header,
+    struct khttpd_header_field *current, boolean_t include_trailer);
+boolean_t
+khttpd_header_value_includes(struct khttpd_header *header,
+    char *field_name, char *token, boolean_t include_trailer);
+int
+khttpd_header_addv(struct khttpd_header *header,
+    struct iovec *iov, int iovcnt);
+int khttpd_header_add(struct khttpd_header *header, char *field);
+void
+khttpd_header_add_allow(struct khttpd_header *header,
+    const char *allowed_methods);
+void
+khttpd_header_add_location(struct khttpd_header *header,
+    const char *location);
+void khttpd_header_add_content_length(struct khttpd_header *header,
+    uint64_t size);
+int
+khttpd_header_list_iter_init(struct khttpd_header *header,
+    char *name, struct khttpd_header_field **fp_out, char **cp_out,
+    boolean_t include_trailer);
+int
+khttpd_header_list_iter_next(struct khttpd_header *header,
+    struct khttpd_header_field **fp_inout, char **cp_inout,
+    char **begin_out, char **end_out, boolean_t include_trailer);
+int
+khttpd_header_get_uint64(struct khttpd_header *header,
+    char *name, uint64_t *value_out, boolean_t include_trailer);
+
+struct khttpd_response *khttpd_response_alloc(void);
+void khttpd_response_free(struct khttpd_response *);
+void khttpd_response_set_status(struct khttpd_response *response, int code);
+void khttpd_response_set_xmit_proc(struct khttpd_response *response,
+    khttpd_transmit_body_t proc, void *procdata, khttpd_response_dtor_t dtor);
+struct khttpd_header *khttpd_response_header(struct khttpd_response *response);
+void khttpd_response_set_xmit_data_mbuf(struct khttpd_response *response,
+    struct mbuf *data);
+
+const char *khttpd_request_target(struct khttpd_request *request);
+const char *khttpd_request_suffix(struct khttpd_request *request);
+void khttpd_request_set_data(struct khttpd_request *request, void *data,
+    khttpd_request_dtor_t dtor);
+void* khttpd_request_data(struct khttpd_request *request);
+void khttpd_request_set_body_receiver(struct khttpd_request *request,
+    khttpd_received_body_t recv_proc, khttpd_end_of_message_t eom_proc);
+int khttpd_request_method(struct khttpd_request *request);
+
 void khttpd_send_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
 void khttpd_socket_hold(struct khttpd_socket *socket);
 void khttpd_socket_free(struct khttpd_socket *socket);
+int khttpd_socket_fd(struct khttpd_socket *socket);
 
 void khttpd_ready_to_send(struct khttpd_socket *socket);
 
@@ -264,7 +329,8 @@ void khttpd_send_options_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response,
     const char *allowed_methods);
 
-int khttpd_enable(void);
-void khttpd_disable(void);
+int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
 
-#endif
+extern struct khttpd_route khttpd_route_root;
+
+#endif	/* _KERNEL */
