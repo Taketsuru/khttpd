@@ -1011,7 +1011,7 @@ khttpd_mbuf_append(struct mbuf *output, const char *begin, const char *end)
 	const char *cp;
 	size_t space, len;
 
-	ptr = output;
+	m_length(output, &ptr);
 	cp = begin;
 	while (cp < end && 0 < (space = M_TRAILINGSPACE(ptr))) {
 		len = MIN(end - cp, space);
@@ -1030,6 +1030,19 @@ khttpd_mbuf_append(struct mbuf *output, const char *begin, const char *end)
 		ptr->m_len = len;
 		cp += len;
 	}
+
+	return (ptr);
+}
+
+struct mbuf *
+khttpd_mbuf_append_ch(struct mbuf *output, char ch)
+{
+	struct mbuf *ptr;
+
+	m_length(output, &ptr);
+	if (M_TRAILINGSPACE(ptr) == 0)
+		ptr = ptr->m_next = m_get(M_WAITOK, MT_DATA);
+	mtod(ptr, char *)[ptr->m_len++] = ch;
 
 	return (ptr);
 }
@@ -1166,6 +1179,154 @@ khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter, void **buf_out,
 
 	*buf_out = buf;
 	*size_out = size;
+
+	return (0);
+}
+
+struct mbuf *
+khttpd_mbuf_append_json_string(struct mbuf *output,
+    const char *begin, const char *end)
+{
+	struct mbuf *tail;
+	const char *srcp;
+	char *dstp, *dend;
+	int32_t code;
+	int flc, i, len;
+	uint16_t code1, code2;
+	unsigned char ch;
+
+	srcp = begin;
+	tail = khttpd_mbuf_append_ch(output, '\"');
+	dstp = mtod(tail, char *) + tail->m_len;
+	dend = mtod(tail, char *) + M_TRAILINGSPACE(tail);
+
+	while (srcp < end) {
+		ch = (unsigned char)*srcp;
+		switch (ch) {
+
+		case '\b':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = 'b';
+			++srcp;
+			break;
+
+		case '\f':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = 'f';
+			++srcp;
+			break;
+
+		case '\n':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = 'n';
+			++srcp;
+			break;
+
+		case '\r':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = 'r';
+			++srcp;
+			break;
+
+		case '\t':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = 't';
+			++srcp;
+			break;
+
+		case '\"':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = '\"';
+			++srcp;
+			break;
+
+		case '\\':
+			if (dend - dstp < 2)
+				goto expand;
+			*dstp++ = '\\';
+			*dstp++ = '\\';
+			++srcp;
+			break;
+
+		default:
+			if (ch < 0x80) {
+				code = ch;
+				len = 1;
+
+			} else {
+				flc = fls(~ch & 0xff);
+				code = ch & (0xff >> (CHAR_BIT + 1 - flc));
+				len = CHAR_BIT - flc;
+
+				/*
+				 * Write as is if we found a multibyte
+				 * sequence starts with 10xxxxxx, a premature
+				 * end of string, or a sequence longer than 4
+				 * bytes.
+				 */
+				if (len == 1 || end - srcp < len || 4 < len)
+					code = ch;
+
+				for (i = 1; i < len; ++i)
+					code = (code << 6) |
+					    (srcp[i] & 0x3f);
+
+				/*
+				 * Write as is if the code point is not
+				 * representable with utf-16, or in the range
+				 * reserved for surrogate pairs.
+				 */
+				if (0x110000 <= code ||
+				    (0xd800 <= code && code < 0xe000))
+					code = ch;
+			}
+
+			if (0x20 <= code && code < 0x80) {
+				if (dend - dstp < 1)
+					goto expand;
+				*dstp++ = code;
+
+			} else if (code < 0x10000) {
+				if (dend - dstp < 7)
+					goto expand;
+				snprintf(dstp, 7, "\\u%04x", code);
+				dstp += 6;
+
+			} else {
+				if (dend - dstp < 13)
+					goto expand;
+				code1 = ((code - 0x10000) >> 10) + 0xd800;
+				code2 = ((code - 0x10000) & 0x3ff) + 0xdc00;
+				snprintf(dstp, 13, "\\u%04x\\u%04x", code1,
+				    code2);
+				dstp += 12;
+			}
+
+			srcp += len;
+		}
+		continue;
+
+expand:
+		tail->m_len = dstp - mtod(tail, char *);
+		tail = tail->m_next = m_get(M_WAITOK, MT_DATA);
+		dstp = mtod(tail, char *);
+		dend = dstp + M_TRAILINGSPACE(tail);
+	}
+
+	tail->m_len = dstp - mtod(tail, char *);
+	khttpd_mbuf_append_ch(tail, '\"');
 
 	return (0);
 }
@@ -4659,7 +4820,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		    0 < item_count ? ",\n" : "\n", KHTTPD_SYSCTL_PREFIX);
 
 		/* Print { "href":"/sys/sysctl/1.1" */
-		khttpd_mbuf_printf(itembuf, "\"href\":\"%s",
+		khttpd_mbuf_printf(itembuf, "\"href\":\"%s/",
 		    KHTTPD_SYSCTL_PREFIX);
 		for (i = 0; i < next_oidlen / sizeof(int); ++i)
 			khttpd_mbuf_printf(itembuf, i == 0 ? "%x": ".%x",
@@ -4738,10 +4899,13 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 			error = kernel_sysctl(td, next_oid,
 			    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen,
 			    NULL, 0, NULL, 0);
-			if (error == 0)
+			if (error == 0) {
 				/* Print ,"description":"hogehoge" */
 				khttpd_mbuf_printf(itembuf,
-				    ",\n\"description\":\"%s\"", strbuf);
+				    ",\n\"description\":");
+				khttpd_mbuf_append_json_string(itembuf, strbuf,
+				    strbuf + strbuflen - 1);
+			}
 		}
 
 		khttpd_mbuf_printf(itembuf, "}");

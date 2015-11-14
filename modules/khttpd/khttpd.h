@@ -184,10 +184,13 @@ void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
 struct mbuf *khttpd_mbuf_append(struct mbuf *output, const char *begin,
     const char *end);
+struct mbuf *khttpd_mbuf_append_ch(struct mbuf *output, char ch);
 void khttpd_base64_encode_to_mbuf(struct mbuf *output, const char *buf,
     size_t size);
 int khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter,
     void **buf_out, size_t *size_out);
+struct mbuf *khttpd_mbuf_append_json_string(struct mbuf *output,
+    const char *begin, const char *end);
 void khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr,
     int off);
 int khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter);
