@@ -971,8 +971,6 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 	buf = m_get(M_WAITOK, MT_DATA);
 	buflen = M_TRAILINGSPACE(buf);
 	req = vsnprintf(mtod(buf, char *), buflen, fmt, vl);
-	if (buflen < req)
-		panic("%s: result is too long", __func__);
 	buf->m_len = req;
 	m_cat(output, buf);
 }
@@ -4606,8 +4604,17 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 	body = m_get(M_WAITOK, MT_DATA);
 	response = NULL;
 
-	khttpd_mbuf_printf(body, "[");
+	khttpd_mbuf_printf(body, "{\n\"flags\":[");
+	flag_count = 0;
+	for (i = 0; i < khttpd_sysctl_flags_count; ++i) {
+		khttpd_mbuf_printf(body, "%s\"%s\"",
+		    0 < flag_count ? "," : "",
+		    khttpd_sysctl_flags[i].field_name);
+		++flag_count;
+	}
+	khttpd_mbuf_printf(body, "]");
 
+	khttpd_mbuf_printf(body, ",\n\"items\":[");
 	item_count = FALSE;
 	cur_oid[0] = 1;
 	cur_oidlen = sizeof(int);
@@ -4628,9 +4635,12 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 
 		itembuf = m_get(M_WAITOK, MT_DATA);
 
-		/* Print { "href":"/sys/sysctl/1.1" */
-		khttpd_mbuf_printf(itembuf, "%s{\"href\":\"%s",
+		khttpd_mbuf_printf(itembuf, "%s{",
 		    0 < item_count ? ",\n" : "\n", KHTTPD_SYSCTL_PREFIX);
+
+		/* Print { "href":"/sys/sysctl/1.1" */
+		khttpd_mbuf_printf(itembuf, "\"href\":\"%s",
+		    KHTTPD_SYSCTL_PREFIX);
 		for (i = 0; i < next_oidlen / sizeof(int); ++i)
 			khttpd_mbuf_printf(itembuf, i == 0 ? "%x": ".%x",
 			    next_oid[i + 2]);
@@ -4653,7 +4663,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		}
 
 		/* Print ,"name":"kern.ostype", */
-		khttpd_mbuf_printf(itembuf, ",\n \"name\":\"%s\"", strbuf);
+		khttpd_mbuf_printf(itembuf, ",\n\"name\":\"%s\"", strbuf);
 
 		/* Get the kind and the format of the next entry. */
 		next_oid[1] = 4; /* oidfmt */
@@ -4673,7 +4683,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 
 		kind = *(u_int *)strbuf;
 
-		khttpd_mbuf_printf(itembuf, ",\n \"flags\":[");
+		khttpd_mbuf_printf(itembuf, ",\n\"flags\":[");
 		flag_count = 0;
 		for (i = 0; i < khttpd_sysctl_flags_count; ++i) {
 			if ((kind & khttpd_sysctl_flags[i].flag) == 0)
@@ -4686,18 +4696,35 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		khttpd_mbuf_printf(itembuf, "]");
 
 		if ((kind & CTLFLAG_SECURE) != 0) {
-			khttpd_mbuf_printf(itembuf, ",\n \"securelevel\":%d",
+			khttpd_mbuf_printf(itembuf, ",\n\"securelevel\":%d",
 			    (kind & CTLMASK_SECURE) >> CTLSHIFT_SECURE);
 		}
 
 		type = kind & CTLTYPE;
 		if (type < khttpd_sysctl_types_end) {
-			khttpd_mbuf_printf(itembuf, ",\n \"type\":\"%s\"",
+			khttpd_mbuf_printf(itembuf, ",\n\"type\":\"%s\"",
 			    khttpd_sysctl_types[type - 1]);
 		}
 
-		khttpd_mbuf_printf(itembuf, ",\n \"format\":\"%s\" }",
+		khttpd_mbuf_printf(itembuf, ",\n\"format\":\"%s\"",
 		    strbuf + sizeof(kind));
+
+		/* Get the description of the next entry. */
+		next_oid[1] = 5; /* oiddescr */
+		error = kernel_sysctl(td, next_oid, next_oidlen / sizeof(int) +
+		    2, NULL, 0, NULL, 0, &strbuflen, 0);
+		if (error == 0) {
+			strbuf = realloc(strbuf, strbuflen, M_KHTTPD, M_WAITOK);
+			error = kernel_sysctl(td, next_oid,
+			    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen,
+			    NULL, 0, NULL, 0);
+			if (error == 0)
+				/* Print ,"description":"hogehoge" */
+				khttpd_mbuf_printf(itembuf,
+				    ",\n\"description\":\"%s\"", strbuf);
+		}
+
+		khttpd_mbuf_printf(itembuf, "}");
 
 		m_cat(body, itembuf);
 		++item_count;
@@ -4711,7 +4738,9 @@ again:
 		itembuf = NULL;
 	}
 
-	khttpd_mbuf_printf(body, 0 < item_count ? "\n]" : "]");
+	if (0 < item_count)
+		khttpd_mbuf_printf(body, "\n");
+	khttpd_mbuf_printf(body, "]\n}");
 
 	response = uma_zalloc(khttpd_response_zone, M_WAITOK);
 
