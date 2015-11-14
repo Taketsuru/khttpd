@@ -4865,7 +4865,7 @@ khttpd_main(void *arg)
 	}
 	debug_fd = td->td_retval[0];
 
-	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
+	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = 0;
 	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
 
 	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);

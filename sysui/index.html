@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" ng-app="sysUi">
   <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
@@ -10,6 +10,45 @@
     <script src="js/angular.min.js"></script>
   </head>
   <body>
+    <nav class="navbar navbar-default navbar-fixed-top">
+      <div class="container-fluid">
+	<div class="navbar-header">
+	  <a class="navbar-brand" href="#">FreeBSD System Monitor</a>
+	</div>
+
+	<ul class="nav navbar-nav">
+	  <li><a href="#">Process</a></li>
+	  <li><a href="#">CPU</a></li>
+	  <li><a href="#">Memory</a></li>
+	  <li><a href="#">Storage</a></li>
+	  <li><a href="#">Sysctl</a></li>
+	  <li><a href="#">VM objects</a></li>
+	</ul>
+
+	<p class="nav navbar-text navbar-right">Preferences</p>
+      </div>
+    </nav>
+
+    <div class="container">
+      <div ng-controller="sysctlPanelController as sysctlPanel">
+	<table class="table-hover">
+	  <thead>
+	    <tr>
+	      <th>Name</th>
+	      <th>Type</th>
+	      <th>Description</th>
+	    </tr>
+	  </thead>
+	  <tbody>
+	  <tr ng-repeat="item in sysctlPanel.sysctl.items">
+	    <td><a href="{{item.href}}"><p>{{item.name}}</p></a></td>
+	    <td><p>{{item.type}}</p></td>
+	    <td>{{item.description}}</td>
+	  </tr>
+	  </tbody>
+      </div>
+    </div>
+
     <script src="js/sysui.js"></script>
   </body>
 </html>
