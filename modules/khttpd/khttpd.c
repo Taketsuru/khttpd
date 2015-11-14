@@ -962,15 +962,35 @@ khttpd_method_find(const char *begin, const char *end)
  * mbuf
  */
 
+static void
+khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
+{
+	free(mtod(buf, char *) - sizeof(u_int), M_KHTTPD);
+}
+
 void
 khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 {
+	char *extbuf;
 	struct mbuf *buf;
 	int req, buflen;
 
+	extbuf = NULL;
 	buf = m_get(M_WAITOK, MT_DATA);
 	buflen = M_TRAILINGSPACE(buf);
 	req = vsnprintf(mtod(buf, char *), buflen, fmt, vl);
+	while (buflen < req + 1) {
+		buflen = req + 1;
+		extbuf = realloc(extbuf, sizeof(u_int) + buflen, M_KHTTPD,
+		    M_WAITOK);
+		req = vsnprintf(extbuf + sizeof(u_int), buflen, fmt, vl);
+	}
+	if (extbuf != NULL) {
+		buf->m_ext.ext_cnt = (u_int *)extbuf;
+		MEXTADD(buf, extbuf + sizeof(u_int), buflen,
+		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
+	}
+
 	buf->m_len = req;
 	m_cat(output, buf);
 }
