@@ -7,29 +7,34 @@
     <title>FreeBSD System Monitor</title>
     <link href="css/bootstrap.min.css" rel="stylesheet">
     <link href="css/bootstrap-theme.min.css" rel="stylesheet">
+    <link href="css/sysui.css" rel="stylesheet">
     <script src="js/angular.min.js"></script>
   </head>
   <body>
     <nav class="navbar navbar-default navbar-fixed-top">
       <div class="container-fluid">
-	<div class="navbar-header">
-	  <a class="navbar-brand" href="#">FreeBSD System Monitor</a>
-	</div>
-
+	<a class="navbar-brand" href="#">FreeBSD System Monitor</a>
 	<ul class="nav navbar-nav">
-	  <li><a href="#">Process</a></li>
-	  <li><a href="#">CPU</a></li>
-	  <li><a href="#">Memory</a></li>
-	  <li><a href="#">Storage</a></li>
-	  <li><a href="#">Sysctl</a></li>
-	  <li><a href="#">VM objects</a></li>
+	  <li class="disabled"><a href="#tools">Tools</a></li>
 	</ul>
-
-	<p class="nav navbar-text navbar-right">Preferences</p>
+	<ul class="nav navbar-nav navbar-right">
+	  <li class="disabled"><a href="#about">About</a></li>
+	</ul>
       </div>
     </nav>
 
-    <div class="container">
+    <ul class="nav nav-tabs">
+      <li class="disabled"><a href="#">Process</a></li>
+      <li class="disabled"><a href="#">CPU</a></li>
+      <li class="disabled"><a href="#">Memory</a></li>
+      <li class="disabled"><a href="#">VM object</a></li>
+      <li class="disabled"><a href="#">Vnode</a></li>
+      <li class="disabled"><a href="#">Storage</a></li>
+      <li class="disabled"><a href="#">Network</a></li>
+      <li class="active"><a href="#">Sysctl</a></li>
+    </ul>
+
+    <div class="tab-panel container-fluid">
       <div ng-controller="sysctlPanelController as sysctlPanel">
 	<table class="table-hover">
 	  <thead>
