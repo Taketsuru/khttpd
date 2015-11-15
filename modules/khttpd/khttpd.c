@@ -5828,10 +5828,10 @@ khttpd_unload(void)
 	struct khttpd_command *command;
 	struct proc *proc;
 
-	khttpd_sysctl_unload();
-
 	if (khttpd_dev != NULL)
 		destroy_dev(khttpd_dev);
+
+	khttpd_sysctl_unload();
 
 	STAILQ_INIT(&worklist);
 
@@ -5886,16 +5886,16 @@ khttpd_load(void)
 	}
 	mtx_unlock(&khttpd_lock);
 
+	error = khttpd_sysctl_load();
+	if (error != 0)
+		goto bad;
+
 	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &khttpd_dev,
 	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd");
 	if (error != 0) {
 		printf("khttpd: failed to create /dev/khttpd: %d\n", error);
 		goto bad;
 	}
-
-	error = khttpd_sysctl_load();
-	if (error != 0)
-		goto bad;
 
 	return (0);
 
