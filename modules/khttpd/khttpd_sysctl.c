@@ -84,7 +84,15 @@ struct khttpd_sysctl_put_leaf_request {
 
 /* ---------------------------------------------------- prototype declrations */
 
+static void khttpd_sysctl_received_header(struct khttpd_socket *socket, 
+    struct khttpd_request *request);
+
 /* ----------------------------------------------------- variable definitions */
+
+static struct khttpd_route_type khttpd_route_type_sysctl = {
+	.name = "sysctl",
+	.received_header_fn = khttpd_sysctl_received_header
+};
 
 static const char *khttpd_sysctl_types[] = {
 	"node",
@@ -954,7 +962,7 @@ khttpd_sysctl_load_proc(void *args)
 	int error;
 
 	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX, 
-	    khttpd_sysctl_received_header);
+	    &khttpd_route_type_sysctl);
 
 	return (error);
 }

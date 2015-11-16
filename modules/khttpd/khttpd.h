@@ -150,12 +150,6 @@ struct khttpd_set_mime_type_rules_args {
 
 #ifdef _KERNEL
 
-struct khttpd_mbuf_iter {
-	struct mbuf	*ptr;
-	int		off;
-	int		unget;
-};
-
 enum {
 	KHTTPD_JSON_ARRAY = 1,
 	KHTTPD_JSON_OBJECT,
@@ -189,11 +183,27 @@ typedef void (*khttpd_response_dtor_t)(struct khttpd_response *, void *);
 typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
 typedef int (*khttpd_command_proc_t)(void *);
 
+struct khttpd_mbuf_iter {
+	struct mbuf	*ptr;
+	int		off;
+	int		unget;
+};
+
+struct khttpd_route_type {
+	const char		*name;
+	khttpd_received_header_t received_header_fn;
+};
+
 int khttpd_route_add(struct khttpd_route *root, char *path,
-    khttpd_received_header_t received_header_fn);
+    struct khttpd_route_type *route_type);
 void khttpd_route_remove(struct khttpd_route *route);
 struct khttpd_route *khttpd_route_find(struct khttpd_route *root,
     const char *target, const char **suffix);
+void khttpd_route_set_data(struct khttpd_route *route, void *data,
+    khttpd_route_dtor_t dtor);
+void *khttpd_route_data(struct khttpd_route *route);
+const char *khttpd_route_path(struct khttpd_route *route);
+struct khttpd_route_type *khttpd_route_type(struct khttpd_route *route);
 
 void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
@@ -287,6 +297,7 @@ void* khttpd_request_data(struct khttpd_request *request);
 void khttpd_request_set_body_receiver(struct khttpd_request *request,
     khttpd_received_body_t recv_proc, khttpd_end_of_message_t eom_proc);
 int khttpd_request_method(struct khttpd_request *request);
+struct khttpd_route *khttpd_request_route(struct khttpd_request *request);
 
 void khttpd_send_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
@@ -295,6 +306,7 @@ void khttpd_socket_hold(struct khttpd_socket *socket);
 void khttpd_socket_free(struct khttpd_socket *socket);
 int khttpd_socket_fd(struct khttpd_socket *socket);
 
+void khttpd_xmit_finished(struct khttpd_socket *socket);
 void khttpd_ready_to_send(struct khttpd_socket *socket);
 
 void khttpd_send_continue_response(struct khttpd_socket *socket,
@@ -332,5 +344,6 @@ void khttpd_send_options_response(struct khttpd_socket *socket,
 int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
 
 extern struct khttpd_route khttpd_route_root;
+extern const char khttpd_crlf[2];
 
 #endif	/* _KERNEL */

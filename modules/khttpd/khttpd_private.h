@@ -27,6 +27,8 @@
 
 #pragma once
 
+#include <sys/types.h>
+
 #ifdef _KERNEL
 
 MALLOC_DECLARE(M_KHTTPD);
@@ -79,7 +81,19 @@ extern struct khttpd_log_state khttpd_log_state[];
 
 void khttpd_log(int type, const char *fmt, ...);
 
+char *khttpd_find_ch(const char *begin, const char search);
+char *khttpd_find_ch_in(const char *begin, const char *end, char ch);
+char *khttpd_find_whitespace(const char *ptr, const char *end);
+char *khttpd_skip_whitespace(const char *ptr);
+uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end);
+uint32_t khttpd_hash32_str_ci(const char *str);
+
 int khttpd_sysctl_load(void);
 void khttpd_sysctl_unload(void);
+
+int khttpd_mount(struct khttpd_mount_args *data);
+int khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args);
+int khttpd_file_init(void);
+void khttpd_file_fini(void);
 
 #endif	/* _KERNEL */
