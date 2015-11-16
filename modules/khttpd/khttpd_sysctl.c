@@ -71,7 +71,7 @@
 #define KHTTPD_SYSCTL_PUT_MAX	4096
 #endif
 
-/* --------------------------------------------------------- Type definitions */
+/* --------------------------------------------------------- type definitions */
 
 struct khttpd_sysctl_put_leaf_request {
 	struct mbuf	*head;
@@ -84,7 +84,7 @@ struct khttpd_sysctl_put_leaf_request {
 
 /* ---------------------------------------------------- prototype declrations */
 
-/* ----------------------------------------------------- Variable definitions */
+/* ----------------------------------------------------- variable definitions */
 
 static const char *khttpd_sysctl_types[] = {
 	"node",
@@ -124,7 +124,7 @@ static const struct {
 static const size_t khttpd_sysctl_flags_count =
     sizeof(khttpd_sysctl_flags) / sizeof(khttpd_sysctl_flags[0]);
 
-/* ----------------------------------------------------- Function definitions */
+/* ----------------------------------------------------- function definitions */
 
 static void
 khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
@@ -512,6 +512,7 @@ khttpd_sysctl_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 	const char *suffix;
+
 	TRACE("enter %d %s", khttpd_socket_fd(socket),
 	    khttpd_request_suffix(request));
 
