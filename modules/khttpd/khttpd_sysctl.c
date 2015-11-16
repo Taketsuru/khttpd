@@ -275,7 +275,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 				/* Print ,"description":"hogehoge" */
 				khttpd_mbuf_printf(itembuf,
 				    ",\n\"description\":");
-				khttpd_mbuf_append_json_string(itembuf, strbuf,
+				khttpd_json_mbuf_append_string(itembuf, strbuf,
 				    strbuf + strbuflen - 1);
 			}
 		}
@@ -589,7 +589,7 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 		goto out;
 	}
 
-	khttpd_mbuf_skip_json_ws(&iter);
+	khttpd_json_mbuf_skip_ws(&iter);
 	if (iter.ptr != NULL) {
 		TRACE("error trailing-garbage");
 		error = EINVAL;

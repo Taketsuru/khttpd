@@ -88,6 +88,9 @@ char *khttpd_skip_whitespace(const char *ptr);
 uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end);
 uint32_t khttpd_hash32_str_ci(const char *str);
 
+int khttpd_json_init(void);
+void khttpd_json_fini(void);
+
 int khttpd_sysctl_load(void);
 void khttpd_sysctl_unload(void);
 
