@@ -404,7 +404,7 @@ khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
 
 	default:
 		khttpd_mbuf_printf(result, "\"");
-		khttpd_base64_encode_to_mbuf(result, valbuf, vallen);
+		khttpd_mbuf_base64_encode(result, valbuf, vallen);
 		khttpd_mbuf_printf(result, "\"");
 	}
 
@@ -571,7 +571,7 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	khttpd_mbuf_iter_init(&iter, auxdata->head, 0);
 	if ((kind & CTLTYPE) == CTLTYPE_OPAQUE) {
-		error = khttpd_base64_decode_from_mbuf(&iter, (void **)&valbuf,
+		error = khttpd_mbuf_base64_decode(&iter, (void **)&valbuf,
 		    &vallen);
 		if (error != 0) {
 			TRACE("error decode %d", error);

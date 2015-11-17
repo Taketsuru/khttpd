@@ -714,24 +714,27 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 	struct mbuf *buf;
 	int req, buflen;
 
+	m_length(output, &buf);
+
 	extbuf = NULL;
-	buf = m_get(M_WAITOK, MT_DATA);
 	buflen = M_TRAILINGSPACE(buf);
-	req = vsnprintf(mtod(buf, char *), buflen, fmt, vl);
-	while (buflen < req + 1) {
-		buflen = req + 1;
-		extbuf = realloc(extbuf, sizeof(u_int) + buflen, M_KHTTPD,
-		    M_WAITOK);
-		req = vsnprintf(extbuf + sizeof(u_int), buflen, fmt, vl);
+	req = vsnprintf(mtod(buf, char *) + buf->m_len, buflen, fmt, vl);
+	if (req + 1 <= buflen) {
+		buf->m_len += req;
+		return;
 	}
-	if (extbuf != NULL) {
+
+	if (req + 1 <= MCLBYTES)
+		buf = m_getm2(buf, req + 1, M_WAITOK, MT_DATA, 0);
+	else {
+		buf = buf->m_next = m_get(M_WAITOK, MT_DATA);
+		extbuf = malloc(sizeof(u_int) + req + 1, M_KHTTPD, M_WAITOK);
 		buf->m_ext.ext_cnt = (u_int *)extbuf;
-		MEXTADD(buf, extbuf + sizeof(u_int), buflen,
+		MEXTADD(buf, extbuf + sizeof(u_int), req + 1,
 		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
 	}
 
-	buf->m_len = req;
-	m_cat(output, buf);
+	vsnprintf(mtod(buf, char *), req + 1, fmt, vl);
 }
 
 void
@@ -787,7 +790,51 @@ khttpd_mbuf_append_ch(struct mbuf *output, char ch)
 }
 
 void
-khttpd_base64_encode_to_mbuf(struct mbuf *output, const char *buf, size_t size)
+khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr, int off)
+{
+	iter->unget = -1;
+	iter->ptr = ptr;
+	iter->off = off;
+}
+
+int
+khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter)
+{
+	int result;
+
+	TRACE("enter");
+
+	if (0 < iter->unget) {
+		result = iter->unget;
+		iter->unget = -1;
+		return (result);
+	}
+
+	while (iter->ptr != NULL && iter->ptr->m_len <= iter->off) {
+		iter->off = 0;
+		iter->ptr = iter->ptr->m_next;
+	}
+
+	if (iter->ptr == NULL)
+		return (-1);
+	
+	result = mtod(iter->ptr, unsigned char *)[iter->off];
+	++iter->off;
+
+	return (result);
+}
+
+void
+khttpd_mbuf_ungetc(struct khttpd_mbuf_iter *iter, int ch)
+{
+	TRACE("enter '%c'", ch);
+
+	KASSERT(iter->unget == -1, ("unget=%#02x", iter->unget));
+	iter->unget = ch;
+}
+
+void
+khttpd_mbuf_base64_encode(struct mbuf *output, const char *buf, size_t size)
 {
 	struct mbuf *tail;
 	char *encbuf;
@@ -869,7 +916,7 @@ khttpd_base64_encode_to_mbuf(struct mbuf *output, const char *buf, size_t size)
 }
 
 int
-khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter, void **buf_out,
+khttpd_mbuf_base64_decode(struct khttpd_mbuf_iter *iter, void **buf_out,
     size_t *size_out)
 {
 	unsigned char *buf;
@@ -920,50 +967,6 @@ khttpd_base64_decode_from_mbuf(struct khttpd_mbuf_iter *iter, void **buf_out,
 	*size_out = size;
 
 	return (0);
-}
-
-void
-khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr, int off)
-{
-	iter->unget = -1;
-	iter->ptr = ptr;
-	iter->off = off;
-}
-
-int
-khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter)
-{
-	int result;
-
-	TRACE("enter");
-
-	if (0 < iter->unget) {
-		result = iter->unget;
-		iter->unget = -1;
-		return (result);
-	}
-
-	while (iter->ptr != NULL && iter->ptr->m_len <= iter->off) {
-		iter->off = 0;
-		iter->ptr = iter->ptr->m_next;
-	}
-
-	if (iter->ptr == NULL)
-		return (-1);
-	
-	result = mtod(iter->ptr, unsigned char *)[iter->off];
-	++iter->off;
-
-	return (result);
-}
-
-void
-khttpd_mbuf_ungetc(struct khttpd_mbuf_iter *iter, int ch)
-{
-	TRACE("enter '%c'", ch);
-
-	KASSERT(iter->unget == -1, ("unget=%#02x", iter->unget));
-	iter->unget = ch;
 }
 
 /*
@@ -4329,4 +4332,3 @@ khttpd_loader(struct module *m, int what, void *arg)
 }
 
 DEV_MODULE(khttpd, khttpd_loader, NULL);
-MODULE_VERSION(khttpd, 1100000);
