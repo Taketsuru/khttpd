@@ -99,4 +99,7 @@ int khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args);
 int khttpd_file_init(void);
 void khttpd_file_fini(void);
 
+int khttpd_sdt_load(void);
+void khttpd_sdt_unload(void);
+
 #endif	/* _KERNEL */

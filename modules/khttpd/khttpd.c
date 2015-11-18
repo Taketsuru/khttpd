@@ -49,8 +49,6 @@
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 
-#include <machine/stdarg.h>
-
 #include <vm/uma.h>
 
 #include <netinet/in.h>
@@ -3843,7 +3841,7 @@ khttpd_main(void *arg)
 	}
 	debug_fd = td->td_retval[0];
 
-	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = 0;
+	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
 	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
 
 	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
@@ -4228,6 +4226,7 @@ khttpd_unload(void)
 	if (khttpd_dev != NULL)
 		destroy_dev(khttpd_dev);
 
+	khttpd_sdt_unload();
 	khttpd_sysctl_unload();
 
 	STAILQ_INIT(&worklist);
@@ -4284,6 +4283,10 @@ khttpd_load(void)
 	mtx_unlock(&khttpd_lock);
 
 	error = khttpd_sysctl_load();
+	if (error != 0)
+		goto bad;
+
+	error = khttpd_sdt_load();
 	if (error != 0)
 		goto bad;
 

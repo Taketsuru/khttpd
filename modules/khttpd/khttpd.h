@@ -28,6 +28,7 @@
 #pragma once
 
 #include <sys/types.h>
+#include <machine/stdarg.h>
 #include <sys/ioccom.h>
 #include <sys/socket.h>
 
