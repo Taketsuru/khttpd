@@ -1,6 +1,6 @@
 SYSDIR = $(HOME)/freebsd/sys
 
-SRCS = khttpd.c khttpd_json.c khttpd_mbuf.c
+SRCS = khttpd.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
 SRCS += khttpd_sysctl.c khttpd_file.c khttpd_sdt.c
 KMOD = khttpd
 
