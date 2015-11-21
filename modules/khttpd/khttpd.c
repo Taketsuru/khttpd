@@ -1670,6 +1670,8 @@ khttpd_response_set_xmit_data_mbuf(struct khttpd_response *response,
 {
 	struct mbuf **proc_data;
 	
+	khttpd_header_add_content_length(response->header,
+	    m_length(data, NULL));
 	proc_data = malloc(sizeof(struct mbuf *) * 2, M_KHTTPD, M_WAITOK);
 	proc_data[0] = proc_data[1] = data;
 	khttpd_response_set_xmit_proc(response, khttpd_transmit_data_mbuf,

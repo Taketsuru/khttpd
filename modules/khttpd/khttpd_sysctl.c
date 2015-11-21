@@ -479,7 +479,6 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 {
 	int oid[CTL_MAXNAME];
 	struct mbuf *body;
-	struct khttpd_header *header;
 	struct khttpd_response *response;
 	const char *name;
 	size_t oidlen;
@@ -507,10 +506,9 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 	}
 
 	response = khttpd_response_alloc();
-	header = khttpd_response_header(response);
 	khttpd_response_set_xmit_data_mbuf(response, body);
-	khttpd_header_add_content_length(header, m_length(body, NULL));
-	khttpd_header_add(header, "Content-Type: application/json");
+	khttpd_header_add(khttpd_response_header(response),
+	    "Content-Type: application/json");
 	khttpd_response_set_status(response, 200);
 	khttpd_send_response(socket, request, response);
 }

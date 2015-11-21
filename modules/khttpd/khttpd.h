@@ -249,6 +249,8 @@ int khttpd_json_parse(struct khttpd_mbuf_iter *iter,
     struct khttpd_json **value_out, int depth_limit);
 struct mbuf *khttpd_json_mbuf_append_string(struct mbuf *output,
     const char *begin, const char *end);
+struct mbuf *khttpd_json_mbuf_append_cstring(struct mbuf *output,
+    const char *str);
 void khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_iter *iter);
 
 struct khttpd_header_field *khttpd_header_find(struct khttpd_header *header,

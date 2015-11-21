@@ -93,6 +93,8 @@ static struct khttpd_json khttpd_json_false = {
 	.ivalue = 0
 };
 
+static const char khttpd_json_null_literal[] = "null";
+
 static uma_zone_t khttpd_json_zone;
 
 /* ----------------------------------------------------- function definitions */
@@ -964,6 +966,16 @@ expand:
 	khttpd_mbuf_append_ch(tail, '\"');
 
 	return (0);
+}
+
+struct mbuf *
+khttpd_json_mbuf_append_cstring(struct mbuf *output, const char *str)
+{
+	return str != NULL
+	    ? khttpd_json_mbuf_append_string(output, str, str + strlen(str))
+	    : khttpd_mbuf_append(output, khttpd_json_null_literal,
+		khttpd_json_null_literal + sizeof(khttpd_json_null_literal) -
+		1);
 }
 
 void
