@@ -24,10 +24,13 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/ctype.h>
+#include <sys/pcpu.h>
 #include <sys/hash.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
+#include <sys/proc.h>
 #include <sys/eventhandler.h>
 #include <sys/malloc.h>
 #include <sys/linker.h>
@@ -35,6 +38,8 @@
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/sdt.h>
+
+#include <machine/cpu.h>
 
 #include <vm/uma.h>
 
@@ -53,8 +58,16 @@
 #define KHTTPD_SDT_PROVIDER_HASH_SIZE	128
 #endif
 
+#ifndef KHTTPD_SDT_HISTORY_PAGE_SIZE
+#define KHTTPD_SDT_HISTORY_PAGE_SIZE	(32UL * 1024)
+#endif
+
+#ifndef KHTTPD_SDT_HISTORY_PAGES
+#define KHTTPD_SDT_HISTORY_PAGES	64
+#endif
+
 #define KHTTPD_SDT_PROBE_PREFIX KHTTPD_SDT_PREFIX "/probe"
-#define KHTTPD_SDT_CHANNEL_PREFIX KHTTPD_SDT_PREFIX "/chan"
+#define KHTTPD_SDT_HISTORY_PREFIX KHTTPD_SDT_PREFIX "/history"
 
 /* --------------------------------------------------------- type definitions */
 
@@ -71,6 +84,24 @@ struct khttpd_sdt_ko_file {
 	struct linker_file		*file;
 };
 
+struct khttpd_sdt_history_entry {
+	uint64_t	timestamp;
+	uintptr_t	args[5];
+	int		cpuid;
+	lwpid_t		tid;
+	uint32_t	id;
+};
+
+struct khttpd_sdt_history_page {
+	struct bintime	timestamp;
+	struct khttpd_sdt_history_entry *contents;
+	int		seqno;
+	int		size;
+};
+
+#define KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE \
+	(KHTTPD_SDT_HISTORY_PAGE_SIZE / sizeof(struct khttpd_sdt_history_entry))
+
 SPLAY_HEAD(khttpd_sdt_probe_tree, khttpd_sdt_probe);
 TAILQ_HEAD(khttpd_sdt_probe_list, khttpd_sdt_probe);
 
@@ -78,6 +109,8 @@ TAILQ_HEAD(khttpd_sdt_probe_list, khttpd_sdt_probe);
 
 static int khttpd_sdt_probe_tree_comparator(struct khttpd_sdt_probe *x,
     struct khttpd_sdt_probe *y);
+static void khttpd_sdt_history_received_header(struct khttpd_socket *socket, 
+    struct khttpd_request *request);
 static void khttpd_sdt_probe_received_header(struct khttpd_socket *socket, 
     struct khttpd_request *request);
 
@@ -98,15 +131,24 @@ static struct khttpd_route_type khttpd_route_type_sdt_probe = {
 	.received_header_fn = khttpd_sdt_probe_received_header
 };
 
+static struct khttpd_route_type khttpd_route_type_sdt_history = {
+	.name = "sdt-history",
+	.received_header_fn = khttpd_sdt_history_received_header
+};
+
 static TAILQ_HEAD(, sdt_provider)
 	khttpd_sdt_providers[KHTTPD_SDT_PROVIDER_HASH_SIZE];
 static SLIST_HEAD(, khttpd_sdt_ko_file)
 	khttpd_sdt_ko_files[KHTTPD_SDT_KO_FILE_HASH_SIZE];
+static struct khttpd_sdt_history_page
+    khttpd_sdt_history_pages[KHTTPD_SDT_HISTORY_PAGES];
+static struct mtx khttpd_sdt_history_lock;
 static eventhandler_tag khttpd_sdt_kld_load_tag;
 static eventhandler_tag khttpd_sdt_kld_unload_try_tag;
 static struct khttpd_sdt_probe_tree khttpd_sdt_all_probes_tree;
 static struct khttpd_sdt_probe_list khttpd_sdt_all_probes_list;
 static uma_zone_t khttpd_sdt_probe_zone;
+static int khttpd_sdt_history_current;
 
 /* ----------------------------------------------------- function definitions */
 
@@ -220,6 +262,180 @@ khttpd_sdt_probe_tree_comparator(struct khttpd_sdt_probe *x,
 }
 
 static void
+khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct khttpd_response *response;
+	char *buffer;
+	const char *suffix;
+	char *endptr;
+	size_t size;
+	uintmax_t page;
+	int i;
+
+	TRACE("enter %s", khttpd_request_suffix(request));
+
+	suffix = khttpd_request_suffix(request);
+	if (*suffix == '/')
+		++suffix;
+
+	if (!isdigit(*suffix) || *suffix == '\0') {
+		TRACE("error firstch");
+		goto enoent;
+	}
+
+	page = strtoul(suffix, &endptr, 10);
+	if (*endptr != '\0') {
+		TRACE("error lastch");
+		goto enoent;
+	}
+
+	buffer = malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE, M_KHTTPD, M_WAITOK);
+
+	mtx_lock(&khttpd_sdt_history_lock);
+
+	for (i = 0; khttpd_sdt_history_pages[i].seqno != page &&
+		 i < KHTTPD_SDT_HISTORY_PAGES; ++i)
+		; /* nothing */
+
+	if (KHTTPD_SDT_HISTORY_PAGES <= i) {
+		mtx_unlock(&khttpd_sdt_history_lock);
+		TRACE("error nopage");
+		goto enoent;
+	}
+
+	size = khttpd_sdt_history_pages[i].size *
+	    sizeof(struct khttpd_sdt_history_entry);
+	bcopy(khttpd_sdt_history_pages[i].contents, buffer, size);
+
+	mtx_unlock(&khttpd_sdt_history_lock);
+
+	response = khttpd_response_alloc();
+	khttpd_header_add(khttpd_response_header(response),
+	    "Content-Type: application/octet-stream");
+	khttpd_response_set_status(response, 200);
+	khttpd_response_set_xmit_data_on_heap(response, buffer, size);
+	khttpd_send_response(socket, request, response);
+
+	return;
+
+enoent:
+	khttpd_send_not_found_response(socket, request, FALSE);
+}
+
+static void
+khttpd_sdt_history_leaf_received_header(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	TRACE("enter");
+
+	switch (khttpd_request_method(request)) {
+
+	case KHTTPD_METHOD_GET:
+	case KHTTPD_METHOD_HEAD:
+		khttpd_sdt_history_leaf_get_or_head(socket, request);
+		break;
+
+	case KHTTPD_METHOD_OPTIONS:
+		/*
+		 * XXX khttpd_send_not_found_response must be called if the
+		 * specified page doesn't exist.
+		 */
+		khttpd_send_options_response(socket, request, NULL,
+		    "OPTIONS, HEAD, GET");
+		break;
+
+	default:
+		khttpd_send_not_implemented_response(socket, request, FALSE);
+	}
+}
+
+static void
+khttpd_sdt_history_index_get_or_head(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct mbuf *payload;
+	struct khttpd_sdt_history_page *page;
+	struct khttpd_response *response;
+	int i;
+
+	TRACE("enter");
+
+	payload = m_get(M_WAITOK, MT_DATA);
+
+	khttpd_mbuf_printf(payload, "{\"entriesPerPage\": %zd,\n"
+	    "\"entrySize\": %zd,\n\"items\": [",
+	    KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE,
+	    sizeof(struct khttpd_sdt_history_entry));
+
+	mtx_lock(&khttpd_sdt_history_lock);
+	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES; ++i) {
+		page = khttpd_sdt_history_pages + i;
+		if (page->size == 0 || page->seqno == 0)
+			continue;
+		mtx_unlock(&khttpd_sdt_history_lock);
+
+		khttpd_mbuf_printf(payload, "{\"page\": %u, "
+		    "\"size\": %zd, \"href\": \"" KHTTPD_SDT_HISTORY_PREFIX
+		    "/%u\", \"timestampMin\": %ju, \"timestampMax\": %ju}",
+		    page->seqno, page->size, page->seqno,
+		    (uintmax_t)page->contents[0].timestamp,
+		    (uintmax_t)page->contents[page->size - 1].timestamp);
+
+		mtx_lock(&khttpd_sdt_history_lock);
+	}
+	mtx_unlock(&khttpd_sdt_history_lock);
+
+	khttpd_mbuf_printf(payload, "]}");
+
+	response = khttpd_response_alloc();
+	khttpd_response_set_status(response, 200);
+	khttpd_response_set_xmit_data_mbuf(response, payload);
+	khttpd_header_add(khttpd_response_header(response),
+	    "Content-Type: application/json");
+	khttpd_send_response(socket, request, response);
+}
+
+static void
+khttpd_sdt_history_index_received_header(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	TRACE("enter");
+
+	switch (khttpd_request_method(request)) {
+
+	case KHTTPD_METHOD_GET:
+	case KHTTPD_METHOD_HEAD:
+		khttpd_sdt_history_index_get_or_head(socket, request);
+		break;
+
+	case KHTTPD_METHOD_OPTIONS:
+		khttpd_send_options_response(socket, request, NULL,
+		    "OPTIONS, HEAD, GET, POST");
+		break;
+
+	default:
+		khttpd_send_not_implemented_response(socket, request, FALSE);
+	}
+}
+
+static void
+khttpd_sdt_history_received_header(struct khttpd_socket *socket, 
+    struct khttpd_request *request)
+{
+	const char *suffix;
+
+	TRACE("enter %d", khttpd_socket_fd(socket));
+
+	suffix = khttpd_request_suffix(request);
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0) {
+		khttpd_sdt_history_index_received_header(socket, request);
+	} else {
+		khttpd_sdt_history_leaf_received_header(socket, request);
+	}
+}
+
+static void
 khttpd_sdt_probe_json_encode(struct mbuf *output,
     struct khttpd_sdt_probe *probe)
 {
@@ -236,6 +452,7 @@ khttpd_sdt_probe_json_encode(struct mbuf *output,
 	khttpd_json_mbuf_append_cstring(output, ptr->func);
 	khttpd_mbuf_printf(output, ",\n\"name\": ");
 	khttpd_json_mbuf_append_cstring(output, ptr->name);
+	khttpd_mbuf_printf(output, ",\n\"index\": %u", ptr->id);
 
 	khttpd_mbuf_printf(output, ",\n\"arguments\": [ ");
 	TAILQ_FOREACH(arg, &ptr->argtype_list, argtype_entry) {
@@ -338,8 +555,39 @@ static void
 khttpd_sdt_probe(uint32_t id, uintptr_t arg0, uintptr_t arg1,
     uintptr_t arg2, uintptr_t arg3, uintptr_t arg4)
 {
+	struct khttpd_sdt_history_page *page;
+	struct khttpd_sdt_history_entry *entry;
+	int current, seqno;
+
 	TRACE("enter %d %#lx %#lx %#lx %#lx %#lx",
 	    id, arg0, arg1, arg2, arg3, arg4);
+
+	mtx_lock(&khttpd_sdt_history_lock);
+
+	current = khttpd_sdt_history_current;
+	page = khttpd_sdt_history_pages + current;
+	if (KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE <= page->size) {
+		if (KHTTPD_SDT_HISTORY_PAGES <= ++current)
+			current = 0;
+		khttpd_sdt_history_current = current;
+		seqno = page->seqno + 1;
+		page = khttpd_sdt_history_pages + current;
+		page->seqno = seqno;
+		page->size = 0;
+	}
+
+	entry = &page->contents[page->size++];
+	entry->timestamp = get_cyclecount();
+	entry->args[0] = arg0;
+	entry->args[1] = arg1;
+	entry->args[2] = arg2;
+	entry->args[3] = arg3;
+	entry->args[4] = arg4;
+	entry->cpuid = PCPU_GET(cpuid);
+	entry->tid = curthread->td_tid;
+	entry->id = id;
+
+	mtx_unlock(&khttpd_sdt_history_lock);
 }
 
 static struct sdt_provider *
@@ -408,16 +656,14 @@ khttpd_sdt_probe_new(struct khttpd_sdt_ko_file *file, struct sdt_probe *peer)
 {
 	struct khttpd_sdt_probe *probe, *next;
 
-	TRACE("enter %s:%s:%s:%s", peer->prov->name, peer->mod, peer->func,
-	    peer->name);
-
 	probe = uma_zalloc(khttpd_sdt_probe_zone, M_WAITOK);
 	probe->probe = peer;
 	SPLAY_INSERT(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree, probe);
 	next = SPLAY_NEXT(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree,
 	    probe);
 	if (next == NULL)
-		TAILQ_INSERT_TAIL(&khttpd_sdt_all_probes_list, probe, list_entry);
+		TAILQ_INSERT_TAIL(&khttpd_sdt_all_probes_list, probe,
+		    list_entry);
 	else
 		TAILQ_INSERT_BEFORE(next, probe, list_entry);
 	LIST_INSERT_HEAD(&file->probes, probe, file_list_entry);
@@ -512,6 +758,14 @@ khttpd_sdt_load_proc(void *arg)
 	    sizeof(struct khttpd_sdt_probe), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
 
+	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES; ++i)
+		khttpd_sdt_history_pages[i].contents =
+		    malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE, M_KHTTPD, M_WAITOK);
+	khttpd_sdt_history_pages[0].size =
+	    KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE;
+
+	mtx_init(&khttpd_sdt_history_lock, "khttpd-sdt-history-lock", NULL, 0);
+
 	for (i = 0; i < sizeof(khttpd_sdt_providers) /
 		 sizeof(khttpd_sdt_providers[0]); ++i)
 		TAILQ_INIT(&khttpd_sdt_providers[i]);
@@ -537,6 +791,14 @@ khttpd_sdt_load_proc(void *arg)
 		return (error);
 	}
 
+	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SDT_HISTORY_PREFIX,
+	    &khttpd_route_type_sdt_history);
+	if (error != 0) {
+		printf("khttpd: failed to add route " KHTTPD_SDT_HISTORY_PREFIX
+		    ": %d\n", error);
+		return (error);
+	}
+
 	return (error);
 }
 
@@ -550,6 +812,11 @@ khttpd_sdt_unload_proc(void *arg)
 	int i;
 
 	TRACE("enter");
+
+	route = khttpd_route_find(&khttpd_route_root, KHTTPD_SDT_HISTORY_PREFIX,
+	    NULL);
+	if (route != NULL)
+		khttpd_route_remove(route);
 
 	route = khttpd_route_find(&khttpd_route_root, KHTTPD_SDT_PROBE_PREFIX,
 	    NULL);
@@ -574,6 +841,7 @@ khttpd_sdt_unload_proc(void *arg)
 
 	while ((probe = TAILQ_FIRST(&khttpd_sdt_all_probes_list)) != NULL) {
 		TAILQ_REMOVE(&khttpd_sdt_all_probes_list, probe, list_entry);
+		probe->probe->id = 0;
 		uma_zfree(khttpd_sdt_probe_zone, probe);
 	}
 
@@ -586,6 +854,23 @@ khttpd_sdt_unload_proc(void *arg)
 			free(file, M_KHTTPD);
 		}
 	}
+
+	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES; ++i)
+		free(khttpd_sdt_history_pages[i].contents, M_KHTTPD);
+
+	mtx_destroy(&khttpd_sdt_history_lock);
+
+	return (0);
+}
+
+static int
+khttpd_sdt_quiesce_proc(void *arg)
+{
+	struct khttpd_sdt_probe *probe;
+
+	TAILQ_FOREACH(probe, &khttpd_sdt_all_probes_list, list_entry)
+		if (probe->probe->id != 0)
+			return (EBUSY);
 
 	return (0);
 }
@@ -600,4 +885,10 @@ void
 khttpd_sdt_unload(void)
 {
 	khttpd_run_proc(khttpd_sdt_unload_proc, NULL);
+}
+
+int
+khttpd_sdt_quiesce(void)
+{
+	return (khttpd_run_proc(khttpd_sdt_quiesce_proc, NULL));
 }

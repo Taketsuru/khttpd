@@ -226,6 +226,8 @@ static void khttpd_kevent_nop(struct kevent *event);
 
 static int khttpd_transmit_data_mbuf(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
+static int khttpd_transmit_data_on_heap(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response);
 static int khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
@@ -1678,6 +1680,15 @@ khttpd_response_set_xmit_data_mbuf(struct khttpd_response *response,
 	    proc_data, khttpd_response_dtor_simple);
 }
 
+void
+khttpd_response_set_xmit_data_on_heap(struct khttpd_response *response,
+    void *data, size_t size)
+{
+	khttpd_header_add_content_length(response->header, size);
+	khttpd_response_set_xmit_proc(response, khttpd_transmit_data_on_heap,
+	    data, khttpd_response_dtor_simple);
+}
+
 /*
  * socket
  */
@@ -2315,6 +2326,25 @@ khttpd_transmit_data_mbuf(struct khttpd_socket *socket,
 	socket->xmit_uio.uio_iovcnt = i;
 	socket->xmit_uio.uio_resid = resid;
 	socket->xmit_uio.uio_segflg = UIO_SYSSPACE;
+
+	return (0);
+}
+
+static int
+khttpd_transmit_data_on_heap(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response)
+{
+	TRACE("enter %d", socket->fd);
+
+	socket->xmit_iov[0].iov_base = response->data;
+	socket->xmit_iov[0].iov_len  = response->content_length;
+
+	socket->xmit_uio.uio_iov = socket->xmit_iov;
+	socket->xmit_uio.uio_iovcnt = 1;
+	socket->xmit_uio.uio_resid = response->content_length;
+	socket->xmit_uio.uio_segflg = UIO_SYSSPACE;
+
+	socket->transmit = khttpd_transmit_end;
 
 	return (0);
 }
@@ -3843,6 +3873,8 @@ khttpd_quiesce_proc(void *args)
 static int
 khttpd_loader(struct module *m, int what, void *arg)
 {
+	int error;
+
 	switch (what) {
 
 	case MOD_LOAD:
@@ -3854,7 +3886,11 @@ khttpd_loader(struct module *m, int what, void *arg)
 		return (0);
 
 	case MOD_QUIESCE:
-		return (khttpd_run_proc(khttpd_quiesce_proc, NULL));
+		error = khttpd_run_proc(khttpd_quiesce_proc, NULL);
+		if (error != 0)
+			return (error);
+		error = khttpd_sdt_quiesce();
+		return (error);
 
 	default:
 		return (EOPNOTSUPP);

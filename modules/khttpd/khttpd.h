@@ -292,6 +292,8 @@ void khttpd_response_set_xmit_proc(struct khttpd_response *response,
 struct khttpd_header *khttpd_response_header(struct khttpd_response *response);
 void khttpd_response_set_xmit_data_mbuf(struct khttpd_response *response,
     struct mbuf *data);
+void khttpd_response_set_xmit_data_on_heap(struct khttpd_response *response,
+    void *data, size_t size);
 
 const char *khttpd_request_target(struct khttpd_request *request);
 const char *khttpd_request_suffix(struct khttpd_request *request);

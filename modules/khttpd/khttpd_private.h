@@ -106,5 +106,6 @@ void khttpd_file_fini(void);
 
 int khttpd_sdt_load(void);
 void khttpd_sdt_unload(void);
+int khttpd_sdt_quiesce(void);
 
 #endif	/* _KERNEL */
