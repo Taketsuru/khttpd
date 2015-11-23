@@ -36,18 +36,20 @@
 
     <div class="tab-panel container-fluid">
       <div ng-controller="sysctlPanelController as sysctlPanel">
-	<table class="table-hover">
+	<table class="table table-hover">
 	  <thead>
 	    <tr>
 	      <th>Name</th>
 	      <th>Type</th>
+	      <th>Value</th>
 	      <th>Description</th>
 	    </tr>
 	  </thead>
 	  <tbody>
 	  <tr ng-repeat="item in sysctlPanel.sysctl.items">
-	    <td><a href="{{item.href}}"><p>{{item.name}}</p></a></td>
-	    <td><p>{{item.type}}</p></td>
+	    <td>{{item.name}}</td>
+	    <td>{{item.type}}</td>
+	    <td>{{item.value}}</td>
 	    <td>{{item.description}}</td>
 	  </tr>
 	  </tbody>
