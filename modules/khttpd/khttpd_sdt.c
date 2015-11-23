@@ -869,8 +869,12 @@ khttpd_sdt_quiesce_proc(void *arg)
 	struct khttpd_sdt_probe *probe;
 
 	TAILQ_FOREACH(probe, &khttpd_sdt_all_probes_list, list_entry)
-		if (probe->probe->id != 0)
+		if (probe->probe->id != 0) {
+			printf("khttpd: probe %s:%s:%s:%s is still enabled\n",
+			    probe->probe->prov->name, probe->probe->mod,
+			    probe->probe->func, probe->probe->name);
 			return (EBUSY);
+		}
 
 	return (0);
 }

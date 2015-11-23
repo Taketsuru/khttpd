@@ -3866,7 +3866,12 @@ bad:
 static int
 khttpd_quiesce_proc(void *args)
 {
-	return (LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY);
+	int error;
+
+	error = LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY;
+	if (error != 0)
+		printf("khttpd: the server still has a connection.\n");
+	return (error);
 }
 
 static int
