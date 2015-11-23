@@ -48,16 +48,15 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 	char *extbuf;
 	struct mbuf *buf;
 	int req, buflen;
+	va_list vlcopy;
+
+	va_copy(vlcopy, vl);
 
 	m_length(output, &buf);
-
-	extbuf = NULL;
 	buflen = M_TRAILINGSPACE(buf);
 	req = vsnprintf(mtod(buf, char *) + buf->m_len, buflen, fmt, vl);
-	if (req + 1 <= buflen) {
-		buf->m_len += req;
-		return;
-	}
+	if (req + 1 <= buflen)
+		goto end;
 
 	if (req + 1 <= MCLBYTES) {
 		m_getm2(buf, req + 1, M_WAITOK, MT_DATA, 0);
@@ -70,8 +69,11 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
 	}
 
-	req = vsnprintf(mtod(buf, char *), req + 1, fmt, vl);
-	buf->m_len = req;
+	req = vsnprintf(mtod(buf, char *), M_TRAILINGSPACE(buf), fmt, vlcopy);
+
+end:
+	buf->m_len += req;
+	va_end(vlcopy);
 }
 
 void

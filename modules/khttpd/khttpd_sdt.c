@@ -452,7 +452,7 @@ khttpd_sdt_probe_json_encode(struct mbuf *output,
 	khttpd_json_mbuf_append_cstring(output, ptr->func);
 	khttpd_mbuf_printf(output, ",\n\"name\": ");
 	khttpd_json_mbuf_append_cstring(output, ptr->name);
-	khttpd_mbuf_printf(output, ",\n\"index\": %u", ptr->id);
+	khttpd_mbuf_printf(output, ",\n\"index\": %jd", (intmax_t)ptr->id);
 
 	khttpd_mbuf_printf(output, ",\n\"arguments\": [ ");
 	TAILQ_FOREACH(arg, &ptr->argtype_list, argtype_entry) {
