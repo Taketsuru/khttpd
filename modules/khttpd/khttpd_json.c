@@ -835,7 +835,7 @@ khttpd_json_mbuf_append_string(struct mbuf *output,
 	srcp = begin;
 	tail = khttpd_mbuf_append_ch(output, '\"');
 	dstp = mtod(tail, char *) + tail->m_len;
-	dend = mtod(tail, char *) + M_TRAILINGSPACE(tail);
+	dend = M_START(tail) + M_SIZE(tail);
 
 	while (srcp < end) {
 		ch = (unsigned char)*srcp;
@@ -959,13 +959,13 @@ expand:
 		tail->m_len = dstp - mtod(tail, char *);
 		tail = tail->m_next = m_get(M_WAITOK, MT_DATA);
 		dstp = mtod(tail, char *);
-		dend = dstp + M_TRAILINGSPACE(tail);
+		dend = M_START(tail) + M_SIZE(tail);
 	}
 
 	tail->m_len = dstp - mtod(tail, char *);
 	khttpd_mbuf_append_ch(tail, '\"');
 
-	return (0);
+	return (tail);
 }
 
 struct mbuf *

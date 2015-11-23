@@ -134,6 +134,83 @@ static const size_t khttpd_sysctl_flags_count =
 
 /* ----------------------------------------------------- function definitions */
 
+static int
+khttpd_sysctl_value_in_json(struct mbuf *output, int *oid, int oidlen,
+    u_int kind)
+{
+	struct thread *td;
+	char *valbuf;
+	size_t vallen;
+	int error;
+	u_int type;
+
+	td = curthread;
+	type = kind & CTLTYPE;
+	valbuf = NULL;
+
+	if (type == CTLTYPE_NODE) {
+		TRACE("error node");
+		error = ENOENT;
+		goto out;
+	}
+
+	error = kernel_sysctl(td, oid, oidlen, NULL, 0, NULL, 0, &vallen, 0);
+	if (error != 0) {
+		TRACE("error get1 %d %d", error, oidlen);
+		goto out;
+	}
+	valbuf = malloc(vallen, M_KHTTPD, M_WAITOK);
+	error = kernel_sysctl(td, oid, oidlen, valbuf, &vallen, NULL, 0, NULL, 0);
+	if (error != 0) {
+		TRACE("error get2 %d", error);
+		goto out;
+	}
+
+	switch (type) {
+
+	case CTLTYPE_INT:
+		khttpd_mbuf_printf(output, "%d", *(int *)valbuf);
+		break;
+
+	case CTLTYPE_STRING:
+		if (0 < vallen && valbuf[vallen - 1] == '\0')
+			--vallen;
+		khttpd_json_mbuf_append_string(output, valbuf, valbuf + vallen);
+		break;
+
+	case CTLTYPE_S64:
+		khttpd_mbuf_printf(output, "%jd", (intmax_t)*(int64_t *)valbuf);
+		break;
+
+	case CTLTYPE_UINT:
+		khttpd_mbuf_printf(output, "%u", *(u_int *)valbuf);
+		break;
+
+	case CTLTYPE_LONG:
+		khttpd_mbuf_printf(output, "%ld", *(long *)valbuf);
+		break;
+
+	case CTLTYPE_ULONG:
+		khttpd_mbuf_printf(output, "%lu", *(u_long *)valbuf);
+		break;
+
+	case CTLTYPE_U64:
+		khttpd_mbuf_printf(output, "%ju",
+		    (uintmax_t)*(uint64_t *)valbuf);
+		break;
+
+	default:
+		khttpd_mbuf_printf(output, "\"");
+		khttpd_mbuf_base64_encode(output, valbuf, vallen);
+		khttpd_mbuf_printf(output, "\"");
+	}
+
+out:
+	free(valbuf, M_KHTTPD);
+
+	return (error);
+}
+
 static void
 khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
     struct khttpd_request *request)
@@ -146,7 +223,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 	struct thread *td;
 	size_t cur_oidlen, next_oidlen, strbuflen;
 	u_int kind;
-	int error, i, flag_count, item_count, type;
+	int error, i, flag_count, item_count, pos, type;
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) == sizeof(kind));
 
@@ -280,6 +357,17 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 			}
 		}
 
+		/* Get the value of the next entry */
+		if (type != CTLTYPE_NODE && type != CTLTYPE_OPAQUE) {
+			pos = m_length(itembuf, NULL);
+			khttpd_mbuf_printf(itembuf, ",\n\"value\":");
+			error = khttpd_sysctl_value_in_json(itembuf, next_oid + 2,
+			    next_oidlen / sizeof(int), kind);
+			if (error != 0)
+				m_adj(itembuf,
+				    pos - (int)m_length(itembuf, NULL));
+		}
+
 		khttpd_mbuf_printf(itembuf, "}");
 
 		m_cat(body, itembuf);
@@ -335,8 +423,8 @@ khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
 	tmpoid[0] = 0;		/* sysctl internal magic */
 	tmpoid[1] = 4;		/* oidfmt */
 	bcopy(oid, tmpoid + 2, oidlen * sizeof(oid[0]));
-	error = kernel_sysctl(td, tmpoid, oidlen + 2,
-	    NULL, 0, NULL, 0, &vallen, 0);
+	error = kernel_sysctl(td, tmpoid, oidlen + 2, NULL, 0, NULL, 0, &vallen,
+	    0);
 	if (error != 0) {
 		TRACE("error oidfmt1 %d", error);
 		goto out;
@@ -351,62 +439,14 @@ khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
 	}
 	bcopy(valbuf, &kind, sizeof(kind));
 	type = kind & CTLTYPE;
+	free(valbuf, M_KHTTPD);
+	valbuf = NULL;
 
 	if (type == CTLTYPE_NODE) {
 		TRACE("error node");
 		error = ENOENT;
-		goto out;
-	}
-
-	error = kernel_sysctl(td, oid, oidlen, NULL, 0, NULL, 0, &vallen, 0);
-	if (error != 0) {
-		TRACE("error get1 %d", error);
-		goto out;
-	}
-	valbuf = realloc(valbuf, vallen, M_KHTTPD, M_WAITOK);
-	error = kernel_sysctl(td, oid, oidlen,
-	    valbuf, &vallen, NULL, 0, NULL, 0);
-	if (error != 0) {
-		TRACE("error get2 %d", error);
-		goto out;
-	}
-
-	switch (type) {
-
-	case CTLTYPE_INT:
-		khttpd_mbuf_printf(result, "%d", *(int *)valbuf);
-		break;
-
-	case CTLTYPE_STRING:
-		khttpd_mbuf_printf(result, "\"%s\"", (char *)valbuf);
-		break;
-
-	case CTLTYPE_S64:
-		khttpd_mbuf_printf(result, "%jd", (intmax_t)*(int64_t *)valbuf);
-		break;
-
-	case CTLTYPE_UINT:
-		khttpd_mbuf_printf(result, "%u", *(u_int *)valbuf);
-		break;
-
-	case CTLTYPE_LONG:
-		khttpd_mbuf_printf(result, "%ld", *(long *)valbuf);
-		break;
-
-	case CTLTYPE_ULONG:
-		khttpd_mbuf_printf(result, "%lu", *(u_long *)valbuf);
-		break;
-
-	case CTLTYPE_U64:
-		khttpd_mbuf_printf(result, "%ju",
-		    (uintmax_t)*(uint64_t *)valbuf);
-		break;
-
-	default:
-		khttpd_mbuf_printf(result, "\"");
-		khttpd_mbuf_base64_encode(result, valbuf, vallen);
-		khttpd_mbuf_printf(result, "\"");
-	}
+	} else
+		error = khttpd_sysctl_value_in_json(result, oid, oidlen, kind);
 
 out:
 	free(valbuf, M_KHTTPD);

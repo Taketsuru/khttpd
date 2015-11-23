@@ -59,9 +59,10 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 		return;
 	}
 
-	if (req + 1 <= MCLBYTES)
-		buf = m_getm2(buf, req + 1, M_WAITOK, MT_DATA, 0);
-	else {
+	if (req + 1 <= MCLBYTES) {
+		m_getm2(buf, req + 1, M_WAITOK, MT_DATA, 0);
+		buf = buf->m_next;
+	} else {
 		buf = buf->m_next = m_get(M_WAITOK, MT_DATA);
 		extbuf = malloc(sizeof(u_int) + req + 1, M_KHTTPD, M_WAITOK);
 		buf->m_ext.ext_cnt = (u_int *)extbuf;
@@ -69,7 +70,8 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
 	}
 
-	vsnprintf(mtod(buf, char *), req + 1, fmt, vl);
+	req = vsnprintf(mtod(buf, char *), req + 1, fmt, vl);
+	buf->m_len = req;
 }
 
 void
@@ -100,8 +102,9 @@ khttpd_mbuf_append(struct mbuf *output, const char *begin, const char *end)
 	if (end <= cp)
 		return (ptr);
 
-	for (ptr = m_getm2(ptr, end - cp, M_WAITOK, MT_DATA, 0); cp < end;
-	     ptr = ptr->m_next) {
+	m_getm2(ptr, end - cp, M_WAITOK, MT_DATA, 0);
+
+	for (ptr = ptr->m_next; cp < end; ptr = ptr->m_next) {
 		len = MIN(end - cp, M_TRAILINGSPACE(ptr));
 		bcopy(cp, mtod(ptr, void *), len);
 		ptr->m_len = len;
