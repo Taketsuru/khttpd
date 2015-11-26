@@ -8,20 +8,21 @@
  * 1. Redistributions of source code must retain the above copyright notice,
  * this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.	IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
  */
 
 #include <sys/types.h>
@@ -34,11 +35,12 @@
 #include "khttpd.h"
 #include "khttpd_private.h"
 
-/* ----------------------------------------------------- function definitions */
+/* --------------------------------------------------- function definitions */
 
 static void
 khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
 {
+
 	free(mtod(buf, char *) - sizeof(u_int), M_KHTTPD);
 }
 
@@ -80,6 +82,7 @@ void
 khttpd_mbuf_printf(struct mbuf *output, const char *fmt, ...)
 {
 	va_list vl;
+
 	va_start(vl, fmt);
 	khttpd_mbuf_vprintf(output, fmt, vl);
 	va_end(vl);
@@ -130,8 +133,10 @@ khttpd_mbuf_append_ch(struct mbuf *output, char ch)
 }
 
 void
-khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr, int off)
+khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr,
+    int off)
 {
+
 	iter->unget = -1;
 	iter->ptr = ptr;
 	iter->off = off;
@@ -167,6 +172,7 @@ khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter)
 void
 khttpd_mbuf_ungetc(struct khttpd_mbuf_iter *iter, int ch)
 {
+
 	TRACE("enter '%c'", ch);
 
 	KASSERT(iter->unget == -1, ("unget=%#02x", iter->unget));
@@ -308,4 +314,3 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_iter *iter, void **buf_out,
 
 	return (0);
 }
-

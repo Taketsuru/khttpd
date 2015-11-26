@@ -8,48 +8,34 @@
  * 1. Redistributions of source code must retain the above copyright notice,
  * this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.	IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
  */
 
 #include <sys/types.h>
 #include <sys/ctype.h>
-#include <sys/queue.h>
-#include <sys/tree.h>
-#include <sys/hash.h>
 #include <sys/refcount.h>
-#include <sys/syslimits.h>
-#include <sys/eventhandler.h>
+#include <sys/queue.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
-#include <sys/kthread.h>
-#include <sys/fcntl.h>
-#include <sys/stat.h>
-#include <sys/capsicum.h>
-#include <sys/conf.h>
-#include <sys/ioccom.h>
-#include <sys/socket.h>
-#include <sys/file.h>
-#include <sys/filedesc.h>
 #include <sys/systm.h>
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
-
-#include <machine/stdarg.h>
 
 #include <vm/uma.h>
 
@@ -60,7 +46,7 @@
 #define KHTTPD_JSON_EMBEDDED_DATA_SIZE	(128 - 32)
 #endif
 
-/* --------------------------------------------------------- type definitions */
+/* ------------------------------------------------------- type definitions */
 
 struct khttpd_json {
 	int		type;
@@ -74,7 +60,7 @@ struct khttpd_json {
 	char		data[KHTTPD_JSON_EMBEDDED_DATA_SIZE];
 };		
 
-/* ----------------------------------------------------- variable definitions */
+/* --------------------------------------------------- variable definitions */
 
 static struct khttpd_json khttpd_json_null = {
 	.type = KHTTPD_JSON_NULL,
@@ -97,11 +83,12 @@ static const char khttpd_json_null_literal[] = "null";
 
 static uma_zone_t khttpd_json_zone;
 
-/* ----------------------------------------------------- function definitions */
+/* --------------------------------------------------- function definitions */
 
 void
 khttpd_json_hold(struct khttpd_json *value)
 {
+
 	TRACE("enter %p", value);
 	refcount_acquire(&value->refcount);
 }
@@ -138,7 +125,8 @@ khttpd_json_free(struct khttpd_json *value)
 			}
 
 			if (stacksize <= depth) {
-				stacksize = stacksize < 8 ? 8 : stacksize << 1;
+				stacksize =
+				    stacksize < 8 ? 8 : stacksize << 1;
 				stack = realloc(stack,
 				    stacksize * sizeof(struct khttpd_json *),
 				    M_KHTTPD, M_WAITOK);
@@ -196,6 +184,7 @@ khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 int
 khttpd_json_type(struct khttpd_json *value)
 {
+
 	return value->type;
 }
 
@@ -216,6 +205,7 @@ khttpd_json_integer_new(int64_t value)
 int64_t
 khttpd_json_integer_value(struct khttpd_json *value)
 {
+
 	return (value->ivalue);
 }
 
@@ -237,6 +227,7 @@ khttpd_json_string_new(void)
 int
 khttpd_json_string_size(struct khttpd_json *value)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_STRING,
 	    ("invalid type %d", value->type));
 
@@ -246,11 +237,12 @@ khttpd_json_string_size(struct khttpd_json *value)
 const char *
 khttpd_json_string_data(struct khttpd_json *value)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_STRING,
 	    ("invalid type %d", value->type));
 
-	if (value->size == value->storage_size == 0 ? sizeof(value->data)
-	    : value->storage_size)
+	if (value->size == value->storage_size == 0 ?
+	    sizeof(value->data) : value->storage_size)
 		khttpd_json_resize(value, value->size + 1);
 	value->storage[value->size] = '\0';
 
@@ -275,6 +267,7 @@ khttpd_json_string_append(struct khttpd_json *value, const char *begin,
 void
 khttpd_json_string_append_char(struct khttpd_json *value, int ch)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_STRING,
 	    ("invalid type %d", value->type));
 
@@ -287,6 +280,7 @@ khttpd_json_string_append_char(struct khttpd_json *value, int ch)
 void
 khttpd_json_string_append_utf8(struct khttpd_json *value, int code)
 {
+
 	KASSERT(0 <= code && code <= 0x200000, ("code %#x", code));
 
 	if (code < 0x80)
@@ -326,6 +320,7 @@ khttpd_json_array_new(void)
 
 int khttpd_json_array_size(struct khttpd_json *value)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_ARRAY,
 	    ("invalid type %d", value->type));
 
@@ -351,6 +346,7 @@ khttpd_json_array_add(struct khttpd_json *value, struct khttpd_json *elem)
 struct khttpd_json *
 khttpd_json_array_get(struct khttpd_json *value, int index)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_ARRAY,
 	    ("invalid type %d", value->type));
 
@@ -446,6 +442,7 @@ khttpd_json_object_get_at(struct khttpd_json *value, int index,
 int
 khttpd_json_object_size(struct khttpd_json *value)
 {
+
 	KASSERT(value->type == KHTTPD_JSON_OBJECT,
 	    ("invalid type %d", value->type));
 
@@ -971,6 +968,7 @@ expand:
 struct mbuf *
 khttpd_json_mbuf_append_cstring(struct mbuf *output, const char *str)
 {
+
 	return str != NULL
 	    ? khttpd_json_mbuf_append_string(output, str, str + strlen(str))
 	    : khttpd_mbuf_append(output, khttpd_json_null_literal,
@@ -999,7 +997,8 @@ khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_iter *iter)
 		len = ptr->m_len;
 		for (cp = mtod(ptr, char *) + off; off < len; ++cp, ++off) {
 			ch = *cp;
-			if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
+			if (ch != ' ' && ch != '\t' &&
+			    ch != '\n' && ch != '\r')
 				goto quit;
 		}
 	}
@@ -1011,6 +1010,7 @@ quit:
 int
 khttpd_json_init(void)
 {
+
 	khttpd_json_zone = uma_zcreate("khttp-json",
 	    sizeof(struct khttpd_json),
 	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
@@ -1021,5 +1021,6 @@ khttpd_json_init(void)
 void
 khttpd_json_fini(void)
 {
+
 	uma_zdestroy(khttpd_json_zone);
 }

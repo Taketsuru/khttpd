@@ -8,20 +8,21 @@
  * 1. Redistributions of source code must retain the above copyright notice,
  * this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.	IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
  */
 
 #include <sys/param.h>
@@ -34,10 +35,10 @@
 #include <sys/eventhandler.h>
 #include <sys/malloc.h>
 #include <sys/linker.h>
-#include <sys/kernel.h>
-#include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/sdt.h>
+#include <sys/kernel.h>
+#include <sys/systm.h>
 
 #include <machine/cpu.h>
 
@@ -100,12 +101,13 @@ struct khttpd_sdt_history_page {
 };
 
 #define KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE \
-	(KHTTPD_SDT_HISTORY_PAGE_SIZE / sizeof(struct khttpd_sdt_history_entry))
+	(KHTTPD_SDT_HISTORY_PAGE_SIZE /	    \
+	    sizeof(struct khttpd_sdt_history_entry))
 
 SPLAY_HEAD(khttpd_sdt_probe_tree, khttpd_sdt_probe);
 TAILQ_HEAD(khttpd_sdt_probe_list, khttpd_sdt_probe);
 
-/* ---------------------------------------------------- prototype declrations */
+/* -------------------------------------------------- prototype declrations */
 
 static int khttpd_sdt_probe_tree_comparator(struct khttpd_sdt_probe *x,
     struct khttpd_sdt_probe *y);
@@ -124,7 +126,7 @@ SPLAY_GENERATE(khttpd_sdt_probe_tree, khttpd_sdt_probe, tree_entry,
 
 #pragma clang diagnostic pop
 
-/* ----------------------------------------------------- variable definitions */
+/* --------------------------------------------------- variable definitions */
 
 static struct khttpd_route_type khttpd_route_type_sdt_probe = {
 	.name = "sdt-probe",
@@ -150,11 +152,12 @@ static struct khttpd_sdt_probe_list khttpd_sdt_all_probes_list;
 static uma_zone_t khttpd_sdt_probe_zone;
 static int khttpd_sdt_history_current;
 
-/* ----------------------------------------------------- function definitions */
+/* --------------------------------------------------- function definitions */
 
 static uint32_t
 khttpd_sdt_ko_file_hash(struct linker_file *file)
 {
+
 	return ((uintptr_t)file >> 4) & (KHTTPD_SDT_KO_FILE_HASH_SIZE - 1);
 }
 
@@ -228,8 +231,8 @@ khttpd_sdt_ko_file_remove(struct linker_file *file)
 	while ((probe = LIST_FIRST(&ptr->probes)) != NULL) {
 		LIST_REMOVE(probe, file_list_entry);
 		TAILQ_REMOVE(&khttpd_sdt_all_probes_list, probe, list_entry);
-		SPLAY_REMOVE(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree,
-		    probe);
+		SPLAY_REMOVE(khttpd_sdt_probe_tree,
+		    &khttpd_sdt_all_probes_tree, probe);
 		uma_zfree(khttpd_sdt_probe_zone, probe);
 	}
 
@@ -327,6 +330,7 @@ static void
 khttpd_sdt_history_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+
 	TRACE("enter");
 
 	switch (khttpd_request_method(request)) {
@@ -400,6 +404,7 @@ static void
 khttpd_sdt_history_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+
 	TRACE("enter");
 
 	switch (khttpd_request_method(request)) {
@@ -428,11 +433,10 @@ khttpd_sdt_history_received_header(struct khttpd_socket *socket,
 	TRACE("enter %d", khttpd_socket_fd(socket));
 
 	suffix = khttpd_request_suffix(request);
-	if (*suffix == '\0' || strcmp(suffix, "/") == 0) {
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
 		khttpd_sdt_history_index_received_header(socket, request);
-	} else {
+	else
 		khttpd_sdt_history_leaf_received_header(socket, request);
-	}
 }
 
 static void
@@ -507,6 +511,7 @@ static void
 khttpd_sdt_probe_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+
 	TRACE("enter");
 
 	switch (khttpd_request_method(request)) {
@@ -530,6 +535,7 @@ static void
 khttpd_sdt_probe_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+
 	TRACE("enter");
 
 	khttpd_send_not_found_response(socket, request, FALSE);
@@ -544,11 +550,10 @@ khttpd_sdt_probe_received_header(struct khttpd_socket *socket,
 	TRACE("enter %d", khttpd_socket_fd(socket));
 
 	suffix = khttpd_request_suffix(request);
-	if (*suffix == '\0' || strcmp(suffix, "/") == 0) {
+	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
 		khttpd_sdt_probe_index_received_header(socket, request);
-	} else {
+	else
 		khttpd_sdt_probe_leaf_received_header(socket, request);
-	}
 }
 
 static void
@@ -658,7 +663,8 @@ khttpd_sdt_probe_new(struct khttpd_sdt_ko_file *file, struct sdt_probe *peer)
 
 	probe = uma_zalloc(khttpd_sdt_probe_zone, M_WAITOK);
 	probe->probe = peer;
-	SPLAY_INSERT(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree, probe);
+	SPLAY_INSERT(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree,
+	    probe);
 	next = SPLAY_NEXT(khttpd_sdt_probe_tree, &khttpd_sdt_all_probes_tree,
 	    probe);
 	if (next == NULL)
@@ -739,6 +745,7 @@ khttpd_sdt_kld_unload_try(void *arg, struct linker_file *file, int *error)
 
 static int khttpd_sdt_on_each_linked_file(linker_file_t file, void *context)
 {
+
 	khttpd_sdt_kld_load(context, file);
 	return (0);
 }
@@ -764,7 +771,8 @@ khttpd_sdt_load_proc(void *arg)
 	khttpd_sdt_history_pages[0].size =
 	    KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE;
 
-	mtx_init(&khttpd_sdt_history_lock, "khttpd-sdt-history-lock", NULL, 0);
+	mtx_init(&khttpd_sdt_history_lock, "khttpd-sdt-history-lock", NULL,
+	    0);
 
 	for (i = 0; i < sizeof(khttpd_sdt_providers) /
 		 sizeof(khttpd_sdt_providers[0]); ++i)
@@ -791,11 +799,11 @@ khttpd_sdt_load_proc(void *arg)
 		return (error);
 	}
 
-	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SDT_HISTORY_PREFIX,
-	    &khttpd_route_type_sdt_history);
+	error = khttpd_route_add(&khttpd_route_root,
+	    KHTTPD_SDT_HISTORY_PREFIX, &khttpd_route_type_sdt_history);
 	if (error != 0) {
-		printf("khttpd: failed to add route " KHTTPD_SDT_HISTORY_PREFIX
-		    ": %d\n", error);
+		printf("khttpd: failed to add route "
+		    KHTTPD_SDT_HISTORY_PREFIX ": %d\n", error);
 		return (error);
 	}
 
@@ -813,8 +821,8 @@ khttpd_sdt_unload_proc(void *arg)
 
 	TRACE("enter");
 
-	route = khttpd_route_find(&khttpd_route_root, KHTTPD_SDT_HISTORY_PREFIX,
-	    NULL);
+	route = khttpd_route_find(&khttpd_route_root,
+	    KHTTPD_SDT_HISTORY_PREFIX, NULL);
 	if (route != NULL)
 		khttpd_route_remove(route);
 
@@ -827,7 +835,8 @@ khttpd_sdt_unload_proc(void *arg)
 		sdt_probe_func = sdt_probe_stub;
 
 	EVENTHANDLER_DEREGISTER(kld_load, khttpd_sdt_kld_load_tag);
-	EVENTHANDLER_DEREGISTER(kld_unload_try, khttpd_sdt_kld_unload_try_tag);
+	EVENTHANDLER_DEREGISTER(kld_unload_try,
+	    khttpd_sdt_kld_unload_try_tag);
 
 	for (i = 0; i < sizeof(khttpd_sdt_providers) /
 		 sizeof(khttpd_sdt_providers[0]); ++i)
@@ -849,7 +858,8 @@ khttpd_sdt_unload_proc(void *arg)
 
 	for (i = 0; i < sizeof(khttpd_sdt_ko_files) /
 		 sizeof(khttpd_sdt_ko_files[0]); ++i) {
-		while ((file = SLIST_FIRST(&khttpd_sdt_ko_files[i])) != NULL) {
+		while ((file = SLIST_FIRST(&khttpd_sdt_ko_files[i])) !=
+		    NULL) {
 			SLIST_REMOVE_HEAD(&khttpd_sdt_ko_files[i], hash_link);
 			free(file, M_KHTTPD);
 		}
@@ -882,17 +892,20 @@ khttpd_sdt_quiesce_proc(void *arg)
 int
 khttpd_sdt_load(void)
 {
+
 	return (khttpd_run_proc(khttpd_sdt_load_proc, NULL));
 }
 
 void
 khttpd_sdt_unload(void)
 {
+
 	khttpd_run_proc(khttpd_sdt_unload_proc, NULL);
 }
 
 int
 khttpd_sdt_quiesce(void)
 {
+
 	return (khttpd_run_proc(khttpd_sdt_quiesce_proc, NULL));
 }

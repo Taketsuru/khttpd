@@ -8,45 +8,34 @@
  * 1. Redistributions of source code must retain the above copyright notice,
  * this list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.	IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
  */
 
 #include <sys/types.h>
-#include <sys/ctype.h>
 #include <sys/queue.h>
-#include <sys/tree.h>
 #include <sys/hash.h>
-#include <sys/refcount.h>
-#include <sys/syslimits.h>
-#include <sys/eventhandler.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
-#include <sys/kthread.h>
-#include <sys/fcntl.h>
 #include <sys/stat.h>
 #include <sys/capsicum.h>
-#include <sys/conf.h>
-#include <sys/ioccom.h>
-#include <sys/socket.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
-#include <sys/systm.h>
-#include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 
 #include <machine/stdarg.h>
@@ -56,7 +45,7 @@
 #include "khttpd.h"
 #include "khttpd_private.h"
 
-/* --------------------------------------------------------- type definitions */
+/* ------------------------------------------------------- type definitions */
 
 struct khttpd_mime_type_rule_set;
 
@@ -88,7 +77,7 @@ struct khttpd_mime_type_rule_set {
 	struct khttpd_mime_type_rule_slist hash_table[];
 };
 
-/* ---------------------------------------------------- prototype declrations */
+/* -------------------------------------------------- prototype declrations */
 
 static struct khttpd_mime_type_rule_set *khttpd_mime_type_rule_set_alloc
     (uint32_t hash_size, char *buf);
@@ -100,7 +89,7 @@ static const char *khttpd_mime_type_rule_set_find
 static void khttpd_file_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request);
 
-/* ----------------------------------------------------- variable definitions */
+/* --------------------------------------------------- variable definitions */
 
 static struct khttpd_route_type khttpd_route_type_file = {
 	.name = "file",
@@ -115,7 +104,7 @@ static const char khttpd_content_type[] = "Content-Type: ";
 
 static uma_zone_t khttpd_mime_type_rule_zone;
 
-/* ----------------------------------------------------- function definitions */
+/* --------------------------------------------------- function definitions */
 
 static int
 khttpd_file_normalize_path(const char *path, char *buf, size_t bufsize)
@@ -215,7 +204,7 @@ khttpd_file_transmit_body(struct khttpd_socket *socket,
 	int error;
 
 	td = curthread;
-	data = (struct khttpd_file_request_data *)khttpd_request_data(request);
+	data = khttpd_request_data(request);
 
 	TRACE("enter %d %s", khttpd_socket_fd(socket), data->path);
 
@@ -273,19 +262,22 @@ khttpd_file_request_data_free(struct khttpd_file_request_data *data)
 static void
 khttpd_file_request_dtor(struct khttpd_request *request, void *data)
 {
+
 	khttpd_file_request_data_free
 	    ((struct khttpd_file_request_data *)data);
 }
 
 static int
-khttpd_file_open(int dirfd, const char *path, int *fd_out, struct stat *statbuf)
+khttpd_file_open(int dirfd, const char *path, int *fd_out,
+    struct stat *statbuf)
 {
 	struct thread *td;
 	int error, fd;
 
 	td = curthread;
 
-	error = kern_openat(td, dirfd, (char *)path, UIO_SYSSPACE, O_RDONLY, 0);
+	error = kern_openat(td, dirfd, (char *)path, UIO_SYSSPACE, O_RDONLY,
+	    0);
 	if (error != 0) {
 		TRACE("error open %d", error);
 		return (error);
@@ -380,7 +372,7 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 
 	td = curthread;
 	route = khttpd_request_route(request);
-	route_data = (struct khttpd_file_route_data *)khttpd_route_data(route);
+	route_data = khttpd_route_data(route);
 	suffix = khttpd_request_suffix(request);
 	data = khttpd_file_request_data_alloc(suffix);
 
@@ -438,7 +430,8 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 	header = khttpd_response_header(response);
 	khttpd_header_add_content_length(header, statbuf.st_size);
 
-	type = khttpd_mime_type_rule_set_find(route_data->rule_set, data->path);
+	type = khttpd_mime_type_rule_set_find(route_data->rule_set,
+	    data->path);
 	type_iov[0].iov_base = (void *)khttpd_content_type;
 	type_iov[0].iov_len = sizeof(khttpd_content_type) - 1;
 	type_iov[1].iov_base = (void *)type;
@@ -455,6 +448,7 @@ static void
 khttpd_file_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
+
 	TRACE("enter %s", khttpd_request_target(request));
 
 	switch (khttpd_request_method(request)) {
@@ -474,7 +468,7 @@ khttpd_file_route_dtor(struct khttpd_route *route)
 {
 	struct khttpd_file_route_data *route_data;
 
-	route_data = (struct khttpd_file_route_data *)khttpd_route_data(route);
+	route_data = khttpd_route_data(route);
 
 	TRACE("enter %s", route_data->path);
 
@@ -496,7 +490,7 @@ khttpd_mount_proc(void *data)
 	struct thread *td;
 	int error, newfd;
 
-	args = (struct khttpd_mount_args *)data;
+	args = data;
 	td = curthread;
 	fdp = td->td_proc->p_fd;
 
@@ -577,7 +571,8 @@ khttpd_mount(struct khttpd_mount_args *args)
 
 	fdep = &fdp->fd_ofiles[fd];
 
-	if (fd < 0 || fdp->fd_lastfile < fd || (fp = fdep->fde_file) == NULL) {
+	if (fd < 0 || fdp->fd_lastfile < fd ||
+	    (fp = fdep->fde_file) == NULL) {
 		error = EBADF;
 		goto out;
 	}
@@ -636,7 +631,8 @@ khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
 
 	hash_size = rule_set->hash_mask + 1;
 	for (i = 0; i < hash_size; ++i)
-		while ((rule = SLIST_FIRST(&rule_set->hash_table[i])) != NULL) {
+		while ((rule = SLIST_FIRST(&rule_set->hash_table[i])) !=
+		    NULL) {
 			SLIST_REMOVE_HEAD(&rule_set->hash_table[i], link);
 			uma_zfree(khttpd_mime_type_rule_zone, rule);
 		}
@@ -661,8 +657,6 @@ khttpd_mime_type_rule_set_find(struct khttpd_mime_type_rule_set *rule_set,
 	if (path == cp)
 		return ("application/octet-stream");
 
-	TRACE("suffix %s", cp);
-
 	hash = khttpd_hash32_str_ci(cp) & rule_set->hash_mask;
 	SLIST_FOREACH(rule, &rule_set->hash_table[hash], link)
 		if (strcasecmp(cp, rule->suffix) == 0)
@@ -679,7 +673,7 @@ khttpd_set_mime_type_rules_proc(void *data)
 	struct khttpd_file_route_data *route_data;
 	const char *suffix;
 
-	args = (struct khttpd_set_mime_type_rules_args *)data;
+	args = data;
 
 	TRACE("enter %s", args->mount_point);
 
@@ -695,7 +689,8 @@ khttpd_set_mime_type_rules_proc(void *data)
 		return (EOPNOTSUPP);
 	}
 
-	route_data = (struct khttpd_file_route_data *)khttpd_route_data(route);
+	route_data = (struct khttpd_file_route_data *)
+	    khttpd_route_data(route);
 	khttpd_mime_type_rule_set_free(route_data->rule_set);
 	route_data->rule_set = args->rule_set;
 
@@ -717,8 +712,8 @@ khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
 
 	rule_set = NULL;
 
-	error = copyinstr(args->mount_point, mount_point,
-	    sizeof(mount_point), NULL);
+	error = copyinstr(args->mount_point, mount_point, sizeof(mount_point),
+	    NULL);
 	if (error != 0)
 		return (error);
 
@@ -751,7 +746,8 @@ khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
 			last_end = cp = khttpd_find_whitespace(cp, next);
 
 			++rule_count;
-			rule = uma_zalloc(khttpd_mime_type_rule_zone, M_WAITOK);
+			rule = uma_zalloc(khttpd_mime_type_rule_zone,
+			    M_WAITOK);
 			rule->type = type;
 			rule->suffix = suffix;
 			SLIST_INSERT_HEAD(&rules, rule, link);
@@ -795,6 +791,7 @@ out:
 
 int khttpd_file_init(void)
 {
+
 	khttpd_mime_type_rule_zone = uma_zcreate("khttp-mime-type-rule",
 	    sizeof(struct khttpd_mime_type_rule),
 	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
@@ -804,5 +801,6 @@ int khttpd_file_init(void)
 
 void khttpd_file_fini(void)
 {
+
 	uma_zdestroy(khttpd_mime_type_rule_zone);
 }

@@ -28,9 +28,10 @@
 #pragma once
 
 #include <sys/types.h>
-#include <machine/stdarg.h>
 #include <sys/ioccom.h>
 #include <sys/socket.h>
+
+#include <machine/stdarg.h>
 
 #define KHTTPD_VERSION	1100000
 
@@ -235,11 +236,13 @@ void khttpd_json_string_append_char(struct khttpd_json *value, int ch);
 void khttpd_json_string_append_utf8(struct khttpd_json *value, int code);
 struct khttpd_json *khttpd_json_array_new(void);
 int khttpd_json_array_size(struct khttpd_json *value);
-void khttpd_json_array_add(struct khttpd_json *value, struct khttpd_json *elem);
-struct khttpd_json *khttpd_json_array_get(struct khttpd_json *value, int index);
-struct khttpd_json *khttpd_json_object_new(int size_hint);
-void khttpd_json_object_add(struct khttpd_json *value, struct khttpd_json *name,
+void khttpd_json_array_add(struct khttpd_json *value,
     struct khttpd_json *elem);
+struct khttpd_json *khttpd_json_array_get(struct khttpd_json *value,
+    int index);
+struct khttpd_json *khttpd_json_object_new(int size_hint);
+void khttpd_json_object_add(struct khttpd_json *value,
+    struct khttpd_json *name, struct khttpd_json *elem);
 struct khttpd_json *khttpd_json_object_get(struct khttpd_json *value,
     const char *name);
 struct khttpd_json *khttpd_json_object_get_at(struct khttpd_json *value,
@@ -255,8 +258,9 @@ void khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_iter *iter);
 
 struct khttpd_header_field *khttpd_header_find(struct khttpd_header *header,
     char *field_name, boolean_t include_trailer);
-struct khttpd_header_field *khttpd_header_find_next(struct khttpd_header *header,
-    struct khttpd_header_field *current, boolean_t include_trailer);
+struct khttpd_header_field *
+    khttpd_header_find_next(struct khttpd_header *header,
+	struct khttpd_header_field *current, boolean_t include_trailer);
 boolean_t
 khttpd_header_value_includes(struct khttpd_header *header,
     char *field_name, char *token, boolean_t include_trailer);
@@ -289,7 +293,8 @@ void khttpd_response_free(struct khttpd_response *);
 void khttpd_response_set_status(struct khttpd_response *response, int code);
 void khttpd_response_set_xmit_proc(struct khttpd_response *response,
     khttpd_transmit_body_t proc, void *procdata, khttpd_response_dtor_t dtor);
-struct khttpd_header *khttpd_response_header(struct khttpd_response *response);
+struct khttpd_header *
+    khttpd_response_header(struct khttpd_response *response);
 void khttpd_response_set_xmit_data_mbuf(struct khttpd_response *response,
     struct mbuf *data);
 void khttpd_response_set_xmit_data_on_heap(struct khttpd_response *response,
