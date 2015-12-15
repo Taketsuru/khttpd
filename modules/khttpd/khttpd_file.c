@@ -93,14 +93,12 @@ static void khttpd_file_received_header(struct khttpd_socket *socket,
 
 static struct khttpd_route_type khttpd_route_type_file = {
 	.name = "file",
-	.received_header_fn = khttpd_file_received_header,
+	.received_header = khttpd_file_received_header,
 };
 
 static const char *khttpd_index_names[] = {
 	"index.html"
 };
-
-static const char khttpd_content_type[] = "Content-Type: ";
 
 static uma_zone_t khttpd_mime_type_rule_zone;
 
@@ -193,8 +191,9 @@ again:
 }
 
 static int
-khttpd_file_transmit_body(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response)
+khttpd_file_transmit(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct khttpd_response *response,
+    struct mbuf **out)
 {
 	cap_rights_t rights;
 	struct khttpd_file_request_data *data;
@@ -226,7 +225,7 @@ khttpd_file_transmit_body(struct khttpd_socket *socket,
 		TRACE("sent=%d, residual=%zd, offset=%zd",
 		    sent, data->xmit_residual, data->xmit_offset);
 		if ((data->xmit_residual -= sent) == 0)
-			khttpd_xmit_finished(socket);
+			khttpd_transmit_finished(socket);
 		else
 			data->xmit_offset += sent;
 	}
@@ -240,6 +239,10 @@ khttpd_file_request_data_alloc(const char *path)
 	struct khttpd_file_request_data *data;
 	size_t pathsize;
 
+	/* 
+	 * This MAX() is necessary because normalizing an empty path can
+	 * result in "."
+	 */
 	pathsize = MAX(2, strlen(path) + 1);
 	data = malloc(sizeof(*data) + pathsize, M_KHTTPD, M_WAITOK);
 	data->pathsize = pathsize;
@@ -263,8 +266,7 @@ static void
 khttpd_file_request_dtor(struct khttpd_request *request, void *data)
 {
 
-	khttpd_file_request_data_free
-	    ((struct khttpd_file_request_data *)data);
+	khttpd_file_request_data_free(data);
 }
 
 static int
@@ -288,6 +290,7 @@ khttpd_file_open(int dirfd, const char *path, int *fd_out,
 	error = kern_fstat(td, fd, statbuf);
 	if (error != 0) {
 		TRACE("error fstat %d", error);
+		kern_close(td, fd);
 		return (error);
 	}
 
@@ -300,6 +303,8 @@ khttpd_file_open(int dirfd, const char *path, int *fd_out,
 		*fd_out = fd;
 		return (EISDIR);
 	}
+
+	kern_close(td, fd);
 
 	return (ENOENT);
 }
@@ -331,7 +336,7 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	}
 
 	if (i == n) {
-		khttpd_send_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(socket, request, FALSE);
 		return;
 	}
 
@@ -347,7 +352,7 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	len += index_len;
 	path[len] = '\0';
 
-	khttpd_send_moved_permanently_response(socket, request, NULL, path);
+	khttpd_set_moved_permanently_response(socket, request, NULL, path);
 
 	free(path, M_KHTTPD);
 }
@@ -356,11 +361,9 @@ static void
 khttpd_file_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-	struct iovec type_iov[3];
 	struct stat statbuf;
 	struct khttpd_file_request_data *data;
 	struct khttpd_file_route_data *route_data;
-	struct khttpd_header *header;
 	struct khttpd_response *response;
 	struct khttpd_route *route;
 	struct thread *td;
@@ -381,7 +384,7 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 	if (error != 0) {
 		TRACE("error normalize %d", error);
 		khttpd_file_request_data_free(data);
-		khttpd_send_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(socket, request, FALSE);
 		return;
 	}
 
@@ -401,12 +404,12 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 
 	case ENAMETOOLONG:
 	case ENOENT:
-		khttpd_send_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(socket, request, FALSE);
 		return;
 
 	case EACCES:
 	case EPERM:
-		khttpd_send_conflict_response(socket, request, FALSE);
+		khttpd_set_conflict_response(socket, request, FALSE);
 		return;
 
 	case EISDIR:
@@ -414,35 +417,26 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 		return;
 
 	default:
-		khttpd_send_internal_error_response(socket, request);
+		khttpd_set_internal_error_response(socket, request);
 		return;
 	}
-
-	response = khttpd_response_alloc();
-	khttpd_response_set_status(response, 200);
-	khttpd_response_set_xmit_proc(response, khttpd_file_transmit_body,
-	    NULL, NULL);
 
 	data->fd = fd;
 	data->xmit_offset = 0;
 	data->xmit_residual = statbuf.st_size;
 
-	header = khttpd_response_header(response);
-	khttpd_header_add_content_length(header, statbuf.st_size);
+	response = khttpd_response_alloc();
+	khttpd_response_set_status(response, 200);
+
+	khttpd_response_set_body_proc(response, khttpd_file_transmit,
+	    statbuf.st_size);
 
 	type = khttpd_mime_type_rule_set_find(route_data->rule_set,
 	    data->path);
-	type_iov[0].iov_base = (void *)khttpd_content_type;
-	type_iov[0].iov_len = sizeof(khttpd_content_type) - 1;
-	type_iov[1].iov_base = (void *)type;
-	type_iov[1].iov_len = strlen(type);
-	type_iov[2].iov_base = (void *)khttpd_crlf;
-	type_iov[2].iov_len = sizeof(khttpd_crlf);
-	khttpd_header_addv(header, type_iov, sizeof(type_iov) /
-	    sizeof(type_iov[0]));
+	khttpd_response_add_field(response, "Content-Type", "%s", type);
 
-	khttpd_send_response(socket, request, response);}
-	    
+	khttpd_set_response(socket, request, response);
+}
 
 static void
 khttpd_file_received_header(struct khttpd_socket *socket,
@@ -459,7 +453,7 @@ khttpd_file_received_header(struct khttpd_socket *socket,
 		break;
 
 	default:
-		khttpd_send_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
@@ -657,7 +651,7 @@ khttpd_mime_type_rule_set_find(struct khttpd_mime_type_rule_set *rule_set,
 	if (path == cp)
 		return ("application/octet-stream");
 
-	hash = khttpd_hash32_str_ci(cp) & rule_set->hash_mask;
+	hash = khttpd_hash32_str_ci(cp, 0) & rule_set->hash_mask;
 	SLIST_FOREACH(rule, &rule_set->hash_table[hash], link)
 		if (strcasecmp(cp, rule->suffix) == 0)
 			return (rule->type);
@@ -763,7 +757,7 @@ khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
 
 	while ((rule = SLIST_FIRST(&rules)) != NULL) {
 		SLIST_REMOVE_HEAD(&rules, link);
-		hash = khttpd_hash32_str_ci(rule->suffix) & (hash_size - 1);
+		hash = khttpd_hash32_str_ci(rule->suffix, 0) & (hash_size - 1);
 
 		SLIST_FOREACH(rp, &rule_set->hash_table[hash], link) {
 			if (strcasecmp(rp->suffix, rule->suffix) != 0)

@@ -80,6 +80,9 @@ struct khttpd_log_state {
 
 extern struct khttpd_log_state khttpd_log_state[];
 
+void *khttpd_malloc(size_t size);
+void khttpd_free(void *mem);
+
 void khttpd_log(int type, const char *fmt, ...);
 
 char *khttpd_find_ch(const char *begin, const char search);
@@ -91,8 +94,9 @@ char *khttpd_dup_first_line(const char *str);
 char *khttpd_find_list_item_end(const char *begin, const char **sep);
 char *khttpd_unquote_uri(char *begin, char *end);
 boolean_t khttpd_is_token(const char *start, const char *end);
-uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end);
-uint32_t khttpd_hash32_str_ci(const char *str);
+uint32_t khttpd_hash32_buf_ci(const void *begin, const void *end, 
+    uint32_t hash);
+uint32_t khttpd_hash32_str_ci(const void *str, uint32_t hash);
 
 int khttpd_json_init(void);
 void khttpd_json_fini(void);

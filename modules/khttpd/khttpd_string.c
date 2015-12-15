@@ -28,7 +28,7 @@
 #include <sys/types.h>
 #include <sys/ctype.h>
 #include <sys/hash.h>
-#include <sys/malloc.h>
+#include <sys/sbuf.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
@@ -58,6 +58,18 @@ khttpd_find_ch_in(const char *begin, const char *end, char ch)
 
 	for (ptr = begin; ptr < end; ++ptr)
 		if (*ptr == ch)
+			return ((char *)ptr);
+
+	return (NULL);
+}
+
+char *
+khttpd_find_ch_in2(const char *begin, const char *end, char ch1, char ch2)
+{
+	const char *ptr;
+
+	for (ptr = begin; ptr < end; ++ptr)
+		if (*ptr == ch1 || *ptr == ch2)
 			return ((char *)ptr);
 
 	return (NULL);
@@ -116,71 +128,6 @@ khttpd_dup_first_line(const char *str)
 	return (buf);
 }
 
-char *
-khttpd_find_list_item_end(const char *begin, const char **sep)
-{
-	const char *ptr;
-	char *result;
-	char ch;
-
-	result = (char *)begin;
-	for (ptr = begin; (ch = *ptr) != ',' && ch != '\n' && ch != '\r';
-	     ++ptr)
-		if (ch != ' ' && ch != '\t')
-			result = (char *)(ptr + 1);
-
-	*sep = ptr;
-
-	return (result);
-}
-
-char *
-khttpd_unquote_uri(char *begin, char *end)
-{
-	char *dstp, *srcp;
-	int code, i;
-	char ch;
-
-	dstp = begin;
-	for (srcp = begin; srcp < end; ++srcp) {
-		KASSERT(dstp <= srcp, ("srcp=%p, dstp=%p", srcp, dstp));
-
-		ch = *srcp;
-
-		if (ch == '\0')
-			return (NULL);
-
-		if (ch == '%' && 2 < end - srcp) {
-			code = 0;
-			for (i = 0; i < 2; ++i) {
-				code <<= 4;
-
-				if ('0' <= ch && ch <= '9')
-					code |= ch - '0';
-
-				else if ('A' <= ch && ch <= 'F')
-					code |= ch - 'A' + 10;
-
-				else if ('a' <= ch && ch <= 'f')
-					code |= ch - 'a' + 10;
-
-				else
-					return (NULL);
-			}
-
-			if (code == 0)
-				return (NULL);
-
-			*dstp++ = code;
-			continue;
-		}
-
-		*dstp++ = ch;
-	}
-
-	return (dstp);
-}
-
 boolean_t
 khttpd_is_token(const char *start, const char *end)
 {
@@ -209,14 +156,12 @@ khttpd_is_token(const char *start, const char *end)
 }
 
 uint32_t
-khttpd_hash32_buf_ci(const char *begin, const char *end)
+khttpd_hash32_buf_ci(const void *begin, const void *end, uint32_t hash)
 {
 	const char *bp;
-	uint32_t hash;
 	unsigned char ch;
 
-	hash = 0;
-	for (bp = begin; bp < end; ++bp) {
+	for (bp = begin; bp < (const char *)end; ++bp) {
 		ch = *bp;
 		hash = HASHSTEP(hash, tolower(ch));
 	}
@@ -225,15 +170,31 @@ khttpd_hash32_buf_ci(const char *begin, const char *end)
 }
 
 uint32_t
-khttpd_hash32_str_ci(const char *str)
+khttpd_hash32_str_ci(const void *str, uint32_t hash)
 {
 	const char *bp;
-	uint32_t hash;
 	char ch;
 
-	hash = 0;
 	for (bp = str; ((ch = *bp) != '\0'); ++bp)
 		hash = HASHSTEP(hash, tolower(ch));
 
 	return (hash);
+}
+
+char *
+khttpd_find_list_item_end(const char *begin, const char **sep)
+{
+	const char *ptr;
+	char *result;
+	char ch;
+
+	result = (char *)begin;
+	for (ptr = begin; (ch = *ptr) != ',' && ch != '\n' && ch != '\r';
+	     ++ptr)
+		if (ch != ' ' && ch != '\t')
+			result = (char *)(ptr + 1);
+
+	*sep = ptr;
+
+	return (result);
 }

@@ -450,7 +450,7 @@ khttpd_json_object_size(struct khttpd_json *value)
 }
 
 static boolean_t
-khttpd_json_parse_expect_char(struct khttpd_mbuf_iter *iter, char expected)
+khttpd_json_parse_expect_char(struct khttpd_mbuf_pos *iter, char expected)
 {
 	char ch;
 
@@ -462,7 +462,7 @@ khttpd_json_parse_expect_char(struct khttpd_mbuf_iter *iter, char expected)
 }
 
 static int
-khttpd_json_parse_string(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse_string(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out)
 {
 	struct khttpd_json *value;
@@ -575,7 +575,7 @@ quit:
 }
 
 static int
-khttpd_json_parse_object(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse_object(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out, int depth_limit)
 {
 	struct khttpd_json *value, *name, *elem;
@@ -633,7 +633,7 @@ khttpd_json_parse_object(struct khttpd_mbuf_iter *iter,
 }
 
 static int
-khttpd_json_parse_array(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse_array(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out, int depth_limit)
 {
 	struct khttpd_json *value, *elem;
@@ -680,7 +680,7 @@ khttpd_json_parse_array(struct khttpd_mbuf_iter *iter,
 }
 
 static int
-khttpd_json_parse_expect_seq(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse_expect_seq(struct khttpd_mbuf_pos *iter,
     const char *symbol)
 {
 	const char *cp;
@@ -693,7 +693,7 @@ khttpd_json_parse_expect_seq(struct khttpd_mbuf_iter *iter,
 }
 
 static int
-khttpd_json_parse_integer(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse_integer(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out)
 {
 	int ch;
@@ -737,7 +737,7 @@ khttpd_json_parse_integer(struct khttpd_mbuf_iter *iter,
 }
 
 int
-khttpd_json_parse(struct khttpd_mbuf_iter *iter,
+khttpd_json_parse(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out, int depth_limit)
 {
 	struct khttpd_json *value;
@@ -977,7 +977,7 @@ khttpd_json_mbuf_append_cstring(struct mbuf *output, const char *str)
 }
 
 void
-khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_iter *iter)
+khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter)
 {
 	struct mbuf *ptr;
 	const char *cp;

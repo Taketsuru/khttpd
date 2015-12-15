@@ -27,7 +27,7 @@
 
 #include <sys/types.h>
 #include <sys/ctype.h>
-#include <sys/malloc.h>
+#include <sys/sbuf.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
@@ -133,7 +133,7 @@ khttpd_mbuf_append_ch(struct mbuf *output, char ch)
 }
 
 void
-khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr,
+khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *iter, struct mbuf *ptr,
     int off)
 {
 
@@ -142,14 +142,19 @@ khttpd_mbuf_iter_init(struct khttpd_mbuf_iter *iter, struct mbuf *ptr,
 	iter->off = off;
 }
 
+void
+khttpd_mbuf_pos_copy(struct khttpd_mbuf_pos *x, struct khttpd_mbuf_pos *y)
+{
+
+	bcopy(x, y, sizeof(*x));
+}
+
 int
-khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter)
+khttpd_mbuf_getc(struct khttpd_mbuf_pos *iter)
 {
 	int result;
 
-	TRACE("enter");
-
-	if (0 < iter->unget) {
+	if (0 <= iter->unget) {
 		result = iter->unget;
 		iter->unget = -1;
 		return (result);
@@ -170,13 +175,178 @@ khttpd_mbuf_getc(struct khttpd_mbuf_iter *iter)
 }
 
 void
-khttpd_mbuf_ungetc(struct khttpd_mbuf_iter *iter, int ch)
+khttpd_mbuf_ungetc(struct khttpd_mbuf_pos *iter, int ch)
 {
-
-	TRACE("enter '%c'", ch);
 
 	KASSERT(iter->unget == -1, ("unget=%#02x", iter->unget));
 	iter->unget = ch;
+}
+
+int
+khttpd_mbuf_next_segment(struct khttpd_mbuf_pos *iter, int term_ch)
+{
+	struct mbuf *ptr;
+	const char *begin, *cp, *end, *found;
+	int error, off, uch;
+
+	uch = iter->unget;
+	if (uch == '\n')
+		return (ENOENT);
+	if (uch == term_ch) {
+		iter->unget = -1;
+		return (0);
+	}
+
+	error = 0;
+	ptr = iter->ptr;
+	off = iter->off;
+
+	while (ptr != NULL) {
+		begin = mtod(ptr, char *);
+		end = begin + ptr->m_len;
+		cp = begin + off;
+		found = khttpd_find_ch_in2(cp, end, term_ch, '\n');
+		if (found != NULL) {
+			off = found + 1 - begin;
+			if (*found == '\n')
+				break;
+			goto end;
+		}
+
+		off = 0;
+		ptr = ptr->m_next;
+	}
+
+	error = ENOENT;
+
+end:
+	iter->ptr = ptr;
+	iter->off = off;
+
+	return (error);
+}
+
+int
+khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos,
+    int term_ch, char *buffer, size_t size, char **end_out)
+{
+	struct mbuf *ptr;
+	const char *begin, *end, *cp, *found;
+	char *bp, *bend;
+	int error, off, uch;
+
+	uch = pos->unget;
+	if (uch == '\n')
+		return (ENOENT);
+	if (uch == term_ch) {
+		pos->unget = -1;
+		if (end_out != NULL)
+			*end_out = buffer;
+		return (0);
+	}
+
+	bp = buffer;
+	bend = bp + size;
+	if (uch != -1) {
+		if (bp == bend) {
+			if (end_out != NULL)
+				*end_out = bp;
+			return (ENOMEM);
+		}
+		pos->unget = -1;
+		*bp++ = uch;
+	}
+
+	ptr = pos->ptr;
+	off = pos->off;
+
+	error = 0;
+
+	while (ptr != NULL) {
+		begin = mtod(ptr, char *);
+		end = begin + ptr->m_len;
+		cp = begin + off;
+		found = khttpd_find_ch_in2(cp, end, term_ch, '\n');
+		if (found != NULL) {
+			off = found + 1 - begin;
+
+			if (*found == '\n')
+				break;
+
+			if (bend - bp < found - cp)
+				goto enomem;
+
+			bcopy(cp, bp, found - cp);
+			goto end;
+		}
+
+		if (bend - bp < end - cp) {
+			off = end - begin;
+			goto enomem;
+		}
+
+		bcopy(cp, bp, end - cp);
+		bp += end - cp;
+
+		off = 0;
+		ptr = ptr->m_next;
+	}
+
+	error = ENOENT;
+	goto end;
+
+enomem:
+	error = ENOMEM;
+	bcopy(cp, bp, bend - bp);
+
+end:
+	pos->ptr = ptr;
+	pos->off = off;
+
+	if (end_out != NULL)
+		*end_out = bend;
+	
+	return (error);
+}
+
+int
+khttpd_mbuf_parse_digits(struct khttpd_mbuf_pos *pos, uintmax_t *value_out)
+{
+	uintmax_t value, digit;
+	int ch;
+
+	TRACE("enter");
+
+	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
+		;		/* nothing */
+	khttpd_mbuf_ungetc(pos, ch);
+
+	value = 0;
+	for (;;) {
+		ch = khttpd_mbuf_getc(pos);
+		if (!isdigit(ch)) {
+			khttpd_mbuf_ungetc(pos, ch);
+			break;
+		}
+
+		digit = ch - '0';
+		if (value * 10 + digit < value) {
+			TRACE("error range");
+			return (ERANGE);
+		}
+		value = value * 10 + digit;
+	}
+
+	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
+		;		/* nothing */
+	if (ch == '\r')
+		ch = khttpd_mbuf_getc(pos);
+	if (ch != '\n')
+		return (EINVAL);
+
+	*value_out = value;
+
+	return (0);
 }
 
 void
@@ -262,7 +432,7 @@ khttpd_mbuf_base64_encode(struct mbuf *output, const char *buf, size_t size)
 }
 
 int
-khttpd_mbuf_base64_decode(struct khttpd_mbuf_iter *iter, void **buf_out,
+khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
     size_t *size_out)
 {
 	unsigned char *buf;
@@ -313,4 +483,122 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_iter *iter, void **buf_out,
 	*size_out = size;
 
 	return (0);
+}
+
+int
+khttpd_mbuf_next_list_element(struct khttpd_mbuf_pos *pos, struct sbuf *output)
+{
+	int consecutive_ws_count;
+	char ch;
+
+	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
+		;		/* nothing */
+
+	khttpd_mbuf_ungetc(pos, ch);
+
+	consecutive_ws_count = 0;
+	for (;;) {
+		ch = khttpd_mbuf_getc(pos);
+
+		switch (ch) {
+
+		case '\n':
+			khttpd_mbuf_ungetc(pos, ch);
+			/* FALLTHROUGH */
+
+		case -1:
+			if (sbuf_len(output) == consecutive_ws_count)
+				return (ENOMSG);
+			/* FALLTHROUGH */
+
+		case ',':
+			goto out;
+
+		case ' ': case '\t':
+			++consecutive_ws_count;
+			continue;
+
+		case '\r':
+			ch = khttpd_mbuf_getc(pos);
+			khttpd_mbuf_ungetc(pos, ch);
+			if (ch == '\n') {
+				if (sbuf_len(output) == consecutive_ws_count)
+					return (ENOMSG);
+				goto out;
+			}
+			/* FALLTHROUGH */
+
+		default:
+			consecutive_ws_count = 0;
+			sbuf_putc(output, ch);
+			break;
+		}
+	}
+out:
+	sbuf_setpos(output, sbuf_len(output) - consecutive_ws_count);
+
+	return (sbuf_finish(output));
+}
+
+boolean_t
+khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos, char *token,
+    boolean_t ignore_case)
+{
+	const char *cptr, *token_end;
+	size_t token_len;
+	int ch;
+	boolean_t found_no_ws;
+
+	TRACE("enter");
+
+	token_len = strlen(token);
+	token_end = token + token_len;
+
+	for (;;) {
+		while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
+			;		/* nothing */
+		khttpd_mbuf_ungetc(pos, ch);
+
+		for (cptr = token; cptr < token_end; ++cptr) {
+			ch = khttpd_mbuf_getc(pos);
+			if (ignore_case ? tolower(ch) != tolower(*cptr) :
+			    ch != *cptr) {
+				khttpd_mbuf_ungetc(pos, ch);
+				break;
+			}
+		}
+
+		found_no_ws = FALSE;
+		for (;;) {
+			ch = khttpd_mbuf_getc(pos);
+
+			switch (ch) {
+
+			case ',': case '\n':
+				goto out;
+
+			case ' ': case '\t':
+				continue;
+
+			case '\r':
+				ch = khttpd_mbuf_getc(pos);
+				if (ch == '\n')
+					goto out;
+				khttpd_mbuf_ungetc(pos, ch);
+
+			default:
+				break;
+			}
+
+			found_no_ws = TRUE;
+		}
+ out:
+		if (cptr == token_end && !found_no_ws)
+			return (TRUE);
+
+		if (ch == '\n')
+			break;
+	}
+
+	return (FALSE);
 }

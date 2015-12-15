@@ -130,12 +130,12 @@ SPLAY_GENERATE(khttpd_sdt_probe_tree, khttpd_sdt_probe, tree_entry,
 
 static struct khttpd_route_type khttpd_route_type_sdt_probe = {
 	.name = "sdt-probe",
-	.received_header_fn = khttpd_sdt_probe_received_header
+	.received_header = khttpd_sdt_probe_received_header
 };
 
 static struct khttpd_route_type khttpd_route_type_sdt_history = {
 	.name = "sdt-history",
-	.received_header_fn = khttpd_sdt_history_received_header
+	.received_header = khttpd_sdt_history_received_header
 };
 
 static TAILQ_HEAD(, sdt_provider)
@@ -236,7 +236,7 @@ khttpd_sdt_ko_file_remove(struct linker_file *file)
 		uma_zfree(khttpd_sdt_probe_zone, probe);
 	}
 
-	free(ptr, M_KHTTPD);
+	khttpd_free(ptr);
 }
 
 static int
@@ -293,7 +293,7 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 		goto enoent;
 	}
 
-	buffer = malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE, M_KHTTPD, M_WAITOK);
+	buffer = khttpd_malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE);
 
 	mtx_lock(&khttpd_sdt_history_lock);
 
@@ -314,16 +314,16 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 	mtx_unlock(&khttpd_sdt_history_lock);
 
 	response = khttpd_response_alloc();
-	khttpd_header_add(khttpd_response_header(response),
-	    "Content-Type: application/octet-stream");
 	khttpd_response_set_status(response, 200);
-	khttpd_response_set_xmit_data_on_heap(response, buffer, size);
-	khttpd_send_response(socket, request, response);
+	khttpd_response_set_body_bytes(response, buffer, size, khttpd_free);
+	khttpd_response_add_field(response, "Content-Type", "%s",
+	    "application/octet-stream");
+	khttpd_set_response(socket, request, response);
 
 	return;
 
 enoent:
-	khttpd_send_not_found_response(socket, request, FALSE);
+	khttpd_set_not_found_response(socket, request, FALSE);
 }
 
 static void
@@ -342,15 +342,15 @@ khttpd_sdt_history_leaf_received_header(struct khttpd_socket *socket,
 
 	case KHTTPD_METHOD_OPTIONS:
 		/*
-		 * XXX khttpd_send_not_found_response must be called if the
+		 * XXX khttpd_set_not_found_response must be called if the
 		 * specified page doesn't exist.
 		 */
-		khttpd_send_options_response(socket, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET");
 		break;
 
 	default:
-		khttpd_send_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
@@ -394,10 +394,10 @@ khttpd_sdt_history_index_get_or_head(struct khttpd_socket *socket,
 
 	response = khttpd_response_alloc();
 	khttpd_response_set_status(response, 200);
-	khttpd_response_set_xmit_data_mbuf(response, payload);
-	khttpd_header_add(khttpd_response_header(response),
-	    "Content-Type: application/json");
-	khttpd_send_response(socket, request, response);
+	khttpd_response_set_body_mbuf(response, payload);
+	khttpd_response_add_field(response, "Content-Type", "%s", 
+	    "application/json");
+	khttpd_set_response(socket, request, response);
 }
 
 static void
@@ -415,12 +415,12 @@ khttpd_sdt_history_index_received_header(struct khttpd_socket *socket,
 		break;
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_send_options_response(socket, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET, POST");
 		break;
 
 	default:
-		khttpd_send_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
@@ -500,11 +500,11 @@ khttpd_sdt_probe_index_get_or_head(struct khttpd_socket *socket,
 	khttpd_mbuf_printf(payload, "\n}");
 
 	response = khttpd_response_alloc();
-	khttpd_header_add(khttpd_response_header(response),
-	    "Content-Type: application/json");
 	khttpd_response_set_status(response, 200);
-	khttpd_response_set_xmit_data_mbuf(response, payload);
-	khttpd_send_response(socket, request, response);
+	khttpd_response_set_body_mbuf(response, payload);
+	khttpd_response_add_field(response, "Content-Type", "%s", 
+	    "application/json");
+	khttpd_set_response(socket, request, response);
 }
 
 static void
@@ -522,12 +522,12 @@ khttpd_sdt_probe_index_received_header(struct khttpd_socket *socket,
 		break;
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_send_options_response(socket, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET");
 		break;
 
 	default:
-		khttpd_send_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
@@ -538,7 +538,7 @@ khttpd_sdt_probe_leaf_received_header(struct khttpd_socket *socket,
 
 	TRACE("enter");
 
-	khttpd_send_not_found_response(socket, request, FALSE);
+	khttpd_set_not_found_response(socket, request, FALSE);
 }
 
 static void
@@ -624,7 +624,7 @@ khttpd_sdt_provider_new(const char *name)
 		return;
 	}
 
-	provider = malloc(sizeof(*provider), M_KHTTPD, M_WAITOK);
+	provider = khttpd_malloc(sizeof(*provider));
 	provider->name = strdup(name, M_KHTTPD);
 	provider->sdt_refs = 1;
 
@@ -648,8 +648,8 @@ khttpd_sdt_provider_free(const char *name)
 			else {
 				TAILQ_REMOVE(&khttpd_sdt_providers[hash],
 				    ptr, prov_entry);
-				free(ptr->name, M_KHTTPD);
-				free(ptr, M_KHTTPD);
+				khttpd_free(ptr->name);
+				khttpd_free(ptr);
 			}
 
 			return;
@@ -767,7 +767,7 @@ khttpd_sdt_load_proc(void *arg)
 
 	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES; ++i)
 		khttpd_sdt_history_pages[i].contents =
-		    malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE, M_KHTTPD, M_WAITOK);
+		    khttpd_malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE);
 	khttpd_sdt_history_pages[0].size =
 	    KHTTPD_SDT_HISTORY_ENTRIES_PER_PAGE;
 
@@ -844,8 +844,8 @@ khttpd_sdt_unload_proc(void *arg)
 		    NULL) {
 			TAILQ_REMOVE(&khttpd_sdt_providers[i], provider,
 			    prov_entry);
-			free(provider->name, M_KHTTPD);
-			free(provider, M_KHTTPD);
+			khttpd_free(provider->name);
+			khttpd_free(provider);
 		}
 
 	while ((probe = TAILQ_FIRST(&khttpd_sdt_all_probes_list)) != NULL) {
@@ -861,12 +861,12 @@ khttpd_sdt_unload_proc(void *arg)
 		while ((file = SLIST_FIRST(&khttpd_sdt_ko_files[i])) !=
 		    NULL) {
 			SLIST_REMOVE_HEAD(&khttpd_sdt_ko_files[i], hash_link);
-			free(file, M_KHTTPD);
+			khttpd_free(file);
 		}
 	}
 
 	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES; ++i)
-		free(khttpd_sdt_history_pages[i].contents, M_KHTTPD);
+		khttpd_free(khttpd_sdt_history_pages[i].contents);
 
 	mtx_destroy(&khttpd_sdt_history_lock);
 
