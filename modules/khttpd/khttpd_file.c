@@ -488,6 +488,8 @@ khttpd_mount_proc(void *data)
 	td = curthread;
 	fdp = td->td_proc->p_fd;
 
+	TRACE("enter %s", args->prefix);
+
 	error = khttpd_route_add(&khttpd_route_root, args->prefix,
 	    &khttpd_route_type_file);
 	if (error != 0)
@@ -775,7 +777,6 @@ khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
 	error = khttpd_run_proc(khttpd_set_mime_type_rules_proc, args);
 	if (error == 0)
 		rule_set = NULL;
-
 out:
 	khttpd_mime_type_rule_set_free(rule_set);
 	free(buf, M_KHTTPD);

@@ -277,6 +277,7 @@ khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos,
 				goto enomem;
 
 			bcopy(cp, bp, found - cp);
+			bp += found - cp;
 			goto end;
 		}
 
@@ -298,13 +299,14 @@ khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos,
 enomem:
 	error = ENOMEM;
 	bcopy(cp, bp, bend - bp);
+	bp = bend;
 
 end:
 	pos->ptr = ptr;
 	pos->off = off;
 
 	if (end_out != NULL)
-		*end_out = bend;
+		*end_out = bp;
 	
 	return (error);
 }

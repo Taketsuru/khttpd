@@ -32,6 +32,8 @@
 *.dSYM/
 
 # Others
+cscope.files
+cscope.out
 khttpdcontrol
 modules/khttpd/@
 modules/khttpd/machine

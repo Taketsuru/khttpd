@@ -580,6 +580,7 @@ khttpd_field_find(const char *begin, const char *end)
 static void
 khttpd_kevent_nop(struct kevent *event)
 {
+	TRACE("enter");
 }
 
 static int
@@ -1544,8 +1545,8 @@ khttpd_socket_close(struct khttpd_socket *socket)
 
 	if (socket->in_sockets_list) {
 		LIST_REMOVE(socket, link);
-		khttpd_socket_free(socket);
 		socket->in_sockets_list = FALSE;
+		khttpd_socket_free(socket);
 	}
 }
 
@@ -2618,6 +2619,7 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	 * If the extracted field name is not a known name, done.
 	 */
 
+	*end = '\0';
 	field_enum = khttpd_field_find(field, end);
 	if (field_enum == KHTTPD_FIELD_UNKNOWN)
 		return (0);
@@ -2628,6 +2630,7 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 
 	while ((ch = khttpd_mbuf_getc(&pos)) == ' ')
 		;		/* nothing */
+	khttpd_mbuf_ungetc(&pos, ch);
 
 	/*
 	 * Apply a field handler.
@@ -3136,12 +3139,13 @@ khttpd_asterisc_received_header(struct khttpd_socket *socket,
 	switch (request->method) {
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_set_not_implemented_response(socket, request, FALSE);
+		khttpd_set_options_response(socket, request, NULL,
+		    "OPTIONS, HEAD, GET, PUT, POST, DELETE");
 		break;
 
 	default:
-		khttpd_set_options_response(socket, request, NULL,
-		    "OPTIONS, HEAD, GET, PUT, POST, DELETE");
+		khttpd_set_not_implemented_response(socket, request, FALSE);
+		break;
 	}
 }
 
@@ -3327,6 +3331,8 @@ cont:
 		}
 
 		error = khttpd_kevent_get(khttpd_kqueue, &event);
+		if (error != 0)
+			TRACE("error kevent_get %d", error);
 		if (error == 0)
 			((struct khttpd_event_type *)event.udata)->
 			    handle_event(&event);
@@ -3591,25 +3597,35 @@ static int
 khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
 {
+	int error;
 
 	switch (cmd) {
 
 	case KHTTPD_IOC_CONFIGURE_LOG:
-		return (khttpd_configure_log((struct khttpd_log_conf *)data));
+		error = khttpd_configure_log((struct khttpd_log_conf *)data);
+		break;
 
 	case KHTTPD_IOC_ADD_PORT:
-		return (khttpd_add_port((struct khttpd_address_info *)data));
+		error = khttpd_add_port((struct khttpd_address_info *)data);
+		break;
 
 	case KHTTPD_IOC_MOUNT:
-		return (khttpd_mount((struct khttpd_mount_args *)data));
+		error = khttpd_mount((struct khttpd_mount_args *)data);
+		break;
 
 	case KHTTPD_IOC_SET_MIME_TYPE_RULES:
-		return (khttpd_set_mime_type_rules
-		    ((struct khttpd_set_mime_type_rules_args *)data));
+		error = 0;
+#if 0
+		error = khttpd_set_mime_type_rules
+		    ((struct khttpd_set_mime_type_rules_args *)data);
+#endif
+		break;
 
 	default:
-		return (ENOIOCTL);
+		error = ENOIOCTL;
 	}
+
+	return (error);
 }
 
 static void
@@ -3708,6 +3724,8 @@ static int
 khttpd_quiesce_proc(void *args)
 {
 	int error;
+
+	TRACE("enter");
 
 	error = LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY;
 	if (error != 0)

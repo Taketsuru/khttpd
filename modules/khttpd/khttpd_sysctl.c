@@ -991,6 +991,8 @@ khttpd_sysctl_unload_proc(void *args)
 {
 	struct khttpd_route *route;
 
+	TRACE("enter");
+
 	route = khttpd_route_find(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX,
 	    NULL);
 	if (route == NULL)
@@ -1011,6 +1013,8 @@ static int
 khttpd_sysctl_load_proc(void *args)
 {
 	int error;
+
+	TRACE("enter");
 
 	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX, 
 	    &khttpd_route_type_sysctl);
