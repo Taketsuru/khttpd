@@ -85,15 +85,16 @@ describe('khttpd', function () {
     };
 
     beforeAll(function () {
-	target.run('kldunload khttpd.ko');
+	target.run('kldunload -f khttpd.ko');
 	target.run('kldload modules/khttpd/khttpd.ko')
 	    || fail('kldload failed');
-	target.run('usr.sbin/khttpdcontrol/khttpdcontrol')
+	target.run('usr.sbin/khttpdcontrol/khttpdcontrol ' + process.cwd() +
+		   '/../sysui')
 	    || fail('khttpdcontrol failed');
     });
 
     afterAll(function () {
-	target.run('kldunload khttpd.ko');
+	target.run('kldunload -f khttpd.ko');
     });
 
     describe('disconnected w/ requests', function () {

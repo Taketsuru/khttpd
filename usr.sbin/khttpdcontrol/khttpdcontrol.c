@@ -70,8 +70,11 @@ int main(int argc, char **argv)
 		err(EX_UNAVAILABLE, "failed to configure debug log");
 #endif
 
+	if (argc < 2)
+		errx(EX_USAGE, "specify the path name of ui sysui directory");
+
 	mount_args.prefix = "/sys/ui";
-	mount_args.dirfd = open("sysui", O_EXEC | O_DIRECTORY);
+	mount_args.dirfd = open(argv[1], O_EXEC | O_DIRECTORY);
 	if (mount_args.dirfd == -1)
 		err(EX_NOINPUT, "failed to open /sys/ui root directory.");
 	if (ioctl(fd, KHTTPD_IOC_MOUNT, &mount_args) == -1)
