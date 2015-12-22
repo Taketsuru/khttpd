@@ -121,10 +121,12 @@ struct khttpd_socket {
 	struct file		*fp;
 	struct mbuf		*recv_leftovers;
 	struct mbuf		*recv_ptr;
+	struct mbuf		*recv_bol_ptr;
 	struct khttpd_request	*recv_request;
 	struct mbuf		*recv_tail;
 	struct mbuf		*xmit_buf;
 	u_int			recv_off;
+	u_int			recv_bol_off;
 	unsigned		in_sockets_list:1;
 	unsigned		recv_found_bol:1;
 	unsigned		recv_eof:1;
@@ -1669,19 +1671,18 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 		if (error != 0)
 			return (error);
 		if (socket->recv_eof) {
-			if (!socket->recv_found_bol)
-				khttpd_mbuf_pos_init(bol, NULL, 0);
+			khttpd_mbuf_pos_init(bol, NULL, 0);
 			return (ENOENT);
 		}
 	}
 
-	if (!socket->recv_found_bol) {
-		khttpd_mbuf_pos_init(bol, socket->recv_ptr, socket->recv_off);
-		socket->recv_found_bol = TRUE;
-	}
-
 	ptr = socket->recv_ptr;
 	off = socket->recv_off;
+
+	if (socket->recv_bol_ptr == NULL) {
+		socket->recv_bol_ptr = ptr;
+		socket->recv_bol_off = off;
+	}
 
 	for (;;) {
 		/* Find the first '\n' in a mbuf. */
@@ -1699,12 +1700,17 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 
 		if (ptr->m_next == NULL) {
 			socket->recv_ptr = ptr;
-			socket->recv_off = ptr->m_len;
+			socket->recv_off = off = ptr->m_len;
 			error = khttpd_socket_read(socket);
 			if (error != 0)
 				return (error);
-			if (socket->recv_eof)
+			if (socket->recv_eof) {
+				khttpd_mbuf_pos_init(bol, socket->recv_bol_ptr,
+				    socket->recv_bol_off);
+				socket->recv_bol_ptr = NULL;
 				return (ENOENT);
+			}
+			continue;
 		}
 
 		/* Advance to the next mbuf */
@@ -1715,7 +1721,8 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 
 	socket->recv_ptr = ptr;
 	socket->recv_off = cp + 1 - begin;
-	socket->recv_found_bol = FALSE;
+	khttpd_mbuf_pos_init(bol, socket->recv_bol_ptr, socket->recv_bol_off);
+	socket->recv_bol_ptr = NULL;
 
 	return (0);
 }
@@ -3290,7 +3297,7 @@ khttpd_main(void *arg)
 	}
 	debug_fd = td->td_retval[0];
 
-	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
+	//khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
 	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
 
 	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);

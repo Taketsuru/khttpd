@@ -3,6 +3,7 @@
 var net = require('net');
 var target = require('../lib/target');
 
+var messageSizeMax = 16384;
 var statusLinePattern = /^HTTP\/1\.[01] ([1-9][0-9][0-9]) [^ ]+$/;
 var headerFieldPattern = /^([^: ]+):(.*)$/i;
 
@@ -82,6 +83,7 @@ function expectNotFoundResponse (response) {
     expect(response.header['content-length']).not.toBe('0');
 }
 
+exports.messageSizeMax = messageSizeMax;
 exports.connect = connect;
 exports.parseMessage = parseMessage;
 exports.expectSuccessfulOptionsResponse = expectSuccessfulOptionsResponse;

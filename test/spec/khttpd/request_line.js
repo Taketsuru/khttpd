@@ -24,6 +24,39 @@ describe('khttpd', function () {
 	});
     });
 
+    describe('receiving many CRLFs preceding a request', function () {
+	var session = {};
+
+	it('accepts a connection request', function (done) {
+	    http_test.connect(session, done);
+	});
+
+	it('half-closes after sending a response to the request', 
+	   function (done) {
+	       var i, n, crlfs = '';
+	       n = (http_test.messageSizeMax * 2) / 2;
+	       for (i = 0; i < n; ++i) {
+		   crlfs += '\r\n';
+	       }
+	       session.chan.write(crlfs + 'OPTIONS * HTTP/1.1\r\n' +
+				'Connection: close\r\n\r\n');
+	       session.chan.once('end', done);
+	   });
+
+	it('sends a valid response', function (done) {
+	    session.chan.end();
+	    session.chan.once('close', done);
+	    session.response = http_test.parseMessage(session.data);
+	    http_test.expectSuccessfulOptionsResponse(session.response);
+	    expect(session.response.header['connection']).toBe('close');
+	});
+
+	it('ignores garbage following the request', function (done) {
+	    expect(session.response.rest.length).toBe(0);
+	    done();
+	});
+    });
+
     describe('receiving a partial request line', function () {
 	var session = {};
 
