@@ -2546,13 +2546,19 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	error = khttpd_socket_next_line(socket, &pos);
 	if (error != 0)
 		TRACE("error next_line %d", error);
-	if (error == ENOBUFS) {
-		khttpd_set_request_header_field_too_large_response(socket,
+	switch (error) {
+	case 0:
+		break;
+	case ENOBUFS:
+		khttpd_set_request_header_field_too_large_response(socket, 
 		    request);
 		return (0);
-	}
-	if (error != 0)
+	case ENOENT:
+		khttpd_set_bad_request_response(socket, request);
+		return (0);
+	default:
 		return (error);
+	}
 
 	/*
 	 * If it's an empty line, we reached the end of a header or a trailer.
