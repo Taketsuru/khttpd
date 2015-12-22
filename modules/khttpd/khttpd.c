@@ -2425,6 +2425,15 @@ khttpd_receive_connection_field(struct khttpd_socket *socket,
 	TRACE("enter");
 
 	request->close = khttpd_mbuf_list_contains_token(pos, "close", TRUE);
+	if (request->response != NULL) {
+		khttpd_response_set_connection_close(request->response);
+
+		khttpd_socket_drain(socket);
+		request->may_respond = TRUE;
+
+		if (STAILQ_FIRST(&socket->xmit_queue) == request)
+			khttpd_socket_transmit(socket);
+	}
 }
 
 static void

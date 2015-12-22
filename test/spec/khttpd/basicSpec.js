@@ -75,6 +75,12 @@ function expectBadRequestResponse (response) {
     expect(response.header['content-length']).not.toBe('0');
 }
 
+function expectNotFoundResponse (response) {
+    expect(response.statusCode).toBe('404');
+    expect(response.header['content-length']).not.toBeUndefined();
+    expect(response.header['content-length']).not.toBe('0');
+}
+
 describe('khttpd', function () {
     var chan;
     var state;
@@ -196,4 +202,56 @@ describe('khttpd', function () {
 	});
     });
 
+    describe('receiving an invalid request target', function () {
+	var invalid_urls = [ 'http://localhost/sys/ui', 'sys/ui'];
+	var url;
+
+	var testWithConnectionClose = function (url) {
+	    it('accepts a connection request', connectTest);
+
+	    it('receives a request line with an invalid request target',
+	       function (done) {
+		   chan.write('GET ' + url + ' HTTP/1.1\r\n' +
+			      'Connection: close\r\n\r\n');
+		   chan.once('end', done);
+	       });
+
+	    it('has sent a "Not Found" response', function (done) {
+		state.response = parseMessage(state.data);
+		expectNotFoundResponse(state.response);
+		expect(state.response.header['connection']).toBe('close');
+		done();
+	    });
+	}
+
+	var testWithoutConnectionClose = function (url) {
+	    it('accepts a connection request', connectTest);
+
+	    it('receives a request line with an invalid request target',
+	       function (done) {
+		   chan.write('GET ' + url + ' HTTP/1.1\r\n\r\n');
+		   chan.end();
+		   chan.once('end', done);
+	       });
+
+	    it('has sent a "Not Found" response', function (done) {
+		state.response = parseMessage(state.data);
+		expectNotFoundResponse(state.response);
+		expect(state.response.header['connection']).toBeUndefined();
+		done();
+	    });
+	}
+
+	invalid_urls.forEach(function (url) {
+	    describe('with Connection: close', function () {
+		testWithConnectionClose(url);
+	    });
+	    describe('without Connection: close', function () {
+		testWithoutConnectionClose(url);
+	    });
+	});
+
+    });
+
+    
 });
