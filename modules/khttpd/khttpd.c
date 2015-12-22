@@ -448,6 +448,13 @@ void khttpd_log(int type, const char *fmt, ...)
 	va_list vl;
 	int len;
 
+	/* 
+	 * Currently, khttpd_log can put a log entry only from the khttpd
+	 * process.
+	 */
+	if (curproc != khttpd_proc)
+		return;
+
 	mtx_lock(&khttpd_lock);
 	while (khttpd_log_writing) {
 		khttpd_log_waiting = TRUE;
@@ -3637,11 +3644,8 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 		break;
 
 	case KHTTPD_IOC_SET_MIME_TYPE_RULES:
-		error = 0;
-#if 0
 		error = khttpd_set_mime_type_rules
 		    ((struct khttpd_set_mime_type_rules_args *)data);
-#endif
 		break;
 
 	default:
