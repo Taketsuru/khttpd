@@ -11,14 +11,14 @@ function TestState (chan) {
 
     this.connect = 0;
     this.drain = 0;
-    this.data = '';
+    this.data = [];
     this.end = 0;
     this.error = [];
     this.close = null;
 
     chan.on('connect', function () { ++state.connect; })
 	.on('drain', function () { ++state.drain; })
-	.on('data', function (data) { state.data += data; })
+	.on('data', function (data) { state.data.push(data); })
 	.on('end', function () { ++state.end; })
 	.on('error', function (error) { state.error.push(error); })
 	.on('close', function (hadError) { state.close = hadError; });
@@ -27,9 +27,10 @@ function TestState (chan) {
 }
 
 function parseMessage (message) {
-    var bodyPos;
+    var end;
     var i;
-    var lines = message.split(/\r\n/);
+    var buffer = Buffer.concat(message);
+    var lines = buffer.toString().split(/\r\n/);
     var match;
     var name;
     var value;
@@ -54,25 +55,31 @@ function parseMessage (message) {
 	}
     }
 
-    bodyPos = message.indexOf('\r\n\r\n');
-    expect(bodyPos).not.toBe(-1);
+    end = buffer.indexOf('\r\n\r\n');
+    expect(end).not.toBe(-1);
 
-    result.body = message.substr(bodyPos + 4);
+    result.rest = message.slice(end + 4);
 
     return result;
 }
 
-function validateOptionsResponse (response) {
+function expectSuccessfulOptionsResponse (response) {
     expect(response.statusCode).toBe('200');
     expect(response.header['content-length']).toBe('0');
     expect(response.header['allow']).not.toBeUndefined();
+}
+
+function expectBadRequestResponse (response) {
+    expect(response.statusCode).toBe('400');
+    expect(response.header['content-length']).not.toBeUndefined();
+    expect(response.header['content-length']).not.toBe('0');
 }
 
 describe('khttpd', function () {
     var chan;
     var state;
 
-    var connect = function (done) {
+    var connectTest = function (done) {
 	chan = net.createConnection(target.port, target.name, done);
 	state = new TestState(chan);
     };
@@ -90,7 +97,7 @@ describe('khttpd', function () {
     });
 
     describe('disconnected w/ requests', function () {
-	it('accepts a connection request', connect);
+	it('accepts a connection request', connectTest);
 
 	it('closes if the client closes', function (done) {
 	    chan.once('end', done);
@@ -98,13 +105,13 @@ describe('khttpd', function () {
 	});
 
 	it('doesn\'t send any data', function (done) {
-	    expect(state.data).toBe('');
+	    expect(state.data.length).toBe(0);
 	    done();
 	});
     });
 
     describe('receiving a request w/ "Connection: close"', function () {
-	it('accepts a connection request', connect);
+	it('accepts a connection request', connectTest);
 
 	it('closes if the client closes', function (done) {
 	    chan.write('OPTIONS * HTTP/1.1\r\n\r\n');
@@ -114,14 +121,14 @@ describe('khttpd', function () {
 
 	it('sends a valid response', function (done) {
 	    state.response = parseMessage(state.data);
-	    validateOptionsResponse(state.response);
+	    expectSuccessfulOptionsResponse(state.response);
 	    done();
 	});
     });
 
     describe('receiving a request with "Connection: close"', function () {
 	function test (garbage) {
-	    it('accepts a connection request', connect);
+	    it('accepts a connection request', connectTest);
 
 	    it('half-closes after sending a response', function (done) {
 		chan.write('OPTIONS * HTTP/1.1\r\nConnection: close\r\n\r\n' +
@@ -133,12 +140,12 @@ describe('khttpd', function () {
 		chan.end();
 		chan.once('close', done);
 		state.response = parseMessage(state.data);
-		validateOptionsResponse(state.response);
+		expectSuccessfulOptionsResponse(state.response);
 		expect(state.response.header['connection']).toBe('close');
 	    });
 	    
 	    it('ignores garbage following the request', function (done) {
-		expect(state.response.body).toBe('');
+		expect(state.response.rest.length).toBe(0);
 		done();
 	    });
 	}
@@ -151,4 +158,41 @@ describe('khttpd', function () {
 	    test('GET / HTTP/1.1\r\n\r\n');
 	});
     });
+
+    describe('receiving a partial request line', function () {
+	it('accepts a connection request', connectTest);
+
+	it('half-closes after sending a response to the request',
+	   function (done) {
+	       chan.write('OPTIONS * HTTP/1.1');
+	       chan.once('close', done);
+	       chan.end();
+	   });
+
+	it('has sent a bad request response', function (done) {
+	    state.response = parseMessage(state.data);
+	    expectBadRequestResponse(state.response);
+	    expect(state.response.header['connection']).toBe('close');
+	    done();
+	});
+    });
+
+    describe('receiving a partial header field line', function () {
+	it('accepts a connection request', connectTest);
+
+	it('half-closes after sending a response to the request',
+	   function (done) {
+	       chan.write('OPTIONS * HTTP/1.1\r\nX-Header: test');
+	       chan.once('close', done);
+	       chan.end();
+	   });
+
+	it('has sent a bad request response', function (done) {
+	    state.response = parseMessage(state.data);
+	    expectBadRequestResponse(state.response);
+	    expect(state.response.header['connection']).toBe('close');
+	    done();
+	});
+    });
+
 });

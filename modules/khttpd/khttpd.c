@@ -1624,7 +1624,6 @@ khttpd_socket_read(struct khttpd_socket *socket)
 	}
 	if (auio.uio_resid == resid) {
 		TRACE("eof");
-		m_freem(m);
 		socket->recv_eof = TRUE;
 		return (0);
 	}
@@ -1662,8 +1661,11 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 		error = khttpd_socket_read(socket);
 		if (error != 0)
 			return (error);
-		if (socket->recv_eof)
+		if (socket->recv_eof) {
+			if (!socket->recv_found_bol)
+				khttpd_mbuf_pos_init(bol, NULL, 0);
 			return (ENOENT);
+		}
 	}
 
 	if (!socket->recv_found_bol) {
@@ -2756,7 +2758,8 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 * Free mbufs preceding the current reading position.
 	 */
 
-	if (socket->recv_leftovers != socket->recv_ptr)
+	if (socket->recv_leftovers != NULL &&
+	    socket->recv_leftovers != socket->recv_ptr)
 		socket->recv_leftovers = m_free(socket->recv_leftovers);
 
 	/* 
@@ -2767,13 +2770,23 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	error = khttpd_socket_next_line(socket, &pos);
 	if (error != 0)
 		TRACE("error next_line %d", error);
-	if (error != 0 && error != ENOBUFS)
+	if (error != 0 && error != ENOBUFS && error != ENOENT)
 		return (error);
+	if (error == ENOENT) {
+		/*
+		 * If EOF is found at the beginning of the line, return
+		 * immediately.
+		 */
+		if (pos.unget == -1 &&
+		    (pos.ptr == NULL ||
+			(pos.ptr->m_next == NULL && pos.off == pos.ptr->m_len)))
+			return (0);
+	}
 	if (error == 0) {
 		if (socket->recv_eof)
 			return (0);
 
-		/* Ignore if it's an empty line. */
+		/* Ignore a line if it's empty. */
 		khttpd_mbuf_pos_copy(&pos, &tmppos);
 		ch = khttpd_mbuf_getc(&tmppos);
 		if (ch == '\r')
@@ -2806,6 +2819,16 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 
 	if (error == ENOBUFS) {
 		khttpd_set_uri_too_long_response(socket, request);
+		return (0);
+	}
+
+	/*
+	 * If the request line is terminated prematurely, send 'Bad Request'
+	 * response message.
+	 */
+
+	if (error == ENOENT) {
+		khttpd_set_bad_request_response(socket, request);
 		return (0);
 	}
 
