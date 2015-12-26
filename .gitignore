@@ -32,6 +32,7 @@
 *.dSYM/
 
 # Others
+.dir-locals.el
 cscope.files
 cscope.out
 khttpdcontrol
