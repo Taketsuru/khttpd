@@ -1,0 +1,6 @@
+// -*- mode: javascript; fill-column: 78; -*-
+
+{
+    "node": true,
+    "jasmine": true
+}

@@ -45,7 +45,7 @@ describe('khttpd', function () {
 		session.chan.once('close', done);
 		session.response = http_test.parseMessage(session.data);
 		http_test.expectSuccessfulOptionsResponse(session.response);
-		expect(session.response.header['connection']).toBe('close');
+		expect(session.response.header.connection).toBe('close');
 	    });
 
 	    it('ignores garbage following the request', function (done) {
@@ -80,7 +80,7 @@ describe('khttpd', function () {
 	it('has sent a bad request response', function (done) {
 	    session.response = http_test.parseMessage(session.data);
 	    http_test.expectBadRequestResponse(session.response);
-	    expect(session.response.header['connection']).toBe('close');
+	    expect(session.response.header.connection).toBe('close');
 	    done();
 	});
     });

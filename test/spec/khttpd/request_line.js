@@ -49,7 +49,7 @@ describe('khttpd', function () {
 	    session.chan.once('close', done);
 	    session.response = http_test.parseMessage(session.data);
 	    http_test.expectSuccessfulOptionsResponse(session.response);
-	    expect(session.response.header['connection']).toBe('close');
+	    expect(session.response.header.connection).toBe('close');
 	});
     });
 
@@ -159,7 +159,7 @@ describe('khttpd', function () {
 	it('has sent a bad request response', function (done) {
 	    session.response = http_test.parseMessage(session.data);
 	    http_test.expectBadRequestResponse(session.response);
-	    expect(session.response.header['connection']).toBe('close');
+	    expect(session.response.header.connection).toBe('close');
 	    done();
 	});
     });
@@ -184,10 +184,10 @@ describe('khttpd', function () {
 	    it('has sent a "Not Found" response', function (done) {
 		session.response = http_test.parseMessage(session.data);
 		http_test.expectNotFoundResponse(session.response);
-		expect(session.response.header['connection']).toBe('close');
+		expect(session.response.header.connection).toBe('close');
 		done();
 	    });
-	}
+	};
 
 	var testWithoutConnectionClose = function (url) {
 	    var session = {};
@@ -206,10 +206,10 @@ describe('khttpd', function () {
 	    it('has sent a "Not Found" response', function (done) {
 		session.response = http_test.parseMessage(session.data);
 		http_test.expectNotFoundResponse(session.response);
-		expect(session.response.header['connection']).toBeUndefined();
+		expect(session.response.header.connection).toBeUndefined();
 		done();
 	    });
-	}
+	};
 
 	invalid_urls.forEach(function (url) {
 	    describe('with Connection: close', function () {
@@ -242,7 +242,7 @@ describe('khttpd', function () {
 	    it('has sent a bad request response', function (done) {
 		session.response = http_test.parseMessage(session.data);
 		http_test.expectBadRequestResponse(session.response);
-		expect(session.response.header['connection']).toBe('close');
+		expect(session.response.header.connection).toBe('close');
 		done();
 	    });
 	};
