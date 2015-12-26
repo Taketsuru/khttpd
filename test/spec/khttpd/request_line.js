@@ -222,4 +222,32 @@ describe('khttpd', function () {
 
     });
 
+    describe('receiving an invalid version', function () {
+	var invalid_versions = [ 'HTTP/0.0', 'http/1.1', 'PTTH/1.1',
+				 'HTTP/0.9', 'veryyyyyyyyyyyyyyloooooong/1.1' ];
+	var test = function (version) {
+	    var session = {};
+
+	    it('accepts a connection request', function (done) {
+		http_test.connect(session, done);
+	    });
+
+	    it('half-closes after sending a response to the request',
+	       function (done) {
+		   session.chan.write('OPTIONS * ' + version);
+		   session.chan.once('close', done);
+		   session.chan.end();
+	       });
+
+	    it('has sent a bad request response', function (done) {
+		session.response = http_test.parseMessage(session.data);
+		http_test.expectBadRequestResponse(session.response);
+		expect(session.response.header['connection']).toBe('close');
+		done();
+	    });
+	};
+
+	invalid_versions.forEach(test);
+    });
+
 });
