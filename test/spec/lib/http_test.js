@@ -1,11 +1,10 @@
 'use strict';
 
-var net = require('net');
-var target = require('../lib/target');
-
-var messageSizeMax = 16384;
-var statusLinePattern = /^HTTP\/1\.[01] ([1-9][0-9][0-9]) [^ ]+$/;
-var headerFieldPattern = /^([^: ]+):(.*)$/i;
+var net = require('net'),
+    target = require('../lib/target'),
+    messageSizeMax = 16384,
+    statusLinePattern = /^HTTP\/1\.[01] ([1-9][0-9][0-9]) [^ ]+$/,
+    headerFieldPattern = /^([^: ]+):(.*)$/i;
 
 function connect(session, done) {
     var chan = net.createConnection(target.port, target.name);
@@ -18,25 +17,38 @@ function connect(session, done) {
     session.error = [];
     session.close = null;
 
-    chan.on('connect', function () { ++session.connect; })
-	.on('drain', function () { ++session.drain; })
-	.on('data', function (data) { session.data.push(data); })
-	.on('end', function () { ++session.end; })
-	.on('error', function (error) { done.fail(error); })
-	.on('close', function (hadError) { session.close = hadError; });
+    chan.
+        on('connect', function () {
+            ++session.connect;
+        })
+        .on('drain', function () {
+            ++session.drain;
+        })
+        .on('data', function (data) {
+            session.data.push(data);
+        })
+        .on('end', function () {
+            ++session.end;
+        })
+        .on('error', function (error) {
+            done.fail(error);
+        })
+        .on('close', function (hadError) {
+            session.close = hadError;
+        });
 
     chan.once('connect', done);
-};
+}
 
 function parseMessage(message) {
-    var end;
-    var i;
-    var buffer = Buffer.concat(message);
-    var lines = buffer.toString().split(/\r\n/);
-    var match;
-    var name;
-    var value;
-    var result = {};
+    var end,
+        buffer = Buffer.concat(message),
+        lines = buffer.toString().split(/\r\n/),
+        match,
+        name,
+        value,
+        result = {},
+        i;
 
     result.statusLine = lines[0];
     expect(result.statusLine).toMatch(statusLinePattern);
@@ -44,17 +56,17 @@ function parseMessage(message) {
 
     result.header = {};
     for (i = 1; lines[i] !== ''; ++i) {
-	expect(lines[i]).toMatch(headerFieldPattern);
+        expect(lines[i]).toMatch(headerFieldPattern);
 
-	match = headerFieldPattern.exec(lines[i]);
-	name = match[1].toLowerCase();
-	value = match[2].trim();
+        match = headerFieldPattern.exec(lines[i]);
+        name = match[1].toLowerCase();
+        value = match[2].trim();
 
-	if (result.header[name] === undefined) {
-	    result.header[name] = value;
-	} else {
-	    result.header[name] += ', ' + value;
-	}
+        if (result.header[name] === undefined) {
+            result.header[name] = value;
+        } else {
+            result.header[name] += ', ' + value;
+        }
     }
 
     end = buffer.indexOf('\r\n\r\n');
@@ -68,7 +80,7 @@ function parseMessage(message) {
 function expectSuccessfulOptionsResponse(response) {
     expect(response.statusCode).toBe('200');
     expect(response.header['content-length']).toBe('0');
-    expect(response.header['allow']).not.toBeUndefined();
+    expect(response.header.allow).not.toBeUndefined();
 }
 
 function expectBadRequestResponse(response) {
