@@ -448,7 +448,7 @@ void khttpd_log(int type, const char *fmt, ...)
 	struct iovec iov[2];
 	struct timeval tv;
 	va_list vl;
-	int len;
+	int len, len2;
 
 	/* 
 	 * Currently, khttpd_log can put a log entry only from the khttpd
@@ -469,15 +469,21 @@ void khttpd_log(int type, const char *fmt, ...)
 	microuptime(&tv);
 
 	va_start(vl, fmt);
-	len = type == KHTTPD_LOG_DEBUG
-	    ? snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
-		"%ld.%06ld %d %s ",
-		tv.tv_sec, tv.tv_usec, curthread->td_tid, va_arg(vl, char *))
-	    : snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
-		"%ld.%06ld ", tv.tv_sec, tv.tv_usec);
 
-	len += vsnprintf((char *)khttpd_log_buffer + len,
+	len = type == KHTTPD_LOG_DEBUG ?
+	    snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
+		"%ld.%06ld %d %s ",
+		tv.tv_sec, tv.tv_usec, curthread->td_tid, va_arg(vl, char *)) :
+	    snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
+		"%ld.%06ld ", tv.tv_sec, tv.tv_usec);
+	len = MIN(sizeof(khttpd_log_buffer) - 1, len);
+
+	len2 = vsnprintf((char *)khttpd_log_buffer + len,
 	    sizeof(khttpd_log_buffer) - len, fmt, vl);
+	len2 = MIN(sizeof(khttpd_log_buffer) - len - 1, len2);
+
+	len += len2;
+
 	va_end(vl);
 
 	iov[0].iov_base = (void *)khttpd_log_buffer;
@@ -488,7 +494,7 @@ void khttpd_log(int type, const char *fmt, ...)
 
 	auio.uio_iov = iov;
 	auio.uio_iovcnt = 2;
-	auio.uio_resid = iov[0].iov_len + 1;
+	auio.uio_resid = iov[0].iov_len + iov[1].iov_len;
 	auio.uio_segflg = UIO_SYSSPACE;
 	kern_writev(curthread, khttpd_log_state[KHTTPD_LOG_DEBUG].fd, &auio);
 

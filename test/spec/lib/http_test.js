@@ -83,9 +83,16 @@ function expectNotFoundResponse (response) {
     expect(response.header['content-length']).not.toBe('0');
 }
 
+function expectURITooLongResponse (response) {
+    expect(response.statusCode).toBe('414');
+    expect(response.header['content-length']).not.toBeUndefined();
+    expect(response.header['content-length']).not.toBe('0');
+}
+
 exports.messageSizeMax = messageSizeMax;
 exports.connect = connect;
 exports.parseMessage = parseMessage;
 exports.expectSuccessfulOptionsResponse = expectSuccessfulOptionsResponse;
 exports.expectBadRequestResponse = expectBadRequestResponse;
 exports.expectNotFoundResponse = expectNotFoundResponse;
+exports.expectURITooLongResponse = expectURITooLongResponse;

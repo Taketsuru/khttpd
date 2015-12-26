@@ -57,6 +57,35 @@ describe('khttpd', function () {
 	});
     });
 
+    describe('receiving a request line whose size == limit', function () {
+	var session = {};
+
+	it('accepts a connection request', function (done) {
+	    http_test.connect(session, done);
+	});
+
+	it('half-closes after sending a response to the request', 
+	   function (done) {
+	       var head = 'GET ';
+	       var tail = ' HTTP/1.1\r\n';
+	       var target = '/';
+	       var i, n;
+	       n = http_test.messageSizeMax - head.length - tail.length;
+	       for (i = 1; i < n; ++i) {
+		   target += 'a';
+	       }
+	       session.chan.write(head + target + tail + '\r\n');
+	       session.chan.once('close', done);
+	       session.chan.end();
+	   });
+
+	it('sends a valid response', function (done) {
+	    session.response = http_test.parseMessage(session.data);
+	    http_test.expectNotFoundResponse(session.response);
+	    done();
+	});
+    });
+
     describe('receiving a partial request line', function () {
 	var session = {};
 
