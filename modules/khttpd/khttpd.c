@@ -152,8 +152,8 @@ struct khttpd_request {
 	 */
 #define khttpd_request_zctor_begin	content_length
 	off_t			content_length;
-	struct khttpd_mbuf_pos	request_line;
 	struct khttpd_mbuf_pos	header;
+	struct mbuf		*request_line;
 	struct mbuf		*trailer;
 	struct khttpd_response	*response;
 	struct khttpd_route	*route;
@@ -1172,7 +1172,7 @@ khttpd_request_dtor(void *mem, int size, void *arg)
 	request->dtor(request, request->data);
 
 	sbuf_clear(&request->target);
-	m_freem(request->request_line.ptr);
+	m_freem(request->request_line);
 	m_freem(request->trailer);
 	uma_zfree(khttpd_response_zone, request->response);
 	khttpd_route_free(request->route);
@@ -1468,6 +1468,7 @@ khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
 
 	socket->fd = -1;
 	socket->refcount = 1;
+	socket->recv_limit = khttpd_message_size_limit;
 
 	return (0);
 }
@@ -1603,11 +1604,13 @@ khttpd_socket_shutdown(struct khttpd_socket *socket)
 static void
 khttpd_socket_set_limit(struct khttpd_socket *socket, off_t size)
 {
+	int len;
 
 	TRACE("enter %jd", (intmax_t)size);
 
-	socket->recv_limit = size -
-	    (m_length(socket->recv_ptr, NULL) - socket->recv_off);
+	len = m_length(socket->recv_ptr, NULL) - socket->recv_off;
+	socket->recv_limit = size - len;
+	TRACE("enter %jd, %d", (intmax_t)socket->recv_limit, len);
 }
 
 static int
@@ -1619,7 +1622,7 @@ khttpd_socket_read(struct khttpd_socket *socket)
 	ssize_t resid;
 	int error, flags;
 
-	TRACE("enter");
+	TRACE("enter %d", socket->recv_limit);
 
 	resid = MIN(SSIZE_MAX, socket->recv_limit);
 	if (resid <= 0) {
@@ -1644,6 +1647,7 @@ khttpd_socket_read(struct khttpd_socket *socket)
 	}
 
 	socket->recv_limit -= resid - auio.uio_resid;
+	TRACE("limit %d (-%d)", socket->recv_limit, resid - auio.uio_resid);
 
 	if (socket->recv_ptr == NULL)
 		socket->recv_ptr = m;
@@ -2221,6 +2225,7 @@ khttpd_finish_receiving_request(struct khttpd_socket *socket,
 	socket->recv_request = NULL;
 	khttpd_request_free(request);
 	socket->receive = khttpd_receive_request_line;
+	khttpd_socket_set_limit(socket, khttpd_message_size_limit);
 }
 
 static int
@@ -2780,6 +2785,7 @@ static int
 khttpd_receive_request_line(struct khttpd_socket *socket)
 {
 	static const char version_prefix[] = "HTTP/1.";
+	struct mbuf *m;
 	struct khttpd_mbuf_pos pos, tmppos;
 	const char *cp;
 	char *end;
@@ -2789,19 +2795,10 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 
 	TRACE("enter");
 
-	/*
-	 * Free mbufs preceding the current reading position.
-	 */
-
-	if (socket->recv_leftovers != NULL &&
-	    socket->recv_leftovers != socket->recv_ptr)
-		socket->recv_leftovers = m_free(socket->recv_leftovers);
-
 	/* 
 	 * Get a line.
 	 */
 
-	khttpd_socket_set_limit(socket, khttpd_message_size_limit);
 	error = khttpd_socket_next_line(socket, &pos);
 	if (error != 0)
 		TRACE("error next_line %d", error);
@@ -2840,13 +2837,6 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	    uma_zalloc(khttpd_request_zone, M_WAITOK);
 	STAILQ_INSERT_TAIL(&socket->xmit_queue, request, link);
 
-	/*
-	 * Take the ownership of the receiving mbuf chain.
-	 */
-
-	khttpd_mbuf_pos_copy(&pos, &request->request_line);
-	socket->recv_leftovers = NULL;
-
 	/* 
 	 * If the request line is larger than khttpd_message_size_limit, send
 	 * 'URI too long' response message.
@@ -2866,6 +2856,19 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		khttpd_set_bad_request_response(socket, request);
 		return (0);
 	}
+
+	/*
+	 * Take the ownership of the receiving mbuf chain.
+	 */
+
+	m = socket->recv_leftovers;
+	if (pos.ptr != m || pos.off != 0) {
+		khttpd_terminate_received_mbuf_chain(socket);
+		m_freem(m);
+		m = socket->recv_leftovers;
+	}
+	request->request_line = m;
+	socket->recv_leftovers = NULL;
 
 	/*
 	 * Find the method of this request message.
@@ -3016,6 +3019,7 @@ khttpd_socket_receive_null(struct khttpd_socket *socket)
 	td = curthread;
 	so = socket->fp->f_data;
 
+	bzero(&auio, sizeof(auio));
 	for (;;) {
 		auio.uio_resid = INT_MAX;
 		m = NULL;

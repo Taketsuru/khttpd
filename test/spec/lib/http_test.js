@@ -28,7 +28,7 @@ function connect(session, done) {
     chan.once('connect', done);
 };
 
-function parseMessage (message) {
+function parseMessage(message) {
     var end;
     var i;
     var buffer = Buffer.concat(message);
@@ -65,26 +65,32 @@ function parseMessage (message) {
     return result;
 }
 
-function expectSuccessfulOptionsResponse (response) {
+function expectSuccessfulOptionsResponse(response) {
     expect(response.statusCode).toBe('200');
     expect(response.header['content-length']).toBe('0');
     expect(response.header['allow']).not.toBeUndefined();
 }
 
-function expectBadRequestResponse (response) {
+function expectBadRequestResponse(response) {
     expect(response.statusCode).toBe('400');
     expect(response.header['content-length']).not.toBeUndefined();
     expect(response.header['content-length']).not.toBe('0');
 }
 
-function expectNotFoundResponse (response) {
+function expectNotFoundResponse(response) {
     expect(response.statusCode).toBe('404');
     expect(response.header['content-length']).not.toBeUndefined();
     expect(response.header['content-length']).not.toBe('0');
 }
 
-function expectURITooLongResponse (response) {
+function expectURITooLongResponse(response) {
     expect(response.statusCode).toBe('414');
+    expect(response.header['content-length']).not.toBeUndefined();
+    expect(response.header['content-length']).not.toBe('0');
+}
+
+function expectRequestHeaderFieldTooLargeResponse(response) {
+    expect(response.statusCode).toBe('431');
     expect(response.header['content-length']).not.toBeUndefined();
     expect(response.header['content-length']).not.toBe('0');
 }
@@ -96,3 +102,5 @@ exports.expectSuccessfulOptionsResponse = expectSuccessfulOptionsResponse;
 exports.expectBadRequestResponse = expectBadRequestResponse;
 exports.expectNotFoundResponse = expectNotFoundResponse;
 exports.expectURITooLongResponse = expectURITooLongResponse;
+exports.expectRequestHeaderFieldTooLargeResponse =
+    expectRequestHeaderFieldTooLargeResponse;

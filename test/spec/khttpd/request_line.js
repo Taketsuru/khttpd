@@ -24,22 +24,23 @@ describe('khttpd', function () {
 	});
     });
 
-    describe('receiving many CRLFs preceding a request', function () {
+    describe('receiving CRLFs preceding a request', function () {
 	var session = {};
 
 	it('accepts a connection request', function (done) {
 	    http_test.connect(session, done);
 	});
 
-	it('half-closes after sending a response to the request', 
+	it('accepts as many as the message size limit', 
 	   function (done) {
-	       var i, n, crlfs = '';
-	       n = (http_test.messageSizeMax * 2) / 2;
-	       for (i = 0; i < n; ++i) {
+	       var i, n, message, crlfs;
+	       message = 'OPTIONS * HTTP/1.1\r\nConnection: close\r\n\r\n';
+	       crlfs = '';
+	       n = http_test.messageSizeMax - message.length;
+	       for (i = 0; i + 2 <= n; i += 2) {
 		   crlfs += '\r\n';
 	       }
-	       session.chan.write(crlfs + 'OPTIONS * HTTP/1.1\r\n' +
-				'Connection: close\r\n\r\n');
+	       session.chan.write(crlfs + message);
 	       session.chan.once('end', done);
 	   });
 
@@ -50,9 +51,33 @@ describe('khttpd', function () {
 	    http_test.expectSuccessfulOptionsResponse(session.response);
 	    expect(session.response.header['connection']).toBe('close');
 	});
+    });
 
-	it('ignores garbage following the request', function (done) {
-	    expect(session.response.rest.length).toBe(0);
+    describe('receiving a request line whose size < limit', function () {
+	var session = {};
+
+	it('accepts a connection request', function (done) {
+	    http_test.connect(session, done);
+	});
+
+	it('half-closes after sending a response to the request', 
+	   function (done) {
+	       var head = 'GET ';
+	       var tail = ' HTTP/1.1\r\n\r\n';
+	       var target = '/';
+	       var i, n;
+	       n = http_test.messageSizeMax - head.length - tail.length;
+	       for (i = 1; i < n; ++i) {
+		   target += 'a';
+	       }
+	       session.chan.write(head + target + tail);
+	       session.chan.once('close', done);
+	       session.chan.end();
+	   });
+
+	it('sends a "Not Found" response', function (done) {
+	    session.response = http_test.parseMessage(session.data);
+	    http_test.expectNotFoundResponse(session.response);
 	    done();
 	});
     });
@@ -79,9 +104,40 @@ describe('khttpd', function () {
 	       session.chan.end();
 	   });
 
-	it('sends a valid response', function (done) {
+	it('sends a "Request header field too large" response',
+	   function (done) {
+	       session.response = http_test.parseMessage(session.data);
+	       http_test.
+		   expectRequestHeaderFieldTooLargeResponse(session.response);
+	       done();
+	   });
+    });
+
+    describe('receiving a request line whose size > limit', function () {
+	var session = {};
+
+	it('accepts a connection request', function (done) {
+	    http_test.connect(session, done);
+	});
+
+	it('half-closes after sending a response to the request', 
+	   function (done) {
+	       var head = 'GET ';
+	       var tail = ' HTTP/1.1\r\n';
+	       var target = '/';
+	       var i, n;
+	       n = http_test.messageSizeMax - head.length - tail.length + 1;
+	       for (i = 1; i < n; ++i) {
+		   target += 'a';
+	       }
+	       session.chan.write(head + target + tail + '\r\n');
+	       session.chan.once('close', done);
+	       session.chan.end();
+	   });
+
+	it('sends a "URI Too Long" response', function (done) {
 	    session.response = http_test.parseMessage(session.data);
-	    http_test.expectNotFoundResponse(session.response);
+	    http_test.expectURITooLongResponse(session.response);
 	    done();
 	});
     });
@@ -121,7 +177,7 @@ describe('khttpd', function () {
 	    it('receives a request line with an invalid request target',
 	       function (done) {
 		   session.chan.write('GET ' + url + ' HTTP/1.1\r\n' +
-			      'Connection: close\r\n\r\n');
+				      'Connection: close\r\n\r\n');
 		   session.chan.once('end', done);
 	       });
 
