@@ -2838,21 +2838,11 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	STAILQ_INSERT_TAIL(&socket->xmit_queue, request, link);
 
 	/* 
-	 * If the request line is larger than khttpd_message_size_limit, send
-	 * 'URI too long' response message.
+	 * If the request line is longer than khttpd_message_size_limit or is
+	 * terminated prematurely, send 'Bad Request' response message.
 	 */
 
-	if (error == ENOBUFS) {
-		khttpd_set_uri_too_long_response(socket, request);
-		return (0);
-	}
-
-	/*
-	 * If the request line is terminated prematurely, send 'Bad Request'
-	 * response message.
-	 */
-
-	if (error == ENOENT) {
+	if (error == ENOBUFS || error == ENOENT) {
 		khttpd_set_bad_request_response(socket, request);
 		return (0);
 	}

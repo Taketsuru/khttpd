@@ -135,11 +135,11 @@ describe('khttpd', function () {
 	       session.chan.end();
 	   });
 
-	it('sends a "URI Too Long" response', function (done) {
-	    session.response = http_test.parseMessage(session.data);
-	    http_test.expectURITooLongResponse(session.response);
-	    done();
-	});
+	it('sends a "Bad Request" response', function (done) {
+	       session.response = http_test.parseMessage(session.data);
+	       http_test.expectBadRequestResponse(session.response);
+	       done();
+	   });
     });
 
     describe('receiving a partial request line', function () {
