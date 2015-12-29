@@ -818,8 +818,8 @@ khttpd_json_parse(struct khttpd_mbuf_pos *iter,
 }
 
 struct mbuf *
-khttpd_json_mbuf_append_string(struct mbuf *output,
-    const char *begin, const char *end)
+khttpd_json_mbuf_append_string_wo_quote(struct mbuf *output, const char *begin,
+    const char *end)
 {
 	struct mbuf *tail;
 	const char *srcp;
@@ -830,7 +830,7 @@ khttpd_json_mbuf_append_string(struct mbuf *output,
 	unsigned char ch;
 
 	srcp = begin;
-	tail = khttpd_mbuf_append_ch(output, '\"');
+	tail = output;
 	dstp = mtod(tail, char *) + tail->m_len;
 	dend = M_START(tail) + M_SIZE(tail);
 
@@ -960,8 +960,48 @@ expand:
 	}
 
 	tail->m_len = dstp - mtod(tail, char *);
-	khttpd_mbuf_append_ch(tail, '\"');
 
+	return (tail);
+}
+
+struct mbuf *
+khttpd_json_mbuf_append_string_in_mbuf_wo_quote(struct mbuf *output,
+    struct mbuf *source)
+{
+	struct mbuf *tail;
+	struct mbuf *srcp;
+	const char *begin, *end;
+	
+	tail = output;
+	for (srcp = source; srcp != NULL; srcp = srcp->m_next) {
+		begin = mtod(srcp, char *);
+		end = begin + srcp->m_len;
+		tail = khttpd_json_mbuf_append_string_wo_quote(tail, begin, end);
+	}
+	return (tail);
+}
+
+struct mbuf *
+khttpd_json_mbuf_append_string(struct mbuf *output,
+    const char *begin, const char *end)
+{
+	struct mbuf *tail;
+
+	tail = khttpd_mbuf_append_ch(output, '\"');
+	tail = khttpd_json_mbuf_append_string_wo_quote(tail, begin, end);
+	tail = khttpd_mbuf_append_ch(tail, '\"');
+	return (tail);
+}
+
+struct mbuf *
+khttpd_json_mbuf_append_string_in_mbuf(struct mbuf *output,
+    struct mbuf *src)
+{
+	struct mbuf *tail;
+
+	tail = khttpd_mbuf_append_ch(output, '\"');
+	tail = khttpd_json_mbuf_append_string_in_mbuf_wo_quote(tail, src);
+	tail = khttpd_mbuf_append_ch(tail, '\"');
 	return (tail);
 }
 

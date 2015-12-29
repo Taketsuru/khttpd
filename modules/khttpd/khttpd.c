@@ -49,6 +49,9 @@
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 
+#define SYSLOG_NAMES
+#include <sys/syslog.h>
+
 #include <vm/uma.h>
 
 #include "khttpd.h"
@@ -69,6 +72,41 @@ enum {
 
 	/* the server is ready to serve http requests.	*/
 	KHTTPD_READY,
+};
+
+/* possible values of khttpd_logger_state */
+enum {
+	/* the logger thread has exited. */
+	KHTTPD_LOGGER_DORMANT = 0,
+
+	/* the server is ready to serve http requests.	*/
+	KHTTPD_LOGGER_IDLE,
+
+	/* the server is ready to serve http requests.	*/
+	KHTTPD_LOGGER_BUSY,
+
+	/* the server process has not finished its initialization yet */
+	KHTTPD_LOGGER_SUSPENDING,
+
+	/* the server process has not finished its initialization yet */
+	KHTTPD_LOGGER_SUSPENDED,
+
+	/* termination is requested but the logger thread has not exited yet. */
+	KHTTPD_LOGGER_TERMINATING,
+};
+
+struct khttpd_log_entry {
+	int		type;
+	struct bintime	timestamp;
+	union {
+		struct {
+			lwpid_t		tid;
+			const char	*func;
+		} debug;
+		struct {
+			int	severity;
+		} error;
+	};
 };
 
 struct khttpd_command;
@@ -378,13 +416,16 @@ static struct khttpd_label_list khttpd_field_hash_table[16];
 static struct mtx khttpd_lock;
 static struct cdev *khttpd_dev;
 static struct proc *khttpd_proc;
+static struct thread *khttpd_logger_thread;
+static struct mbufq khttpd_logger_queue;
 static size_t khttpd_message_size_limit = 16384;
 static pid_t khttpd_pid;
 static int khttpd_listen_backlog = 128;
+static int khttpd_logger_state;
 static int khttpd_state;
 static int khttpd_server_status;
-static boolean_t khttpd_log_writing, khttpd_log_waiting;
-static char khttpd_log_buffer[1024];
+static boolean_t khttpd_logger_waiting_empty_slot;
+static boolean_t khttpd_logger_waiting_state_change;
 
 const char khttpd_crlf[] = { '\r', '\n' };
 
@@ -442,69 +483,115 @@ void khttpd_free(void *mem)
 	free(mem, M_KHTTPD);
 }
 
-void khttpd_log(int type, const char *fmt, ...)
+static void
+khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
 {
-	struct uio auio;
-	struct iovec iov[2];
-	struct timeval tv;
-	va_list vl;
-	int len, len2;
+	switch (entry->type) {
 
-	/* 
-	 * Currently, khttpd_log can put a log entry only from the khttpd
-	 * process.
-	 */
-	if (curproc != khttpd_proc)
+	default:
+		break;
+	}
+}
+
+static struct mbuf *
+khttpd_alloc_log_entry(int type, struct khttpd_log_entry **entry)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+
+	m = m_get(M_WAITOK, MT_DATA);
+	m_align(m, rounddown2(MLEN, sizeof(void*)));
+	m->m_len = sizeof(*e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->type = type;
+	bintime(&e->timestamp);
+
+	return (m);
+}
+
+static void
+khttpd_log_enqueue(struct mbuf *m)
+{
+	int error;
+
+	KASSERT(curthread != khttpd_logger_thread,
+	    ("current thread is the logger thread"));
+
+	mtx_lock(&khttpd_lock);
+	for (;;) {
+		if (khttpd_logger_state == KHTTPD_LOGGER_DORMANT ||
+		    khttpd_logger_state == KHTTPD_LOGGER_TERMINATING)
+			break;
+
+		error = mbufq_enqueue(&khttpd_logger_queue, m);
+		if (error == 0) {
+			if (khttpd_logger_state == KHTTPD_LOGGER_IDLE &&
+			    mbufq_len(&khttpd_logger_queue) == 1) {
+				khttpd_logger_state = KHTTPD_LOGGER_BUSY;
+				if (khttpd_logger_waiting_state_change)
+					wakeup(&khttpd_logger_state);
+			}
+			m = NULL;
+			break;
+		}
+		KASSERT(error == ENOBUFS, ("mbuf_enqueue error: %d", error));
+
+		khttpd_logger_waiting_empty_slot = TRUE;
+		mtx_sleep(&khttpd_logger_waiting_empty_slot, &khttpd_lock, 0,
+		    "khttpd-slow-log", 0);
+	}
+	mtx_unlock(&khttpd_lock);
+
+	if (error != 0) {
+		khttpd_log_entry_dtor(mtod(m, struct khttpd_log_entry *));
+		m_freem(m);
+	}
+}
+
+void
+khttpd_error(int severity, const char *fmt, ...)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+	va_list vl;
+
+	if (curthread == khttpd_logger_thread)
 		return;
 
-	mtx_lock(&khttpd_lock);
-	while (khttpd_log_writing) {
-		khttpd_log_waiting = TRUE;
-		mtx_sleep(&khttpd_log_writing, &khttpd_lock, 0, "khttpd-log",
-		    0);
-	}
-	khttpd_log_writing = TRUE;
-	mtx_unlock(&khttpd_lock);
+	m = khttpd_alloc_log_entry(KHTTPD_LOG_ERROR, &e);
 
-	microuptime(&tv);
+	e = mtod(m, struct khttpd_log_entry *);
+	e->error.severity = severity;
 
 	va_start(vl, fmt);
-
-	len = type == KHTTPD_LOG_DEBUG ?
-	    snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
-		"%ld.%06ld %d %s ",
-		tv.tv_sec, tv.tv_usec, curthread->td_tid, va_arg(vl, char *)) :
-	    snprintf(khttpd_log_buffer, sizeof(khttpd_log_buffer),
-		"%ld.%06ld ", tv.tv_sec, tv.tv_usec);
-	len = MIN(sizeof(khttpd_log_buffer) - 1, len);
-
-	len2 = vsnprintf((char *)khttpd_log_buffer + len,
-	    sizeof(khttpd_log_buffer) - len, fmt, vl);
-	len2 = MIN(sizeof(khttpd_log_buffer) - len - 1, len2);
-
-	len += len2;
-
+	khttpd_mbuf_vprintf(m, fmt, vl);
 	va_end(vl);
 
-	iov[0].iov_base = (void *)khttpd_log_buffer;
-	iov[0].iov_len = len;
+	khttpd_log_enqueue(m);
+}
 
-	iov[1].iov_base = (void *)(khttpd_crlf + 1);
-	iov[1].iov_len = 1;
+void
+khttpd_debug(const char *func, const char *fmt, ...)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+	va_list vl;
 
-	auio.uio_iov = iov;
-	auio.uio_iovcnt = 2;
-	auio.uio_resid = iov[0].iov_len + iov[1].iov_len;
-	auio.uio_segflg = UIO_SYSSPACE;
-	kern_writev(curthread, khttpd_log_state[KHTTPD_LOG_DEBUG].fd, &auio);
+	if (curthread == khttpd_logger_thread)
+		return;
 
-	mtx_lock(&khttpd_lock);
-	khttpd_log_writing = FALSE;
-	if (khttpd_log_waiting) {
-		khttpd_log_waiting = FALSE;
-		wakeup(&khttpd_log_writing);
-	}
-	mtx_unlock(&khttpd_lock);
+	m = khttpd_alloc_log_entry(KHTTPD_LOG_DEBUG, &e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->debug.tid = curthread->td_tid;
+	e->debug.func = func;
+
+	va_start(vl, fmt);
+	khttpd_mbuf_vprintf(m, fmt, vl);
+	va_end(vl);
+
+	khttpd_log_enqueue(m);
 }
 
 /*
@@ -2809,9 +2896,9 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		 * If EOF is found at the beginning of the line, return
 		 * immediately.
 		 */
-		if (pos.unget == -1 &&
-		    (pos.ptr == NULL ||
-			(pos.ptr->m_next == NULL && pos.off == pos.ptr->m_len)))
+		if (pos.unget == -1 && (pos.ptr == NULL ||
+			(pos.ptr->m_next == NULL &&
+			    pos.off == pos.ptr->m_len)))
 			return (0);
 	}
 	if (error == 0) {
@@ -3201,6 +3288,216 @@ khttpd_asterisc_received_header(struct khttpd_socket *socket,
 	}
 }
 
+/* ---------------------------------------------------------- logger thread */
+
+static void
+khttpd_logger_set_state(int state)
+{
+
+	mtx_assert(&khttpd_lock, MA_OWNED);
+
+	khttpd_logger_state = state;
+	if (khttpd_logger_waiting_state_change) {
+		khttpd_logger_waiting_state_change = FALSE;
+		wakeup(&khttpd_logger_state);
+	}
+}
+
+static void
+khttpd_logger_wait(const char *wmsg)
+{
+
+	mtx_assert(&khttpd_lock, MA_OWNED);
+
+	khttpd_logger_waiting_state_change = TRUE;
+	mtx_sleep(&khttpd_logger_state, &khttpd_lock, 0, wmsg, 0);
+}
+
+static void
+khttpd_logger_main(void *arg)
+{
+	struct iovec iov[64];
+	struct uio auio;
+	struct timeval tv;
+	const CODE *codep;
+	struct mbuf *hd, *m, *n;
+	struct khttpd_log_entry *e;
+	ssize_t resid;
+	int error, i, len, maxiov, type;
+	boolean_t do_suspend;
+
+	maxiov = sizeof(iov) / sizeof(iov[0]);
+
+	mbufq_init(&khttpd_logger_queue, INT_MAX);
+
+	mtx_lock(&khttpd_lock);
+	for (;;) {
+		do_suspend = FALSE;
+
+		switch (khttpd_logger_state) {
+
+		case KHTTPD_LOGGER_BUSY:
+			m = mbufq_flush(&khttpd_logger_queue);
+			if (m != NULL)
+				break;
+			khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
+			/* FALLTHROUGH */
+
+		case KHTTPD_LOGGER_IDLE:
+			khttpd_logger_wait("khttpd-log-idle");
+			continue;
+
+		case KHTTPD_LOGGER_SUSPENDING:
+			m = mbufq_flush(&khttpd_logger_queue);
+			if (m != NULL) {
+				do_suspend = TRUE;
+				break;
+			}
+			khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDED);
+			/* FALLTHROUGH */
+
+		case KHTTPD_LOGGER_SUSPENDED:
+			khttpd_logger_wait("khttpd-log-susp");
+			continue;
+
+		case KHTTPD_LOGGER_TERMINATING:
+			m = mbufq_flush(&khttpd_logger_queue);
+			if (m != NULL)
+				break;
+			khttpd_logger_set_state(KHTTPD_LOGGER_DORMANT);
+			mtx_unlock(&khttpd_lock);
+			kthread_exit();
+
+		case KHTTPD_LOGGER_DORMANT:
+			KASSERT(mbufq_len(&khttpd_logger_queue) == 0,
+			    ("enqueued before the completion of "
+				"the initialization"));
+			khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
+			continue;
+
+		default:
+			panic("invalid logger state %d", khttpd_logger_state);
+		}
+
+		if (khttpd_logger_waiting_empty_slot) {
+			khttpd_logger_waiting_empty_slot = FALSE;
+			wakeup(&khttpd_logger_waiting_empty_slot);
+		}
+
+		mtx_unlock(&khttpd_lock);
+
+		for (; m != NULL; m = n) {
+			n = STAILQ_NEXT(m, m_stailqpkt);
+			e = mtod(m, struct khttpd_log_entry *);
+
+			bintime_add(&e->timestamp, &boottimebin);
+			bintime2timeval(&e->timestamp, &tv);
+
+			hd = m_get(M_WAITOK, MT_DATA);
+
+			type = e->type;
+			switch (type) {
+
+			case KHTTPD_LOG_DEBUG:
+				khttpd_mbuf_printf(hd, "%ld.%06ld %d %s ",
+				    tv.tv_sec, tv.tv_usec, e->debug.tid,
+				    e->debug.func);
+				khttpd_log_entry_dtor(e);
+				m_adj(m, sizeof(struct khttpd_log_entry));
+				m_cat(hd, m);
+				khttpd_mbuf_append_ch(hd, '\n');
+				break;
+
+			case KHTTPD_LOG_ERROR:
+				for (codep = prioritynames;
+				     codep->c_name != NULL &&
+					 codep->c_val != e->error.severity;
+				     ++codep)
+					; /* nothing */
+
+				khttpd_mbuf_printf(hd,
+				    "{\"timestamp\": %ld.%06ld, "
+				    "\"priority\": \"%s\", \"description\": ",
+				    tv.tv_sec, tv.tv_usec,
+				    codep->c_name == NULL ? "unknown" :
+				    codep->c_name);
+				khttpd_json_mbuf_append_string_in_mbuf(hd, m);
+				khttpd_mbuf_printf(hd, "}\n");
+
+				khttpd_log_entry_dtor(e);
+				m_freem(m);
+				break;
+
+			default:
+				panic("unknown log type: %d", type);
+			}
+
+			m = hd;
+			i = 0;
+			resid = 0;
+			do {
+				while (m != NULL && i < maxiov) {
+					len = m->m_len;
+					iov[i].iov_base = mtod(m, void *);
+					iov[i].iov_len = len;
+					resid += len;
+					++i;
+					m = m->m_next;
+				}
+
+				auio.uio_iov = iov;
+				auio.uio_segflg = UIO_SYSSPACE;
+				auio.uio_rw = UIO_WRITE;
+				auio.uio_td = curthread;
+				auio.uio_iovcnt = i;
+				auio.uio_resid = resid;
+				auio.uio_offset = 0;
+				while (auio.uio_resid) {
+					error = kern_writev(curthread,
+					    khttpd_log_state[type].fd, &auio);
+					if (error != 0)
+						break;
+				}
+
+				resid = 0;
+				i = 0;
+			} while (m != NULL);
+
+			m_freem(hd);
+		}
+
+		mtx_lock(&khttpd_lock);
+		if (do_suspend)
+			khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDED);
+	}
+}
+
+void
+khttpd_logger_suspend(void)
+{
+
+	mtx_assert(&khttpd_lock, MA_OWNED);
+	KASSERT(khttpd_logger_state == KHTTPD_LOGGER_IDLE ||
+	    khttpd_logger_state == KHTTPD_LOGGER_BUSY,
+	    ("unexpected logger state %d", khttpd_logger_state));
+
+	khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDING);
+	while (khttpd_logger_state != KHTTPD_LOGGER_SUSPENDED)
+		khttpd_logger_wait("khttpd-log-susp");
+}
+
+void
+khttpd_logger_resume(void)
+{
+
+	mtx_assert(&khttpd_lock, MA_OWNED);
+	KASSERT(khttpd_logger_state == KHTTPD_LOGGER_SUSPENDED,
+	    ("unexpected logger state %d", khttpd_logger_state));
+
+	khttpd_logger_set_state(mbufq_len(&khttpd_logger_queue) == 0 ?
+	    KHTTPD_LOGGER_IDLE : KHTTPD_LOGGER_BUSY);
+}
+
 /* ---------------------------------------------------------- khttpd daemon */
 
 static void
@@ -3237,6 +3534,18 @@ khttpd_main(void *arg)
 	int debug_fd, error, i;
 
 	TRACE("enter %p", arg);
+
+	kthread_add(khttpd_logger_main, NULL, khttpd_proc,
+	    &khttpd_logger_thread, 0, 0, "khttpd_logger");
+
+	/*
+	 * Wait for the logger to be ready.
+	 */
+
+	mtx_lock(&khttpd_lock);
+	while (khttpd_logger_state == KHTTPD_LOGGER_DORMANT)
+		khttpd_logger_wait("khttpd-log-ready");
+	mtx_unlock(&khttpd_lock);
 
 	STAILQ_INIT(&worklist);
 	td = curthread;
@@ -3297,7 +3606,7 @@ khttpd_main(void *arg)
 	}
 	debug_fd = td->td_retval[0];
 
-	//khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
+	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
 	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
 
 	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
@@ -3373,12 +3682,12 @@ cont:
 		}
 
 		STAILQ_SWAP(&worklist, &khttpd_command_queue, khttpd_command);
-
 		mtx_unlock(&khttpd_lock);
 
 		while ((command = STAILQ_FIRST(&worklist)) != NULL) {
 			STAILQ_REMOVE_HEAD(&worklist, link);
-			command->status = command->command(command->argument);
+			command->status =
+			    command->command(command->argument);
 			wakeup(command);
 		}
 
@@ -3412,14 +3721,24 @@ cont:
 
 	khttpd_route_clear_all(&khttpd_route_root);
 
+	khttpd_file_fini();
+	khttpd_json_fini();
+
+	mtx_lock(&khttpd_lock);
+	khttpd_logger_state = KHTTPD_LOGGER_TERMINATING;
+	wakeup(&khttpd_logger_state);
+	while (khttpd_logger_state != KHTTPD_LOGGER_DORMANT) {
+		khttpd_logger_waiting_state_change = TRUE;
+		mtx_sleep(&khttpd_logger_state, &khttpd_lock, 0,
+		    "khttpd-log-term", 0);
+	}
+	mtx_unlock(&khttpd_lock);
+
 	for (i = 0; i < KHTTPD_LOG_END; ++i)
 		if (khttpd_log_state[i].fd != -1) {
 			kern_close(td, khttpd_log_state[i].fd);
 			khttpd_log_state[i].fd = -1;
 		}
-
-	khttpd_file_fini();
-	khttpd_json_fini();
 
 	uma_zdestroy(khttpd_socket_zone);
 	uma_zdestroy(khttpd_request_zone);
@@ -3581,11 +3900,19 @@ khttpd_set_log_conf(void *argument)
 
 	FILEDESC_XUNLOCK(fdp);
 
+	mtx_lock(&khttpd_lock);
+	khttpd_logger_suspend();
+	mtx_unlock(&khttpd_lock);
+
 	state = &khttpd_log_state[conf->type];
 	if (state->fd != -1)
 		kern_close(curthread, state->fd);
 	state->mask = conf->mask;
 	state->fd = newfd;
+
+	mtx_lock(&khttpd_lock);
+	khttpd_logger_resume();
+	mtx_unlock(&khttpd_lock);
 
 	TRACE("fd %d", newfd);
 

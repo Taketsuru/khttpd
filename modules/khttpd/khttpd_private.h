@@ -28,6 +28,9 @@
 #pragma once
 
 #include <sys/types.h>
+#include <sys/malloc.h>
+
+#include "khttpd.h"
 
 #ifdef _KERNEL
 
@@ -53,7 +56,7 @@ MALLOC_DECLARE(M_KHTTPD);
 #endif
 
 #define ERROR(fmt, ...) \
-	khttpd_log(KHTTPD_LOG_ERROR, fmt, ## __VA_ARGS__)
+	khttpd_error(fmt, ## __VA_ARGS__)
 
 #ifdef KHTTPD_DEBUG
 
@@ -61,7 +64,7 @@ MALLOC_DECLARE(M_KHTTPD);
 	((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &	\
 	    KHTTPD_LOG_DEBUG_ ## MASK) != 0)
 #define DEBUG(fmt, ...) \
-	khttpd_log(KHTTPD_LOG_DEBUG, fmt, __func__, ## __VA_ARGS__)
+	khttpd_debug(__func__, fmt, ## __VA_ARGS__)
 #define TRACE(fmt, ...) \
 	if (DEBUG_ENABLED(TRACE)) DEBUG(fmt, ## __VA_ARGS__)
 
@@ -83,7 +86,10 @@ extern struct khttpd_log_state khttpd_log_state[];
 void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
 
-void khttpd_log(int type, const char *fmt, ...);
+void khttpd_error(int severity, const char *fmt, ...);
+void khttpd_debug(const char *func, const char *fmt, ...);
+void khttpd_logger_suspend(void);
+void khttpd_logger_resume(void);
 
 char *khttpd_find_ch(const char *begin, const char search);
 char *khttpd_find_ch_in(const char *begin, const char *end, char ch);

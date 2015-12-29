@@ -2,7 +2,7 @@
 
 var net = require('net'),
     target = require('../lib/target'),
-    httpTest = require('../lib/httpTest');
+    httpTest = require('../lib/http_test');
 
 describe('khttpd', function () {
 
@@ -24,7 +24,7 @@ describe('khttpd', function () {
         });
     });
 
-    describe('receiving CRLFs preceding a request', function () {
+    xdescribe('receiving CRLFs preceding a request', function () {
         var session = {};
 
         it('accepts a connection request', function (done) {

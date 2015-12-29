@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <sys/ioccom.h>
 #include <sys/socket.h>
+#include <sys/sbuf.h>
 
 #include <machine/stdarg.h>
 
@@ -283,8 +284,14 @@ struct khttpd_json *khttpd_json_object_get_at(struct khttpd_json *value,
 int khttpd_json_object_size(struct khttpd_json *value);
 int khttpd_json_parse(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out, int depth_limit);
+struct mbuf *khttpd_json_mbuf_append_string_wo_quote(struct mbuf *output,
+    const char *begin, const char *end);
+struct mbuf *khttpd_json_mbuf_append_string_in_mbuf_wo_quote(struct mbuf *output,
+    struct mbuf *source);
 struct mbuf *khttpd_json_mbuf_append_string(struct mbuf *output,
     const char *begin, const char *end);
+struct mbuf *khttpd_json_mbuf_append_string_in_mbuf(struct mbuf *output,
+    struct mbuf *source);
 struct mbuf *khttpd_json_mbuf_append_cstring(struct mbuf *output,
     const char *str);
 void khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter);
