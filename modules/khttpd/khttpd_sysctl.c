@@ -989,12 +989,12 @@ khttpd_sysctl_received_header(struct khttpd_socket *socket,
 static int
 khttpd_sysctl_unload_proc(void *args)
 {
-	struct khttpd_route *route;
+	struct khttpd_route *root, *route;
 
 	TRACE("enter");
 
-	route = khttpd_route_find(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX,
-	    NULL);
+	root = khttpd_server_route_root(khttpd_get_admin_server());
+	route = khttpd_route_find(root, KHTTPD_SYSCTL_PREFIX, NULL);
 	if (route == NULL)
 		return (ENOENT);
 	khttpd_route_remove(route);
@@ -1012,11 +1012,13 @@ khttpd_sysctl_unload(void)
 static int
 khttpd_sysctl_load_proc(void *args)
 {
+	struct khttpd_route *root;
 	int error;
 
 	TRACE("enter");
 
-	error = khttpd_route_add(&khttpd_route_root, KHTTPD_SYSCTL_PREFIX, 
+	root = khttpd_server_route_root(khttpd_get_admin_server());
+	error = khttpd_route_add(root, KHTTPD_SYSCTL_PREFIX,
 	    &khttpd_route_type_sysctl);
 
 	return (error);

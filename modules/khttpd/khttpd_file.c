@@ -479,7 +479,7 @@ khttpd_mount_proc(void *data)
 	struct khttpd_mount_args *args;
 	struct filedescent *dstfde, *srcfde;
 	struct filedesc *fdp;
-	struct khttpd_route *route;
+	struct khttpd_route *root, *route;
 	struct khttpd_file_route_data *route_data;
 	struct thread *td;
 	int error, newfd;
@@ -490,8 +490,8 @@ khttpd_mount_proc(void *data)
 
 	TRACE("enter %s", args->prefix);
 
-	error = khttpd_route_add(&khttpd_route_root, args->prefix,
-	    &khttpd_route_type_file);
+	root = khttpd_server_route_root(khttpd_get_admin_server());
+	error = khttpd_route_add(root, args->prefix, &khttpd_route_type_file);
 	if (error != 0)
 		goto failed;
 
@@ -530,7 +530,7 @@ khttpd_mount_proc(void *data)
 	route_data->dirfd = newfd;
 	args->prefix = NULL;
 
-	route = khttpd_route_find(&khttpd_route_root, route_data->path, NULL);
+	route = khttpd_route_find(root, route_data->path, NULL);
 	khttpd_route_set_data(route, route_data, khttpd_file_route_dtor);
 
 	return (0);
@@ -665,7 +665,7 @@ static int
 khttpd_set_mime_type_rules_proc(void *data)
 {
 	struct khttpd_set_mime_type_rules_args *args;
-	struct khttpd_route *route;
+	struct khttpd_route *root, *route;
 	struct khttpd_file_route_data *route_data;
 	const char *suffix;
 
@@ -673,8 +673,8 @@ khttpd_set_mime_type_rules_proc(void *data)
 
 	TRACE("enter %s", args->mount_point);
 
-	route = khttpd_route_find(&khttpd_route_root, args->mount_point,
-	    &suffix);
+	root = khttpd_server_route_root(khttpd_get_admin_server());
+	route = khttpd_route_find(root, args->mount_point, &suffix);
 	if (route == NULL || *suffix != '\0') {
 		TRACE("error enoent");
 		return (ENOENT);
@@ -788,8 +788,8 @@ int khttpd_file_init(void)
 {
 
 	khttpd_mime_type_rule_zone = uma_zcreate("khttp-mime-type-rule",
-	    sizeof(struct khttpd_mime_type_rule),
-	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
+	    sizeof(struct khttpd_mime_type_rule), NULL, NULL, NULL, NULL,
+	    UMA_ALIGN_PTR, 0);
 
 	return (0);
 }

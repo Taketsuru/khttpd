@@ -331,6 +331,9 @@ void khttpd_socket_hold(struct khttpd_socket *socket);
 void khttpd_socket_free(struct khttpd_socket *socket);
 int khttpd_socket_fd(struct khttpd_socket *socket);
 
+struct khttpd_server *khttpd_get_admin_server(void);
+struct khttpd_route *khttpd_server_route_root(struct khttpd_server *);
+
 void khttpd_set_response(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response);
 
@@ -374,8 +377,5 @@ void khttpd_set_options_response(struct khttpd_socket *socket,
     const char *allowed_methods);
 
 int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
-
-extern struct khttpd_route khttpd_route_root;
-extern const char khttpd_crlf[2];
 
 #endif	/* _KERNEL */

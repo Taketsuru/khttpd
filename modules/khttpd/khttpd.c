@@ -77,7 +77,7 @@ enum {
 /* possible values of khttpd_logger_state */
 enum {
 	/* not ready yet. */
-	KHTTPD_LOGGER_DORMANT = 0,
+	KHTTPD_LOGGER_INITIALIZING = 0,
 
 	/* waiting for a log entry. */
 	KHTTPD_LOGGER_IDLE,
@@ -140,8 +140,11 @@ struct khttpd_server_port {
 	struct khttpd_event_type	event_type;
 	SLIST_ENTRY(khttpd_server_port)	link;
 	struct khttpd_address_info	addrinfo;
+	struct khttpd_server		*server;
 	int		fd;
 };
+
+SLIST_HEAD(khttpd_server_port_list, khttpd_server_port);
 
 typedef int (*khttpd_receive_t)(struct khttpd_socket *);
 
@@ -150,6 +153,7 @@ struct khttpd_socket {
 	struct khttpd_event_type event_type;
 	LIST_ENTRY(khttpd_socket) link;
 	STAILQ_HEAD(, khttpd_request) xmit_queue;
+	struct khttpd_server_port *port;
 	cap_rights_t		rights;
 	khttpd_receive_t	receive;
 	khttpd_transmit_t	transmit;
@@ -180,6 +184,8 @@ struct khttpd_socket {
 	int		fd;
 	u_int		refcount;
 };
+
+LIST_HEAD(khttpd_socket_list, khttpd_socket);
 
 struct khttpd_request {
 	STAILQ_ENTRY(khttpd_request) link;
@@ -259,6 +265,14 @@ struct khttpd_route {
 	u_int		refcount;
 	int		label_len;
 };
+
+struct khttpd_server {
+	SLIST_ENTRY(khttpd_server)	link;
+	struct khttpd_route		route_root;
+	struct khttpd_server_port_list	ports;
+};
+
+SLIST_HEAD(khttpd_server_list, khttpd_server);
 
 struct khttpd_label {
 	const char	*name;
@@ -447,25 +461,16 @@ static struct khttpd_event_type khttpd_stop_request_type = {
 	.handle_event = khttpd_kevent_nop
 };
 
-struct khttpd_route khttpd_route_root = {
-	.children_tree = SPLAY_INITIALIZER(khttpd_route_root.children_tree),
-	.children_list =
-	    LIST_HEAD_INITIALIZER(khttpd_route_root.children_list),
-	.type = &khttpd_route_type_null,
-	.parent = NULL,
-	.refcount = 1,
-};
-
 static struct khttpd_route_type khttpd_route_type_asterisc = {
 	.name = "asterisc",
 	.received_header = khttpd_asterisc_received_header
 };
 
-static SLIST_HEAD(khttpd_server_port_list, khttpd_server_port)
-    khttpd_server_ports = SLIST_HEAD_INITIALIZER(khttpd_server_port_list);
-
-static LIST_HEAD(, khttpd_socket) khttpd_sockets =
+static struct khttpd_socket_list khttpd_sockets =
     LIST_HEAD_INITIALIZER(khttpd_sockets);
+
+static struct khttpd_server_list khttpd_servers =
+    SLIST_HEAD_INITIALIZER(khttpd_server_list);
 
 static uma_zone_t khttpd_route_zone;
 static uma_zone_t khttpd_socket_zone;
@@ -1371,6 +1376,7 @@ void
 khttpd_response_set_body_mbuf(struct khttpd_response *response,
     struct mbuf *data)
 {
+
 	KASSERT(response->body == NULL,
 	    ("response %p has body %p", response, response->body));
 	KASSERT(!response->has_transfer_encoding &&
@@ -1717,6 +1723,58 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 
 	return (0);
 }
+
+/*
+ * 
+ */
+
+static struct khttpd_server *
+khttpd_server_alloc(void)
+{
+	struct khttpd_server *result;
+
+	result = khttpd_malloc(sizeof(struct khttpd_server));
+	bzero(&result->route_root, sizeof(struct khttpd_route));
+	SPLAY_INIT(&result->route_root.children_tree);
+	LIST_INIT(&result->route_root.children_list);
+	result->route_root.type = &khttpd_route_type_null;
+	result->route_root.refcount = 1;
+	SLIST_INIT(&result->ports);
+
+	return (result);
+}
+
+static void
+khttpd_server_free(struct khttpd_server *server)
+{
+
+	KASSERT(LIST_EMPTY(&server->route_root.children_list),
+	    ("server %p has a route %s", server,
+	     LIST_FIRST(&server->route_root.children_list)->path));
+	KASSERT(server->route_root.refcount == 1,
+	    ("server %p's root route has %d reference(s)", server,
+	     server->route_root.refcount));
+
+	khttpd_free(server);
+}
+
+struct khttpd_server *
+khttpd_get_admin_server(void)
+{
+
+	return SLIST_FIRST(&khttpd_servers);
+}
+
+struct khttpd_route *
+khttpd_server_route_root(struct khttpd_server *server)
+{
+
+	return &server->route_root;
+}
+
+/*
+ * 
+ */
 
 void
 khttpd_set_response(struct khttpd_socket *socket,
@@ -2882,11 +2940,12 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 * Find the route corresponds to the request target. 
 	 */
 
-	route = khttpd_route_find(&khttpd_route_root,
+	route = khttpd_route_find(khttpd_server_route_root
+	    (socket->port->server),
 	    sbuf_data(&request->target), &request->suffix);
 	if (route == NULL) {
 		khttpd_set_not_found_response(socket, request, FALSE);
-		route = &khttpd_route_root;
+		route = khttpd_server_route_root(socket->port->server);
 	}
 	khttpd_route_hold(route);
 	request->route = route;
@@ -2939,6 +2998,7 @@ khttpd_accept_client(struct kevent *event)
 	port = event->udata;
 
 	socket = uma_zalloc(khttpd_socket_zone, M_WAITOK);
+	socket->port = port;
 
 	error = kern_accept4(td, port->fd, &name, &namelen, SOCK_NONBLOCK, 
 	    NULL);
@@ -3243,7 +3303,7 @@ khttpd_log_enqueue(struct mbuf *m)
 
 	mtx_lock(&khttpd_lock);
 	for (;;) {
-		if (khttpd_logger_state == KHTTPD_LOGGER_DORMANT ||
+		if (khttpd_logger_state == KHTTPD_LOGGER_INITIALIZING ||
 		    khttpd_logger_state == KHTTPD_LOGGER_EXITING ||
 		    khttpd_logger_state == KHTTPD_LOGGER_EXITED)
 			break;
@@ -3516,8 +3576,9 @@ khttpd_main(void *arg)
 	struct sigaction sigact;
 	struct kevent event;
 	struct khttpd_command *command;
-	struct khttpd_socket *socket;
 	struct khttpd_server_port *port;
+	struct khttpd_server *server;
+	struct khttpd_socket *socket;
 	struct thread *td;
 	size_t longest, len;
 	int debug_fd, error, i;
@@ -3532,7 +3593,7 @@ khttpd_main(void *arg)
 	 */
 
 	mtx_lock(&khttpd_lock);
-	while (khttpd_logger_state == KHTTPD_LOGGER_DORMANT)
+	while (khttpd_logger_state == KHTTPD_LOGGER_INITIALIZING)
 		khttpd_logger_wait("khttpd-log-ready");
 	mtx_unlock(&khttpd_lock);
 
@@ -3649,7 +3710,10 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 
-	error = khttpd_route_add(&khttpd_route_root, "*",
+	server = khttpd_server_alloc();
+	SLIST_INSERT_HEAD(&khttpd_servers, server, link);
+
+	error = khttpd_route_add(khttpd_server_route_root(server), "*",
 	    &khttpd_route_type_asterisc);
 	if (error != 0) {
 		printf("khttpd: failed to add route '*': %d\n", error);
@@ -3698,17 +3762,22 @@ cont:
 	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL)
 		khttpd_socket_close(socket);
 
-	while ((port = SLIST_FIRST(&khttpd_server_ports)) != NULL) {
-		SLIST_REMOVE_HEAD(&khttpd_server_ports, link);
-		if (port->fd != -1)
-			kern_close(td, port->fd);
-		free(port, M_KHTTPD);
+	while ((server = SLIST_FIRST(&khttpd_servers)) != NULL) {
+		while ((port = SLIST_FIRST(&server->ports)) != NULL) {
+			SLIST_REMOVE_HEAD(&server->ports, link);
+			if (port->fd != -1)
+				kern_close(td, port->fd);
+			free(port, M_KHTTPD);
+		}
+
+		khttpd_route_clear_all(khttpd_server_route_root(server));
+
+		SLIST_REMOVE_HEAD(&khttpd_servers, link);
+		khttpd_server_free(server);
 	}
 
 	if (khttpd_kqueue != -1)
 		kern_close(td, khttpd_kqueue);
-
-	khttpd_route_clear_all(&khttpd_route_root);
 
 	khttpd_file_fini();
 	khttpd_json_fini();
@@ -3818,7 +3887,7 @@ khttpd_open_server_port(void *arg)
 		goto bad;
 	}
 
-	SLIST_INSERT_HEAD(&khttpd_server_ports, port, link);
+	SLIST_INSERT_HEAD(&SLIST_FIRST(&khttpd_servers)->ports, port, link);
 
 	return (0);
 
@@ -3839,6 +3908,7 @@ khttpd_add_port(struct khttpd_address_info *ai)
 	port->event_type.handle_event = khttpd_accept_client;
 	bcopy(ai, &port->addrinfo, sizeof(port->addrinfo));
 	port->fd = -1;
+	port->server = khttpd_get_admin_server();
 
 	error = khttpd_run_proc(khttpd_open_server_port, port);
 
