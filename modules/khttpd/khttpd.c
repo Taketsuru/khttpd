@@ -76,23 +76,27 @@ enum {
 
 /* possible values of khttpd_logger_state */
 enum {
-	/* the logger thread has exited. */
+	/* not ready yet. */
 	KHTTPD_LOGGER_DORMANT = 0,
 
-	/* the server is ready to serve http requests.	*/
+	/* waiting for a log entry. */
 	KHTTPD_LOGGER_IDLE,
 
-	/* the server is ready to serve http requests.	*/
+	/* processing a log entry. */
 	KHTTPD_LOGGER_BUSY,
 
-	/* the server process has not finished its initialization yet */
+	/* suspend request is not acknowledged yet */
 	KHTTPD_LOGGER_SUSPENDING,
 
-	/* the server process has not finished its initialization yet */
+	/* the logger is pausing. */
 	KHTTPD_LOGGER_SUSPENDED,
 
-	/* termination is requested but the logger thread has not exited yet. */
-	KHTTPD_LOGGER_TERMINATING,
+	/* termination request is not acknowledged yet */
+	KHTTPD_LOGGER_EXITING,
+
+	/* the logger thread has exited. */
+	KHTTPD_LOGGER_EXITED,
+
 };
 
 struct khttpd_log_entry {
@@ -481,117 +485,6 @@ void khttpd_free(void *mem)
 {
 
 	free(mem, M_KHTTPD);
-}
-
-static void
-khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
-{
-	switch (entry->type) {
-
-	default:
-		break;
-	}
-}
-
-static struct mbuf *
-khttpd_alloc_log_entry(int type, struct khttpd_log_entry **entry)
-{
-	struct mbuf *m;
-	struct khttpd_log_entry *e;
-
-	m = m_get(M_WAITOK, MT_DATA);
-	m_align(m, rounddown2(MLEN, sizeof(void*)));
-	m->m_len = sizeof(*e);
-
-	e = mtod(m, struct khttpd_log_entry *);
-	e->type = type;
-	bintime(&e->timestamp);
-
-	return (m);
-}
-
-static void
-khttpd_log_enqueue(struct mbuf *m)
-{
-	int error;
-
-	KASSERT(curthread != khttpd_logger_thread,
-	    ("current thread is the logger thread"));
-
-	mtx_lock(&khttpd_lock);
-	for (;;) {
-		if (khttpd_logger_state == KHTTPD_LOGGER_DORMANT ||
-		    khttpd_logger_state == KHTTPD_LOGGER_TERMINATING)
-			break;
-
-		error = mbufq_enqueue(&khttpd_logger_queue, m);
-		if (error == 0) {
-			if (khttpd_logger_state == KHTTPD_LOGGER_IDLE &&
-			    mbufq_len(&khttpd_logger_queue) == 1) {
-				khttpd_logger_state = KHTTPD_LOGGER_BUSY;
-				if (khttpd_logger_waiting_state_change)
-					wakeup(&khttpd_logger_state);
-			}
-			m = NULL;
-			break;
-		}
-		KASSERT(error == ENOBUFS, ("mbuf_enqueue error: %d", error));
-
-		khttpd_logger_waiting_empty_slot = TRUE;
-		mtx_sleep(&khttpd_logger_waiting_empty_slot, &khttpd_lock, 0,
-		    "khttpd-slow-log", 0);
-	}
-	mtx_unlock(&khttpd_lock);
-
-	if (error != 0) {
-		khttpd_log_entry_dtor(mtod(m, struct khttpd_log_entry *));
-		m_freem(m);
-	}
-}
-
-void
-khttpd_error(int severity, const char *fmt, ...)
-{
-	struct mbuf *m;
-	struct khttpd_log_entry *e;
-	va_list vl;
-
-	if (curthread == khttpd_logger_thread)
-		return;
-
-	m = khttpd_alloc_log_entry(KHTTPD_LOG_ERROR, &e);
-
-	e = mtod(m, struct khttpd_log_entry *);
-	e->error.severity = severity;
-
-	va_start(vl, fmt);
-	khttpd_mbuf_vprintf(m, fmt, vl);
-	va_end(vl);
-
-	khttpd_log_enqueue(m);
-}
-
-void
-khttpd_debug(const char *func, const char *fmt, ...)
-{
-	struct mbuf *m;
-	struct khttpd_log_entry *e;
-	va_list vl;
-
-	if (curthread == khttpd_logger_thread)
-		return;
-
-	m = khttpd_alloc_log_entry(KHTTPD_LOG_DEBUG, &e);
-
-	e = mtod(m, struct khttpd_log_entry *);
-	e->debug.tid = curthread->td_tid;
-	e->debug.func = func;
-
-	va_start(vl, fmt);
-	khttpd_mbuf_vprintf(m, fmt, vl);
-	va_end(vl);
-
-	khttpd_log_enqueue(m);
 }
 
 /*
@@ -1465,7 +1358,8 @@ khttpd_response_set_body_proc(struct khttpd_response *response,
 
 	KASSERT(!response->has_transfer_encoding && 
 	    !response->has_content_length,
-	    ("response=%p, transfer_encoding_chunked=%d, has_content_length=%d",
+	    ("response=%p, transfer_encoding_chunked=%d, "
+		"has_content_length=%d",
 		response, response->transfer_encoding_chunked,
 		response->has_content_length));
 
@@ -1481,7 +1375,8 @@ khttpd_response_set_body_mbuf(struct khttpd_response *response,
 	    ("response %p has body %p", response, response->body));
 	KASSERT(!response->has_transfer_encoding &&
 	    !response->has_content_length,
-	    ("response=%p, transfer_encoding_chunked=%d, has_content_length=%d",
+	    ("response=%p, transfer_encoding_chunked=%d, "
+		"has_content_length=%d",
 		response, response->transfer_encoding_chunked,
 		response->has_content_length));
 
@@ -1520,7 +1415,6 @@ khttpd_response_set_body_bytes(struct khttpd_response *response,
 /*
  * socket
  */
-
 
 static int
 khttpd_socket_init(void *mem, int size, int flags)
@@ -3314,7 +3208,113 @@ khttpd_logger_wait(const char *wmsg)
 }
 
 static void
-khttpd_logger_main(void *arg)
+khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
+{
+	switch (entry->type) {
+
+	default:
+		break;
+	}
+}
+
+static struct mbuf *
+khttpd_alloc_log_entry(int type, struct khttpd_log_entry **entry)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+
+	m = m_get(M_WAITOK, MT_DATA);
+	m_align(m, rounddown2(MLEN, sizeof(void*)));
+	m->m_len = sizeof(*e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->type = type;
+	bintime(&e->timestamp);
+
+	return (m);
+}
+
+static void
+khttpd_log_enqueue(struct mbuf *m)
+{
+
+	KASSERT(curthread != khttpd_logger_thread,
+	    ("current thread is the logger thread"));
+
+	mtx_lock(&khttpd_lock);
+	for (;;) {
+		if (khttpd_logger_state == KHTTPD_LOGGER_DORMANT ||
+		    khttpd_logger_state == KHTTPD_LOGGER_EXITING ||
+		    khttpd_logger_state == KHTTPD_LOGGER_EXITED)
+			break;
+
+		if (mbufq_enqueue(&khttpd_logger_queue, m) == 0) {
+			if (khttpd_logger_state == KHTTPD_LOGGER_IDLE &&
+			    mbufq_len(&khttpd_logger_queue) == 1)
+				khttpd_logger_set_state(KHTTPD_LOGGER_BUSY);
+			m = NULL;
+			break;
+		}
+
+		khttpd_logger_waiting_empty_slot = TRUE;
+		mtx_sleep(&khttpd_logger_waiting_empty_slot, &khttpd_lock, 0,
+		    "khttpd-slow-log", 0);
+	}
+	mtx_unlock(&khttpd_lock);
+
+	if (m != NULL) {
+		khttpd_log_entry_dtor(mtod(m, struct khttpd_log_entry *));
+		m_freem(m);
+	}
+}
+
+void
+khttpd_error(int severity, const char *fmt, ...)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+	va_list vl;
+
+	if (curthread == khttpd_logger_thread)
+		return;
+
+	m = khttpd_alloc_log_entry(KHTTPD_LOG_ERROR, &e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->error.severity = severity;
+
+	va_start(vl, fmt);
+	khttpd_mbuf_vprintf(m, fmt, vl);
+	va_end(vl);
+
+	khttpd_log_enqueue(m);
+}
+
+void
+khttpd_debug(const char *func, const char *fmt, ...)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+	va_list vl;
+
+	if (curthread == khttpd_logger_thread)
+		return;
+
+	m = khttpd_alloc_log_entry(KHTTPD_LOG_DEBUG, &e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->debug.tid = curthread->td_tid;
+	e->debug.func = func;
+
+	va_start(vl, fmt);
+	khttpd_mbuf_vprintf(m, fmt, vl);
+	va_end(vl);
+
+	khttpd_log_enqueue(m);
+}
+
+static void
+khttpd_logger_put(void)
 {
 	struct iovec iov[64];
 	struct uio auio;
@@ -3323,152 +3323,137 @@ khttpd_logger_main(void *arg)
 	struct mbuf *hd, *m, *n;
 	struct khttpd_log_entry *e;
 	ssize_t resid;
-	int error, i, len, maxiov, type;
-	boolean_t do_suspend;
+	int error, i, len, type;
 
-	maxiov = sizeof(iov) / sizeof(iov[0]);
+	mtx_assert(&khttpd_lock, MA_OWNED);
 
+	m = mbufq_flush(&khttpd_logger_queue);
+	if (m == NULL) {
+		if (khttpd_logger_state == KHTTPD_LOGGER_BUSY)
+			khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
+		return;
+	}
+
+	if (khttpd_logger_waiting_empty_slot) {
+		khttpd_logger_waiting_empty_slot = FALSE;
+		wakeup(&khttpd_logger_waiting_empty_slot);
+	}
+
+	mtx_unlock(&khttpd_lock);
+
+	for (; m != NULL; m = n) {
+		n = STAILQ_NEXT(m, m_stailqpkt);
+		e = mtod(m, struct khttpd_log_entry *);
+
+		bintime_add(&e->timestamp, &boottimebin);
+		bintime2timeval(&e->timestamp, &tv);
+
+		hd = m_get(M_WAITOK, MT_DATA);
+
+		type = e->type;
+		switch (type) {
+
+		case KHTTPD_LOG_DEBUG:
+			khttpd_mbuf_printf(hd, "%ld.%06ld %d %s ", tv.tv_sec,
+			    tv.tv_usec, e->debug.tid, e->debug.func);
+			khttpd_log_entry_dtor(e);
+			m_adj(m, sizeof(struct khttpd_log_entry));
+			m_cat(hd, m);
+			khttpd_mbuf_append_ch(hd, '\n');
+			break;
+
+		case KHTTPD_LOG_ERROR:
+			for (codep = prioritynames; codep->c_name != NULL &&
+				 codep->c_val != e->error.severity;
+			     ++codep)
+				; /* nothing */
+
+			khttpd_mbuf_printf(hd,
+			    "{\"timestamp\": %ld.%06ld, "
+			    "\"priority\": \"%s\", \"description\": ",
+			    tv.tv_sec, tv.tv_usec,
+			    codep->c_name == NULL ? "unknown" : codep->c_name);
+			khttpd_json_mbuf_append_string_in_mbuf(hd, m);
+			khttpd_mbuf_printf(hd, "}\n");
+
+			khttpd_log_entry_dtor(e);
+			m_freem(m);
+			break;
+
+		default:
+			panic("unknown log type: %d", type);
+		}
+
+		m = hd;
+		i = 0;
+		resid = 0;
+		do {
+			while (m != NULL && i < sizeof(iov) / sizeof(iov[0])) {
+				len = m->m_len;
+				iov[i].iov_base = mtod(m, void *);
+				iov[i].iov_len = len;
+				resid += len;
+				++i;
+				m = m->m_next;
+			}
+
+			auio.uio_iov = iov;
+			auio.uio_segflg = UIO_SYSSPACE;
+			auio.uio_rw = UIO_WRITE;
+			auio.uio_td = curthread;
+			auio.uio_iovcnt = i;
+			auio.uio_resid = resid;
+			auio.uio_offset = 0;
+			while (auio.uio_resid) {
+				error = kern_writev(curthread,
+				    khttpd_log_state[type].fd, &auio);
+				if (error != 0)
+					break;
+			}
+
+			resid = 0;
+			i = 0;
+		} while (m != NULL);
+
+		m_freem(hd);
+	}
+
+	mtx_lock(&khttpd_lock);
+}
+
+static void
+khttpd_logger_main(void *arg)
+{
 	mbufq_init(&khttpd_logger_queue, INT_MAX);
 
 	mtx_lock(&khttpd_lock);
-	for (;;) {
-		do_suspend = FALSE;
+	khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
 
+	for (;;) {
 		switch (khttpd_logger_state) {
 
 		case KHTTPD_LOGGER_BUSY:
-			m = mbufq_flush(&khttpd_logger_queue);
-			if (m != NULL)
-				break;
-			khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
-			/* FALLTHROUGH */
-
-		case KHTTPD_LOGGER_IDLE:
-			khttpd_logger_wait("khttpd-log-idle");
+			khttpd_logger_put();
 			continue;
 
 		case KHTTPD_LOGGER_SUSPENDING:
-			m = mbufq_flush(&khttpd_logger_queue);
-			if (m != NULL) {
-				do_suspend = TRUE;
-				break;
-			}
+			khttpd_logger_put();
+			if (khttpd_logger_state != KHTTPD_LOGGER_SUSPENDING)
+				continue;
 			khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDED);
-			/* FALLTHROUGH */
+			break;
 
-		case KHTTPD_LOGGER_SUSPENDED:
-			khttpd_logger_wait("khttpd-log-susp");
-			continue;
-
-		case KHTTPD_LOGGER_TERMINATING:
-			m = mbufq_flush(&khttpd_logger_queue);
-			if (m != NULL)
-				break;
-			khttpd_logger_set_state(KHTTPD_LOGGER_DORMANT);
+		case KHTTPD_LOGGER_EXITING:
+			khttpd_logger_put();
+			khttpd_logger_set_state(KHTTPD_LOGGER_EXITED);
 			mtx_unlock(&khttpd_lock);
 			kthread_exit();
 
-		case KHTTPD_LOGGER_DORMANT:
-			KASSERT(mbufq_len(&khttpd_logger_queue) == 0,
-			    ("enqueued before the completion of "
-				"the initialization"));
-			khttpd_logger_set_state(KHTTPD_LOGGER_IDLE);
-			continue;
-
 		default:
-			panic("invalid logger state %d", khttpd_logger_state);
+			break;
 		}
 
-		if (khttpd_logger_waiting_empty_slot) {
-			khttpd_logger_waiting_empty_slot = FALSE;
-			wakeup(&khttpd_logger_waiting_empty_slot);
-		}
-
-		mtx_unlock(&khttpd_lock);
-
-		for (; m != NULL; m = n) {
-			n = STAILQ_NEXT(m, m_stailqpkt);
-			e = mtod(m, struct khttpd_log_entry *);
-
-			bintime_add(&e->timestamp, &boottimebin);
-			bintime2timeval(&e->timestamp, &tv);
-
-			hd = m_get(M_WAITOK, MT_DATA);
-
-			type = e->type;
-			switch (type) {
-
-			case KHTTPD_LOG_DEBUG:
-				khttpd_mbuf_printf(hd, "%ld.%06ld %d %s ",
-				    tv.tv_sec, tv.tv_usec, e->debug.tid,
-				    e->debug.func);
-				khttpd_log_entry_dtor(e);
-				m_adj(m, sizeof(struct khttpd_log_entry));
-				m_cat(hd, m);
-				khttpd_mbuf_append_ch(hd, '\n');
-				break;
-
-			case KHTTPD_LOG_ERROR:
-				for (codep = prioritynames;
-				     codep->c_name != NULL &&
-					 codep->c_val != e->error.severity;
-				     ++codep)
-					; /* nothing */
-
-				khttpd_mbuf_printf(hd,
-				    "{\"timestamp\": %ld.%06ld, "
-				    "\"priority\": \"%s\", \"description\": ",
-				    tv.tv_sec, tv.tv_usec,
-				    codep->c_name == NULL ? "unknown" :
-				    codep->c_name);
-				khttpd_json_mbuf_append_string_in_mbuf(hd, m);
-				khttpd_mbuf_printf(hd, "}\n");
-
-				khttpd_log_entry_dtor(e);
-				m_freem(m);
-				break;
-
-			default:
-				panic("unknown log type: %d", type);
-			}
-
-			m = hd;
-			i = 0;
-			resid = 0;
-			do {
-				while (m != NULL && i < maxiov) {
-					len = m->m_len;
-					iov[i].iov_base = mtod(m, void *);
-					iov[i].iov_len = len;
-					resid += len;
-					++i;
-					m = m->m_next;
-				}
-
-				auio.uio_iov = iov;
-				auio.uio_segflg = UIO_SYSSPACE;
-				auio.uio_rw = UIO_WRITE;
-				auio.uio_td = curthread;
-				auio.uio_iovcnt = i;
-				auio.uio_resid = resid;
-				auio.uio_offset = 0;
-				while (auio.uio_resid) {
-					error = kern_writev(curthread,
-					    khttpd_log_state[type].fd, &auio);
-					if (error != 0)
-						break;
-				}
-
-				resid = 0;
-				i = 0;
-			} while (m != NULL);
-
-			m_freem(hd);
-		}
-
-		mtx_lock(&khttpd_lock);
-		if (do_suspend)
-			khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDED);
+		khttpd_logger_wait("khttpd-log");
 	}
 }
 
@@ -3477,13 +3462,16 @@ khttpd_logger_suspend(void)
 {
 
 	mtx_assert(&khttpd_lock, MA_OWNED);
-	KASSERT(khttpd_logger_state == KHTTPD_LOGGER_IDLE ||
-	    khttpd_logger_state == KHTTPD_LOGGER_BUSY,
-	    ("unexpected logger state %d", khttpd_logger_state));
 
-	khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDING);
-	while (khttpd_logger_state != KHTTPD_LOGGER_SUSPENDED)
+	while (khttpd_logger_state == KHTTPD_LOGGER_SUSPENDING)
 		khttpd_logger_wait("khttpd-log-susp");
+
+	if (khttpd_logger_state == KHTTPD_LOGGER_IDLE ||
+	    khttpd_logger_state == KHTTPD_LOGGER_BUSY) {
+		khttpd_logger_set_state(KHTTPD_LOGGER_SUSPENDING);
+		while (khttpd_logger_state != KHTTPD_LOGGER_SUSPENDED)
+			khttpd_logger_wait("khttpd-log-susp");
+	}
 }
 
 void
@@ -3491,8 +3479,9 @@ khttpd_logger_resume(void)
 {
 
 	mtx_assert(&khttpd_lock, MA_OWNED);
-	KASSERT(khttpd_logger_state == KHTTPD_LOGGER_SUSPENDED,
-	    ("unexpected logger state %d", khttpd_logger_state));
+
+	if (khttpd_logger_state != KHTTPD_LOGGER_SUSPENDED)
+		return;
 
 	khttpd_logger_set_state(mbufq_len(&khttpd_logger_queue) == 0 ?
 	    KHTTPD_LOGGER_IDLE : KHTTPD_LOGGER_BUSY);
@@ -3725,13 +3714,9 @@ cont:
 	khttpd_json_fini();
 
 	mtx_lock(&khttpd_lock);
-	khttpd_logger_state = KHTTPD_LOGGER_TERMINATING;
-	wakeup(&khttpd_logger_state);
-	while (khttpd_logger_state != KHTTPD_LOGGER_DORMANT) {
-		khttpd_logger_waiting_state_change = TRUE;
-		mtx_sleep(&khttpd_logger_state, &khttpd_lock, 0,
-		    "khttpd-log-term", 0);
-	}
+	khttpd_logger_set_state(KHTTPD_LOGGER_EXITING);
+	while (khttpd_logger_state != KHTTPD_LOGGER_EXITED)
+		khttpd_logger_wait("khttpd-log-exit");
 	mtx_unlock(&khttpd_lock);
 
 	for (i = 0; i < KHTTPD_LOG_END; ++i)
