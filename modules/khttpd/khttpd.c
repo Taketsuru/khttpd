@@ -59,6 +59,14 @@
 
 /* ------------------------------------------------------- type definitions */
 
+enum {
+	KHTTPD_LOG_DEBUG,
+	KHTTPD_LOG_ERROR,
+	KHTTPD_LOG_ACCESS,
+
+	KHTTPD_LOG_END
+};
+
 /* possible values of khttpd_state */
 enum {
 	/* the server process has not finished its initialization yet */
@@ -284,8 +292,7 @@ struct khttpd_label {
 
 SLIST_HEAD(khttpd_label_list, khttpd_label);
 
-struct khttpd_config_admin_proc_args {
-	struct filedescent	root;
+struct khttpd_config_proc_args {
 	struct filedescent	*fdes;
 	int			nfdes;
 };
@@ -404,7 +411,7 @@ static struct khttpd_label khttpd_fields[] = {
 #endif
 };
 
-static const char *khttpd_admin_mime_type_rules =
+static const char *khttpd_default_mime_type_rules =
     "application/javascript js\n"
     "text/html html htm\n"
     "text/plain txt\n"
@@ -3848,32 +3855,38 @@ khttpd_externalize_fd(struct filedesc *fdp, int fd, struct filedescent *ent)
 }
 
 static int
-khttpd_config_admin_proc(void *argptr)
+khttpd_config_proc(void *argptr)
 {
 	struct listen_args listen_args;
 	struct khttpd_server_port_list ports;	
-	struct khttpd_config_admin_proc_args *args;
+	struct khttpd_config_proc_args *args;
 	struct filedesc *fdp;
+	struct file *fp;
 	struct khttpd_server_port *port;
 	struct khttpd_route *root, *tmproot;
 	struct khttpd_mime_type_rule_set *rules;
 	struct khttpd_server *server;
 	struct thread *td;
-	int i, error, *fds, nfds;
+	int i, error, *fds, *nextfdp, nfds, nsocks, *sockfds;
+	int fd, docroot_fd, access_log_fd, error_log_fd;
 
 	TRACE("enter");
 
 	SLIST_INIT(&ports);
 	args = argptr;
-	nfds = args->nfdes;
 	td = curthread;
 	fdp = td->td_proc->p_fd;
-	fds = khttpd_malloc((nfds + 1) * sizeof(int));
 	server = khttpd_get_admin_server();
+
+	nfds = 0;
+	for (i = 0; i < args->nfdes; ++i)
+		if (args->fdes[i].fde_file != NULL)
+			++nfds;
+	fds = khttpd_malloc(nfds * sizeof(int));
 
 	FILEDESC_XLOCK(fdp);
 
-	error = fdallocn(td, 0, fds, nfds + 1);
+	error = fdallocn(td, 0, fds, nfds);
 	if (error != 0) {
 		FILEDESC_XUNLOCK(fdp);
 		log(LOG_WARNING,
@@ -3881,22 +3894,51 @@ khttpd_config_admin_proc(void *argptr)
 		goto bad1;
 	}
 
-	khttpd_externalize_fd(fdp, fds[0], &args->root);
-	for (i = 0; i < nfds; ++i)
-		khttpd_externalize_fd(fdp, fds[i + 1], &args->fdes[i]);
+	nextfdp = fds;
+	sockfds = NULL;
+	nsocks = 0;
+	docroot_fd = access_log_fd = error_log_fd = -1;
+	for (i = 0; i < args->nfdes; ++i) {
+		fp = args->fdes[i].fde_file;
+		if (fp == NULL)
+			fd = -1;
+		else {
+			fd = *nextfdp++;
+			khttpd_externalize_fd(fdp, fd, &args->fdes[i]);
+		}
+
+		switch (i) {
+		case 0:	/* docroot */
+			docroot_fd = fd;
+			break;
+		case 1: /* access log */
+			access_log_fd = fd;
+			break;
+		case 2:	/* error log */
+			error_log_fd = fd;
+			break;
+		case 3:
+			sockfds = nextfdp - 1;
+			/* FALLTHROUGH */
+		default:
+			if (fp != NULL)
+				++nsocks;
+		}
+	}
 
 	FILEDESC_XUNLOCK(fdp);
 
-	for (i = 0; i < nfds; ++i) {
+	TRACE("nsocks %d", nsocks);
+	for (i = 0; i < nsocks; ++i) {
+		TRACE("socket %d", sockfds[i]);
+
 		port = malloc(sizeof(*port), M_KHTTPD, M_WAITOK);
 		port->event_type.handle_event = khttpd_accept_client;
-		port->fd = fds[i + 1];
+		port->fd = sockfds[i];
 		port->server = server;
 		SLIST_INSERT_HEAD(&ports, port, link);
-	}
 
-	for (i = 0; i < nfds; ++i) {
-		listen_args.s = fds[i + 1];
+		listen_args.s = port->fd;
 		listen_args.backlog = khttpd_listen_backlog;
 		error = sys_listen(td, &listen_args);
 		if (error != 0) {
@@ -3905,7 +3947,7 @@ khttpd_config_admin_proc(void *argptr)
 			goto bad2;
 		}
 
-		error = khttpd_kevent_add_read(khttpd_kqueue, fds[i + 1],
+		error = khttpd_kevent_add_read(khttpd_kqueue, port->fd,
 		    &port->event_type);
 		if (error != 0) {
 			log(LOG_WARNING, "khttpd: failed to kevent"
@@ -3931,13 +3973,24 @@ khttpd_config_admin_proc(void *argptr)
 		goto bad3;
 	}
 
-	rules = khttpd_parse_mime_type_rules(khttpd_admin_mime_type_rules);
-	error = khttpd_file_mount("/", root, fds[0], rules);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: failed to mount admin docs: %d",
-		    error);
-		goto bad4;
+	if (docroot_fd != -1) {
+		rules = khttpd_parse_mime_type_rules
+		    (khttpd_default_mime_type_rules);
+		error = khttpd_file_mount("/", root, fds[0], rules);
+		if (error != 0) {
+			log(LOG_WARNING, "khttpd: failed to mount root docs: "
+			    "%d", error);
+			goto bad4;
+		}
 	}
+
+	if (server->access_log_fd != -1)
+		kern_close(td, server->access_log_fd);
+	server->access_log_fd = access_log_fd;
+
+	if (server->error_log_fd != -1)
+		kern_close(td, server->error_log_fd);
+	server->error_log_fd = error_log_fd;
 
 	SLIST_SWAP(&server->ports, &ports, khttpd_server_port);
 
@@ -3961,6 +4014,9 @@ bad2:
 			kern_close(td, port->fd);
 		free(port, M_KHTTPD);
 	}
+	kern_close(td, docroot_fd);
+	kern_close(td, error_log_fd);
+	kern_close(td, access_log_fd);
 bad1:
 	khttpd_free(fds);
 
@@ -3968,10 +4024,10 @@ bad1:
 }
 
 static int
-khttpd_config_admin(struct khttpd_config_admin_args *args)
+khttpd_config(struct khttpd_config_args *args)
 {
 	struct filedesc *fdp;
-	struct khttpd_config_admin_proc_args proc_args;
+	struct khttpd_config_proc_args proc_args;
 	struct thread *td;
 	int *fds, nfds;
 	int i, error;
@@ -3987,20 +4043,16 @@ khttpd_config_admin(struct khttpd_config_admin_args *args)
 	if (error != 0)
 		goto bad1;
 
-	bzero(&proc_args.root, sizeof(struct filedescent));
 	proc_args.fdes = khttpd_malloc(nfds * sizeof(struct filedescent));
 	bzero(proc_args.fdes, nfds * sizeof(struct filedescent));
 	proc_args.nfdes = nfds;
 
 	FILEDESC_SLOCK(fdp);
 
-	error = khttpd_internalize_fd(fdp, args->rootfd, &proc_args.root);
-	if (error != 0) {
-		FILEDESC_SUNLOCK(fdp);
-		goto bad2;
-	}
-
 	for (i = 0; i < nfds; ++i) {
+		if (fds[i] == -1)
+			continue;
+
 		error = khttpd_internalize_fd(fdp, fds[i], &proc_args.fdes[i]);
 		if (error != 0) {
 			FILEDESC_SUNLOCK(fdp);
@@ -4010,9 +4062,9 @@ khttpd_config_admin(struct khttpd_config_admin_args *args)
 
 	FILEDESC_SUNLOCK(fdp);
 
-	error = khttpd_run_proc(khttpd_config_admin_proc, &proc_args);
+	error = khttpd_run_proc(khttpd_config_proc, &proc_args);
 	if (error != 0)
-		goto bad3;
+		goto bad2;
 
 	khttpd_free(proc_args.fdes);
 	khttpd_free(fds);
@@ -4020,13 +4072,11 @@ khttpd_config_admin(struct khttpd_config_admin_args *args)
 	return (0);
 
 bad3:
-	filecaps_free(&proc_args.root.fde_caps);
-	fdrop(proc_args.root.fde_file, td);
-
-	for (; 0 <= i; --i) {
-		filecaps_free(&proc_args.fdes[i].fde_caps);
-		fdrop(proc_args.fdes[i].fde_file, td);
-	}
+	while (0 <= --i)
+		if (proc_args.fdes[i].fde_file != NULL) {
+			filecaps_free(&proc_args.fdes[i].fde_caps);
+			fdrop(proc_args.fdes[i].fde_file, td);
+		}
 bad2:
 	khttpd_free(proc_args.fdes);
 bad1:
@@ -4043,9 +4093,8 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	switch (cmd) {
 
-	case KHTTPD_IOC_CONFIG_ADMIN:
-		error = khttpd_config_admin
-		    ((struct khttpd_config_admin_args *)data);
+	case KHTTPD_IOC_CONFIG:
+		error = khttpd_config((struct khttpd_config_args *)data);
 		break;
 
 	default:
@@ -4086,7 +4135,6 @@ khttpd_unload(void)
 		wakeup(command);
 	}
 
-	/* khttpd_pid is 0 if fork has been failed. */
 	while ((proc = pfind(khttpd_pid)) != NULL) {
 		PROC_UNLOCK(proc);
 		pause("khttpd-exit", hz);
@@ -4105,7 +4153,7 @@ khttpd_load(void)
 	error = kproc_create(khttpd_main, NULL, &khttpd_proc, 0, 0, "khttpd");
 	if (error != 0) {
 		log(LOG_ERR, "khttpd: failed to fork khttpd: %d", error);
-		goto bad;
+		return (error);
 	}
 
 	khttpd_pid = khttpd_proc->p_pid;
@@ -4121,14 +4169,11 @@ khttpd_load(void)
 
 	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &khttpd_dev,
 	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd");
-	if (error != 0) {
-		log(LOG_ERR, "khttpd: failed to create /dev/khttpd: %d",
-		    error);
-		goto bad;
-	}
+	if (error == 0)
+		return (0);
+	log(LOG_ERR, "khttpd: failed to create the device file: %d", error);
 
-	return (0);
-
+	mtx_lock(&khttpd_lock);
 bad:
 	khttpd_set_state(KHTTPD_UNLOADING);
 	mtx_unlock(&khttpd_lock);
@@ -4140,15 +4185,9 @@ bad:
 static int
 khttpd_quiesce_proc(void *args)
 {
-	int error;
 
 	TRACE("enter");
-
-	error = LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY;
-	if (error != 0)
-		log(LOG_NOTICE,
-		    "khttpd: the server still has a connection.");
-	return (error);
+	return (LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY);
 }
 
 static int

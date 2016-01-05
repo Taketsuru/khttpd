@@ -37,14 +37,6 @@
 #define KHTTPD_VERSION	1100000
 
 enum {
-	KHTTPD_LOG_DEBUG,
-	KHTTPD_LOG_ERROR,
-	KHTTPD_LOG_ACCESS,
-
-	KHTTPD_LOG_END
-};
-
-enum {
 	KHTTPD_METHOD_UNKNOWN,
 
 	KHTTPD_METHOD_ACL,
@@ -115,16 +107,15 @@ enum {
 	KHTTPD_FIELD_END
 };
 
-struct khttpd_config_admin_args {
-	int	rootfd;
+struct khttpd_config_args {
 	int	*fds;
 	int	nfds;
 };
 
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_CONFIG_ADMIN				\
-	_IOW(KHTTPD_IOC, 0, struct khttpd_config_admin_args)
+#define KHTTPD_IOC_CONFIG				\
+	_IOW(KHTTPD_IOC, 0, struct khttpd_config_args)
 
 #ifndef KHTTPD_SYS_PREFIX
 #define KHTTPD_SYS_PREFIX "/sys"

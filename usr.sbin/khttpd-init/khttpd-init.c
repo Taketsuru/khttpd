@@ -46,6 +46,9 @@
 
 #include "../../modules/khttpd/khttpd.h"
 
+#define KHTTPD_DEFAULT_ACCESS_LOG	"/var/log/khttpd/access.log"
+#define KHTTPD_DEFAULT_ERROR_LOG	"/var/log/khttpd/error.log"
+
 static int debug_level;
 
 struct fdvec {
@@ -104,19 +107,26 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 int main(int argc, char **argv)
 {
 	struct sockaddr_un unix_addr;
-	struct khttpd_config_admin_args args;
+	struct khttpd_config_args args;
 	struct fdvec fdvec;
 	const char *passwd_file;
 	const char *admin_root_path;
 	size_t len;
-	int ch, devfd, sockfd;
+	int accessfd, ch, devfd, errorfd, fd, i, sockfd;
 
 	bzero(&fdvec, sizeof(fdvec));
 
 	admin_root_path = "/usr/share/khttpd/admin_docs";
 	passwd_file = NULL;
 
-	while ((ch = getopt(argc, argv, "4::6::a:dr:u:")) != -1) {
+	add_element(&fdvec, -1);	/* root dir fd */
+	add_element(&fdvec, -1);	/* access log fd */
+	add_element(&fdvec, -1);	/* error log fd */
+
+	accessfd = -1;
+	errorfd = -1;
+
+	while ((ch = getopt(argc, argv, "4::6::a:de:l:r:u:")) != -1) {
 		switch (ch) {
 
 		case '4':	/* -4 <address>: open IPv4 socket */
@@ -142,6 +152,26 @@ int main(int argc, char **argv)
 
 		case 'd':
 			++debug_level;
+			break;
+
+		case 'e':
+			if (0 < debug_level)
+				printf("error log: '%s'\n", optarg);
+			errorfd = strcmp(optarg, "-") == 0 ? dup(1) :
+			    open(optarg, O_WRONLY | O_APPEND | O_CREAT, 0600);
+			if (errorfd == -1)
+				err(EX_NOINPUT, "failed to open error log "
+				    "file '%s'", optarg);
+			break;
+
+		case 'l':
+			if (0 < debug_level)
+				printf("access log: '%s'\n", optarg);
+			accessfd = strcmp(optarg, "-") == 0 ? dup(1) :
+			    open(optarg, O_WRONLY | O_APPEND | O_CREAT, 0600);
+			if (accessfd == -1)
+				err(EX_NOINPUT, "failed to open access log "
+				    "file '%s'", optarg);
 			break;
 
 		case 'r':
@@ -188,14 +218,35 @@ int main(int argc, char **argv)
 	if (devfd == -1)
 		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
 
-	args.rootfd = open(admin_root_path, O_DIRECTORY|O_EXEC);
-	if (args.rootfd == -1)
+	if (accessfd == -1) {
+		accessfd = open(KHTTPD_DEFAULT_ACCESS_LOG,
+		    O_WRONLY | O_APPEND | O_CREAT, 0600);
+		if (accessfd == -1)
+			err(EX_NOINPUT, "failed to open access log '"
+			    KHTTPD_DEFAULT_ACCESS_LOG "'");
+	}
+
+	if (errorfd == -1) {
+		errorfd = open(KHTTPD_DEFAULT_ERROR_LOG,
+		    O_WRONLY | O_APPEND | O_CREAT, 0600);
+		if (errorfd == -1)
+			err(EX_NOINPUT, "failed to open error log '"
+			    KHTTPD_DEFAULT_ERROR_LOG "'");
+	}
+
+	i = 0;
+	fd = open(admin_root_path, O_DIRECTORY|O_EXEC);
+	if (fd == -1)
 		err(EX_NOINPUT, "failed to open admin root directory.");
+	fdvec.memory[i++] = fd;
+
+	fdvec.memory[i++] = accessfd;
+	fdvec.memory[i++] = errorfd;
 
 	args.fds = fdvec.memory;
 	args.nfds = fdvec.len;
 
-	if (ioctl(devfd, KHTTPD_IOC_CONFIG_ADMIN, &args) == -1)
+	if (ioctl(devfd, KHTTPD_IOC_CONFIG, &args) == -1)
 		err(EX_OSERR, "failed to ioctl().");
 
 	return (0);
