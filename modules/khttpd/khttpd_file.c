@@ -541,6 +541,7 @@ khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
 {
 	struct khttpd_mime_type_rule *rule;
 	uint32_t hash_size;
+	int i;
 
 	TRACE("enter %p", rule_set);
 

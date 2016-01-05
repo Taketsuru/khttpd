@@ -100,8 +100,9 @@ enum {
 };
 
 struct khttpd_log_entry {
-	int		type;
 	struct bintime	timestamp;
+	int		fd;
+	int		type;
 	union {
 		struct {
 			lwpid_t		tid;
@@ -139,9 +140,8 @@ struct khttpd_server_port {
 	/* must be &event_type == &<this struct> */
 	struct khttpd_event_type	event_type;
 	SLIST_ENTRY(khttpd_server_port)	link;
-	struct khttpd_address_info	addrinfo;
 	struct khttpd_server		*server;
-	int		fd;
+	int				fd;
 };
 
 SLIST_HEAD(khttpd_server_port_list, khttpd_server_port);
@@ -270,6 +270,8 @@ struct khttpd_server {
 	SLIST_ENTRY(khttpd_server)	link;
 	struct khttpd_route		*route_root;
 	struct khttpd_server_port_list	ports;
+	int				access_log_fd;
+	int				error_log_fd;
 };
 
 SLIST_HEAD(khttpd_server_list, khttpd_server);
@@ -336,27 +338,6 @@ MALLOC_DEFINE(M_KHTTPD, "khttpd", "khttpd buffer");
 
 static struct khttpd_command_list khttpd_command_queue = 
     STAILQ_HEAD_INITIALIZER(khttpd_command_queue);
-
-struct khttpd_log_state khttpd_log_state[] = {
-	{ /* KHTTPD_LOG_DEBUG */
-		.mask = 0,
-		.fd = -1
-	},
-	{ /* KHTTPD_LOG_ERROR */
-		.mask = 0,
-		.fd = -1
-	},
-	{ /* KHTTPD_LOG_ACCESS */
-		.mask = 0,
-		.fd = -1
-	},
-};
-
-static const u_int khttpd_log_conf_valid_masks[] = {
-	KHTTPD_LOG_DEBUG_ALL,	/* KHTTPD_LOG_DEBUG */
-	0,			/* KHTTPD_LOG_ERROR */
-	0,			/* KHTTPD_LOG_ACCESS */
-};
 
 static struct khttpd_label khttpd_methods[] = {
 	{ "ACL" },
@@ -435,11 +416,6 @@ static const char *khttpd_admin_mime_type_rules =
  */
 #define KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH	32
 
-static struct khttpd_route_type khttpd_route_type_null = {
-	.name = "<no route>",
-	.received_header = khttpd_received_header_null,
-};
-
 static struct khttpd_label_list khttpd_method_hash_table[64];
 static struct khttpd_label_list khttpd_field_hash_table[16];
 
@@ -450,6 +426,7 @@ static struct thread *khttpd_logger_thread;
 static struct mbufq khttpd_logger_queue;
 static size_t khttpd_message_size_limit = 16384;
 static pid_t khttpd_pid;
+int khttpd_debug_mask;
 static int khttpd_listen_backlog = 128;
 static int khttpd_logger_state;
 static int khttpd_state;
@@ -473,6 +450,11 @@ static struct khttpd_event_type khttpd_stop_request_type = {
 	.handle_event = khttpd_kevent_nop
 };
 
+static struct khttpd_route_type khttpd_route_type_null = {
+	.name = "<no route>",
+	.received_header = khttpd_received_header_null,
+};
+
 static struct khttpd_route_type khttpd_route_type_asterisc = {
 	.name = "asterisc",
 	.received_header = khttpd_asterisc_received_header
@@ -489,6 +471,7 @@ static uma_zone_t khttpd_socket_zone;
 static uma_zone_t khttpd_request_zone;
 static uma_zone_t khttpd_response_zone;
 static int khttpd_kqueue;
+static int khttpd_debug_log_fd = -1;
 
 /* --------------------------------------------------- function definitions */
 
@@ -3335,7 +3318,7 @@ khttpd_log_enqueue(struct mbuf *m)
 }
 
 void
-khttpd_error(int severity, const char *fmt, ...)
+khttpd_error(struct khttpd_server *server, int severity, const char *fmt, ...)
 {
 	struct mbuf *m;
 	struct khttpd_log_entry *e;
@@ -3348,6 +3331,7 @@ khttpd_error(int severity, const char *fmt, ...)
 
 	e = mtod(m, struct khttpd_log_entry *);
 	e->error.severity = severity;
+	e->fd = server->error_log_fd;
 
 	va_start(vl, fmt);
 	khttpd_mbuf_vprintf(m, fmt, vl);
@@ -3369,6 +3353,7 @@ khttpd_debug(const char *func, const char *fmt, ...)
 	m = khttpd_alloc_log_entry(KHTTPD_LOG_DEBUG, &e);
 
 	e = mtod(m, struct khttpd_log_entry *);
+	e->fd = khttpd_debug_log_fd;
 	e->debug.tid = curthread->td_tid;
 	e->debug.func = func;
 
@@ -3389,7 +3374,7 @@ khttpd_logger_put(void)
 	struct mbuf *hd, *m, *n;
 	struct khttpd_log_entry *e;
 	ssize_t resid;
-	int error, i, len, type;
+	int error, fd, i, len, type;
 
 	mtx_assert(&khttpd_lock, MA_OWNED);
 
@@ -3417,6 +3402,8 @@ khttpd_logger_put(void)
 		hd = m_get(M_WAITOK, MT_DATA);
 
 		type = e->type;
+		fd = e->fd;
+
 		switch (type) {
 
 		case KHTTPD_LOG_DEBUG:
@@ -3471,8 +3458,7 @@ khttpd_logger_put(void)
 			auio.uio_resid = resid;
 			auio.uio_offset = 0;
 			while (auio.uio_resid) {
-				error = kern_writev(curthread,
-				    khttpd_log_state[type].fd, &auio);
+				error = kern_writev(curthread, fd, &auio);
 				if (error != 0)
 					break;
 			}
@@ -3587,7 +3573,7 @@ khttpd_main(void *arg)
 	struct khttpd_socket *socket;
 	struct thread *td;
 	size_t longest, len;
-	int debug_fd, error, i;
+	int error, i;
 
 	TRACE("enter %p", arg);
 
@@ -3657,39 +3643,26 @@ khttpd_main(void *arg)
 	error = kern_openat(td, AT_FDCWD, "/dev/console", UIO_SYSSPACE,
 	    O_WRONLY, 0666);
 	if (error != 0) {
-		printf("khttpd: failed to open the console: %d\n", error);
+		log(LOG_WARNING, "khttpd: failed to open the console: %d",
+		    error);
 		goto cont;
 	}
-	debug_fd = td->td_retval[0];
-
-	khttpd_log_state[KHTTPD_LOG_DEBUG].mask = KHTTPD_LOG_DEBUG_ALL;
-	khttpd_log_state[KHTTPD_LOG_DEBUG].fd = debug_fd;
-
-	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
-	if (error != 0) {
-		printf("khttpd: failed to duplicate debug_fd: %d", error);
-		goto cont;
-	}
-	khttpd_log_state[KHTTPD_LOG_ERROR].fd = td->td_retval[0];
-
-	error = kern_dup(td, FDDUP_NORMAL, 0, debug_fd, 0);
-	if (error != 0) {
-		printf("khttpd: failed to duplicate debug_fd: %d", error);
-		goto cont;
-	}
-	khttpd_log_state[KHTTPD_LOG_ACCESS].fd = td->td_retval[0];
+	khttpd_debug_log_fd = td->td_retval[0];
+	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
 
 	bzero(&sigact, sizeof(sigact));
 	sigact.sa_handler = SIG_IGN;
 	error = kern_sigaction(td, SIGUSR1, &sigact, NULL, 0);
 	if (error != 0) {
-		printf("khttpd: sigaction(SIGUSR1) failed: %d\n", error);
+		log(LOG_WARNING, "khttpd: sigaction(SIGUSR1) failed: %d",
+		    error);
 		goto cont;
 	}
 
 	error = kern_sigaction(td, SIGPIPE, &sigact, NULL, 0);
 	if (error != 0) {
-		printf("khttpd: sigaction(SIGPIPE) failed: %d\n", error);
+		log(LOG_WARNING, "khttpd: sigaction(SIGPIPE) failed: %d",
+		    error);
 		goto cont;
 	}
 
@@ -3697,13 +3670,13 @@ khttpd_main(void *arg)
 	SIGADDSET(sigmask, SIGUSR1);
 	error = kern_sigprocmask(td, SIG_UNBLOCK, &sigmask, NULL, 0);
 	if (error != 0) {
-		printf("khttpd: sigprocmask() failed: %d\n", error);
+		log(LOG_WARNING, "khttpd: sigprocmask() failed: %d", error);
 		goto cont;
 	}
 
 	error = sys_kqueue(td, NULL);
 	if (error != 0) {
-		printf("khttpd: kqueue() failed: %d\n", error);
+		log(LOG_WARNING, "khttpd: kqueue() failed: %d", error);
 		goto cont;
 	}
 	khttpd_kqueue = td->td_retval[0];
@@ -3711,8 +3684,8 @@ khttpd_main(void *arg)
 	error = khttpd_kevent_add_signal(khttpd_kqueue, SIGUSR1,
 	    &khttpd_stop_request_type);
 	if (error != 0) {
-		printf("khttpd: kevent(EVFILT_SIGNAL, SIGUSR1) failed: %d\n",
-		    error);
+		log(LOG_WARNING, "khttpd: kevent(EVFILT_SIGNAL, SIGUSR1) "
+		    "failed: %d", error);
 		goto cont;
 	}
 
@@ -3769,7 +3742,6 @@ cont:
 			free(port, M_KHTTPD);
 		}
 
-
 		SLIST_REMOVE_HEAD(&khttpd_servers, link);
 		khttpd_server_free(server);
 	}
@@ -3786,11 +3758,8 @@ cont:
 		khttpd_logger_wait("khttpd-log-exit");
 	mtx_unlock(&khttpd_lock);
 
-	for (i = 0; i < KHTTPD_LOG_END; ++i)
-		if (khttpd_log_state[i].fd != -1) {
-			kern_close(td, khttpd_log_state[i].fd);
-			khttpd_log_state[i].fd = -1;
-		}
+	if (khttpd_debug_log_fd != -1)
+		kern_close(td, khttpd_debug_log_fd);
 
 	uma_zdestroy(khttpd_socket_zone);
 	uma_zdestroy(khttpd_request_zone);
@@ -3829,115 +3798,6 @@ khttpd_run_proc(khttpd_command_proc_t proc, void *argument)
 	mtx_unlock(&khttpd_lock);
 
 	free(command, M_KHTTPD);
-
-	return (error);
-}
-
-static int
-khttpd_set_log_conf(void *argument)
-{
-	struct filedesc *fdp;
-	struct filedescent *srcfde, *dstfde;
-	struct khttpd_log_conf *conf;
-	struct khttpd_log_state *state;
-	struct thread *td;
-	int error, newfd;
-
-	conf = argument;
-
-	TRACE("enter %d %#x", conf->type, conf->mask);
-
-	KASSERT(curproc == khttpd_proc,
-	    ("curproc=%p, khttpd_proc=%p", curproc, khttpd_proc));
-
-	td = curthread;
-	fdp = td->td_proc->p_fd;
-
-	FILEDESC_XLOCK(fdp);
-
-	error = fdalloc(td, 0, &newfd);
-	if (error != 0) {
-		TRACE("error fdalloc %d", error);
-		fdrop(conf->fde->fde_file, td);
-		FILEDESC_XUNLOCK(fdp);
-		return (error);
-	}
-
-	srcfde = conf->fde;
-	dstfde = &fdp->fd_ofiles[newfd];
-	dstfde->fde_file = srcfde->fde_file;
-	filecaps_move(&srcfde->fde_caps, &dstfde->fde_caps);
-
-	FILEDESC_XUNLOCK(fdp);
-
-	mtx_lock(&khttpd_lock);
-	khttpd_logger_suspend();
-	mtx_unlock(&khttpd_lock);
-
-	state = &khttpd_log_state[conf->type];
-	if (state->fd != -1)
-		kern_close(curthread, state->fd);
-	state->mask = conf->mask;
-	state->fd = newfd;
-
-	mtx_lock(&khttpd_lock);
-	khttpd_logger_resume();
-	mtx_unlock(&khttpd_lock);
-
-	TRACE("fd %d", newfd);
-
-	return (0);
-}
-
-static int
-khttpd_configure_log(struct khttpd_log_conf *conf)
-{
-	struct filedesc *fdp;
-	struct file *fp;
-	struct filedescent fde, *fdep;
-	struct thread *td;
-	u_int mask;
-	int error, fd, type;
-
-	type = conf->type;
-	if (type < KHTTPD_LOG_DEBUG || KHTTPD_LOG_ACCESS < type)
-		return (EINVAL);
-
-	mask = conf->mask;
-	if ((mask & khttpd_log_conf_valid_masks[type]) != mask)
-		return (EINVAL);
-
-	td = curthread;
-	fd = conf->fd;
-	fdp = td->td_proc->p_fd;
-
-	FILEDESC_SLOCK(fdp);
-
-	fdep = &fdp->fd_ofiles[conf->fd];
-
-	if (fd < 0 || fdp->fd_lastfile < fd ||
-	    (fp = fdep->fde_file) == NULL) {
-		error = EBADF;
-		goto out;
-	}
-
-	if (!(fp->f_ops->fo_flags & DFLAG_PASSABLE)) {
-		error = EOPNOTSUPP;
-		goto out;
-	}
-
-	fhold(fp);
-
-	fde.fde_file = fp;
-	filecaps_copy(&fdep->fde_caps, &fde.fde_caps, TRUE);
-	FILEDESC_SUNLOCK(fdp);
-
-	conf->fde = &fde;
-
-	return (khttpd_run_proc(khttpd_set_log_conf, conf));
-
-out:
-	FILEDESC_SUNLOCK(fdp);
 
 	return (error);
 }
@@ -4015,8 +3875,9 @@ khttpd_config_admin_proc(void *argptr)
 
 	error = fdallocn(td, 0, fds, nfds + 1);
 	if (error != 0) {
-		TRACE("error fdallocn %d", error);
 		FILEDESC_XUNLOCK(fdp);
+		log(LOG_WARNING,
+		    "khttpd: failed to allocate file descriptors: %d", error);
 		goto bad1;
 	}
 
@@ -4038,13 +3899,17 @@ khttpd_config_admin_proc(void *argptr)
 		listen_args.s = fds[i + 1];
 		listen_args.backlog = khttpd_listen_backlog;
 		error = sys_listen(td, &listen_args);
-		if (error != 0)
+		if (error != 0) {
+			log(LOG_WARNING, "khttpd: failed to listen "
+			    "on the given sockets: %d", error);
 			goto bad2;
+		}
 
 		error = khttpd_kevent_add_read(khttpd_kqueue, fds[i + 1],
 		    &port->event_type);
 		if (error != 0) {
-			TRACE("error kevent %d", error);
+			log(LOG_WARNING, "khttpd: failed to kevent"
+			    "(EVFILT_READ) on the given sockets: %d", error);
 			goto bad2;
 		}
 	}
@@ -4054,18 +3919,25 @@ khttpd_config_admin_proc(void *argptr)
 
 	error = khttpd_route_add(root, "*", &khttpd_route_type_asterisc);
 	if (error != 0) {
-		printf("khttpd: failed to add route '*': %d\n", error);
+		log(LOG_WARNING, "khttpd: failed to add route '*': %d",
+		    error);
 		goto bad3;
 	}
 
 	error = khttpd_sysctl_route(root);
-	if (error != 0)
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to add route for sysctl: %d",
+		    error);
 		goto bad3;
+	}
 
 	rules = khttpd_parse_mime_type_rules(khttpd_admin_mime_type_rules);
 	error = khttpd_file_mount("/", root, fds[0], rules);
-	if (error != 0)
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to mount admin docs: %d",
+		    error);
 		goto bad4;
+	}
 
 	SLIST_SWAP(&server->ports, &ports, khttpd_server_port);
 
@@ -4171,10 +4043,6 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	switch (cmd) {
 
-	case KHTTPD_IOC_CONFIGURE_LOG:
-		error = khttpd_configure_log((struct khttpd_log_conf *)data);
-		break;
-
 	case KHTTPD_IOC_CONFIG_ADMIN:
 		error = khttpd_config_admin
 		    ((struct khttpd_config_admin_args *)data);
@@ -4236,7 +4104,7 @@ khttpd_load(void)
 
 	error = kproc_create(khttpd_main, NULL, &khttpd_proc, 0, 0, "khttpd");
 	if (error != 0) {
-		printf("khttpd: failed to fork khttpd: %d\n", error);
+		log(LOG_ERR, "khttpd: failed to fork khttpd: %d", error);
 		goto bad;
 	}
 
@@ -4254,7 +4122,8 @@ khttpd_load(void)
 	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &khttpd_dev,
 	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd");
 	if (error != 0) {
-		printf("khttpd: failed to create /dev/khttpd: %d\n", error);
+		log(LOG_ERR, "khttpd: failed to create /dev/khttpd: %d",
+		    error);
 		goto bad;
 	}
 
@@ -4277,7 +4146,8 @@ khttpd_quiesce_proc(void *args)
 
 	error = LIST_EMPTY(&khttpd_sockets) ? 0 : EBUSY;
 	if (error != 0)
-		printf("khttpd: the server still has a connection.\n");
+		log(LOG_NOTICE,
+		    "khttpd: the server still has a connection.");
 	return (error);
 }
 

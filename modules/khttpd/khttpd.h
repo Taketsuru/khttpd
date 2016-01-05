@@ -115,63 +115,16 @@ enum {
 	KHTTPD_FIELD_END
 };
 
-struct filedescent;
-struct khttpd_mime_type_rule_set;
-
-struct khttpd_address_info {
-	struct sockaddr_storage ai_addr;
-	int ai_family;
-	int ai_socktype;
-	int ai_protocol;
-};
-
-struct khttpd_log_conf {
-	int	type;
-	u_int	mask;
-	union {
-		int		fd;
-		struct filedescent *fde;
-	};
-};
-
-struct khttpd_mount_args {
-	char	*prefix;
-	union {
-		int			dirfd;
-		struct filedescent	*fde;
-	};
-};
-
-struct khttpd_set_mime_type_rules_args {
-	char	*mount_point;
-	size_t	bufsize;
-	union {
-		char	*buf;
-		struct khttpd_mime_type_rule_set *rule_set;
-	};
-};
-
 struct khttpd_config_admin_args {
-	int		rootfd;
-	int		*fds;
-	int		nfds;
+	int	rootfd;
+	int	*fds;
+	int	nfds;
 };
 
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_CONFIGURE_LOG			\
-	_IOW(KHTTPD_IOC, 0, struct khttpd_log_conf)
-#define KHTTPD_IOC_ADD_PORT				\
-	_IOW(KHTTPD_IOC, 1, struct khttpd_address_info)
-#define KHTTPD_IOC_MOUNT				\
-	_IOW(KHTTPD_IOC, 2, struct khttpd_mount_args)
-#define KHTTPD_IOC_SET_MIME_TYPE_RULES			\
-	_IOW(KHTTPD_IOC, 3, struct khttpd_set_mime_type_rules_args)
 #define KHTTPD_IOC_CONFIG_ADMIN				\
-	_IOW(KHTTPD_IOC, 4, struct khttpd_config_admin_args)
-
-#define KHTTPD_LOG_DEBUG_TRACE		0x00000001
-#define KHTTPD_LOG_DEBUG_ALL		0x00000001
+	_IOW(KHTTPD_IOC, 0, struct khttpd_config_admin_args)
 
 #ifndef KHTTPD_SYS_PREFIX
 #define KHTTPD_SYS_PREFIX "/sys"

@@ -34,6 +34,9 @@
 
 #ifdef _KERNEL
 
+struct filedescent;
+struct khttpd_mime_type_rule_set;
+
 MALLOC_DECLARE(M_KHTTPD);
 
 #ifdef KHTTPD_DEBUG
@@ -55,38 +58,33 @@ MALLOC_DECLARE(M_KHTTPD);
 #define	DTR6(d, p1, p2, p3, p4, p5, p6)	(void)0
 #endif
 
-#define ERROR(fmt, ...) \
-	khttpd_error(fmt, ## __VA_ARGS__)
+#define KHTTPD_DEBUG_TRACE	0x00000001
+#define KHTTPD_DEBUG_ALL	0x00000001
 
 #ifdef KHTTPD_DEBUG
 
-#define DEBUG_ENABLED(MASK)				\
-	((khttpd_log_state[KHTTPD_LOG_DEBUG].mask &	\
-	    KHTTPD_LOG_DEBUG_ ## MASK) != 0)
-#define DEBUG(fmt, ...) \
+#define DEBUG_ENABLED(mask)					\
+	((khttpd_debug_mask & KHTTPD_DEBUG_ ## mask) != 0)
+#define DEBUG(fmt, ...)					\
 	khttpd_debug(__func__, fmt, ## __VA_ARGS__)
 #define TRACE(fmt, ...) \
 	if (DEBUG_ENABLED(TRACE)) DEBUG(fmt, ## __VA_ARGS__)
 
+extern int khttpd_debug_mask;
+
 #else
 
-#define DEBUG_ENABLED(MASK) 0
+#define DEBUG_ENABLED(mask) 0
 #define DEBUG(fmt, ...)
 #define TRACE(fmt, ...)
 
 #endif
 
-struct khttpd_log_state {
-	u_int	mask;
-	int	fd;
-};
-
-extern struct khttpd_log_state khttpd_log_state[];
-
 void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
 
-void khttpd_error(int severity, const char *fmt, ...);
+void khttpd_error(struct khttpd_server *server, int severity,
+    const char *fmt, ...);
 void khttpd_debug(const char *func, const char *fmt, ...);
 void khttpd_logger_suspend(void);
 void khttpd_logger_resume(void);
@@ -112,7 +110,6 @@ int khttpd_sysctl_route(struct khttpd_route *root);
 void khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *);
 struct khttpd_mime_type_rule_set *
     khttpd_parse_mime_type_rules(const char *description);
-int khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args);
 int khttpd_file_mount(const char *path, struct khttpd_route *root,
     int rootdirfd, struct khttpd_mime_type_rule_set *rules);
 int khttpd_file_init(void);
