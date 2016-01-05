@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2016 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  * License: 2-terms BSD
  */
