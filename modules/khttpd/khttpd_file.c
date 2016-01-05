@@ -81,8 +81,6 @@ struct khttpd_mime_type_rule_set {
 
 static struct khttpd_mime_type_rule_set *khttpd_mime_type_rule_set_alloc
     (uint32_t hash_size, char *buf);
-static void khttpd_mime_type_rule_set_free
-    (struct khttpd_mime_type_rule_set *rule_set);
 static const char *khttpd_mime_type_rule_set_find
     (struct khttpd_mime_type_rule_set *rule_set, const char *path);
 
@@ -472,126 +470,49 @@ khttpd_file_route_dtor(struct khttpd_route *route)
 	free(route_data, M_KHTTPD);
 }
 
-static int
-khttpd_mount_proc(void *data)
+int
+khttpd_file_mount(const char *path, struct khttpd_route *root,
+    int rootfd, struct khttpd_mime_type_rule_set *rules)
 {
 	struct stat statbuf;
-	struct khttpd_mount_args *args;
-	struct filedescent *dstfde, *srcfde;
-	struct filedesc *fdp;
-	struct khttpd_route *root, *route;
+	struct khttpd_route *route;
 	struct khttpd_file_route_data *route_data;
 	struct thread *td;
-	int error, newfd;
+	int error;
 
-	args = data;
+	TRACE("enter %s", path);
+
+	KASSERT(curproc == khttpd_proc,
+	    ("the current process is not the server process"));
+
 	td = curthread;
-	fdp = td->td_proc->p_fd;
 
-	TRACE("enter %s", args->prefix);
-
-	root = khttpd_server_route_root(khttpd_get_admin_server());
-	error = khttpd_route_add(root, args->prefix, &khttpd_route_type_file);
+	error = khttpd_route_add(root, path, &khttpd_route_type_file);
 	if (error != 0)
-		goto failed;
+		goto end;
 
-	FILEDESC_XLOCK(fdp);
-
-	error = fdalloc(td, 0, &newfd);
-	if (error != 0) {
-		TRACE("error fdalloc %d", error);
-		FILEDESC_XUNLOCK(fdp);
-		goto failed;
-	}
-
-	srcfde = args->fde;
-	dstfde = &fdp->fd_ofiles[newfd];
-	dstfde->fde_file = srcfde->fde_file;
-	filecaps_move(&srcfde->fde_caps, &dstfde->fde_caps);
-
-	FILEDESC_XUNLOCK(fdp);
-
-	error = kern_fstat(td, newfd, &statbuf);
+	error = kern_fstat(td, rootfd, &statbuf);
 	if (error != 0) {
 		TRACE("error stat %d", error);
-		goto failed;
+		goto end;
 	}
 
 	if ((statbuf.st_mode & S_IFDIR) == 0) {
 		TRACE("error nodir");
 		error = ENOTDIR;
-		goto failed;
+		goto end;
 	}
 
 	route_data = malloc(sizeof(struct khttpd_file_route_data), M_KHTTPD,
 	    M_WAITOK);
-	route_data->path = args->prefix;
-	route_data->rule_set = khttpd_mime_type_rule_set_alloc(1, NULL);
-	route_data->dirfd = newfd;
-	args->prefix = NULL;
+	route_data->path = strdup(path, M_KHTTPD);
+	route_data->rule_set = rules;
+	route_data->dirfd = rootfd;
 
 	route = khttpd_route_find(root, route_data->path, NULL);
 	khttpd_route_set_data(route, route_data, khttpd_file_route_dtor);
 
-	return (0);
-
-failed:
-	fdrop(args->fde->fde_file, td);
-	free(args->prefix, M_KHTTPD);
-
-	return (error);
-}
-
-int
-khttpd_mount(struct khttpd_mount_args *args)
-{
-	char pathbuf[PATH_MAX];
-	struct filedesc *fdp;
-	struct file *fp;
-	struct filedescent fde, *fdep;
-	struct thread *td;
-	int error, fd;
-	size_t pathlen;
-
-	td = curthread;
-	fdp = td->td_proc->p_fd;
-	fd = args->dirfd;
-
-	error = copyinstr(args->prefix, pathbuf, sizeof(pathbuf), &pathlen);
-	if (error != 0)
-		return (error);
-	if (pathbuf[0] != '/' || pathbuf[pathlen - 2] == '/')
-		return (EINVAL);
-
-	FILEDESC_SLOCK(fdp);
-
-	fdep = &fdp->fd_ofiles[fd];
-
-	if (fd < 0 || fdp->fd_lastfile < fd ||
-	    (fp = fdep->fde_file) == NULL) {
-		error = EBADF;
-		goto out;
-	}
-
-	if (!(fp->f_ops->fo_flags & DFLAG_PASSABLE)) {
-		error = EOPNOTSUPP;
-		goto out;
-	}
-
-	fhold(fp);
-
-	fde.fde_file = fp;
-	filecaps_copy(&fdep->fde_caps, &fde.fde_caps, true);
-	FILEDESC_SUNLOCK(fdp);
-
-	args->prefix = strdup(pathbuf, M_KHTTPD);
-	args->fde = &fde;
-
-	return (khttpd_run_proc(khttpd_mount_proc, args));
-
-out:
-	FILEDESC_SUNLOCK(fdp);
-
+end:
 	return (error);
 }
 
@@ -600,6 +521,8 @@ khttpd_mime_type_rule_set_alloc(uint32_t hash_size, char *buf)
 {
 	struct khttpd_mime_type_rule_set *rule_set;
 	uint32_t i;
+
+	TRACE("enter");
 
 	rule_set = malloc(sizeof(*rule_set) +
 	    sizeof(struct khttpd_mime_type_rule_slist) * hash_size, M_KHTTPD, 
@@ -613,11 +536,10 @@ khttpd_mime_type_rule_set_alloc(uint32_t hash_size, char *buf)
 	return (rule_set);
 }
 
-static void
+void
 khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
 {
 	struct khttpd_mime_type_rule *rule;
-	int i;
 	uint32_t hash_size;
 
 	TRACE("enter %p", rule_set);
@@ -661,67 +583,22 @@ khttpd_mime_type_rule_set_find(struct khttpd_mime_type_rule_set *rule_set,
 	return ("application/octet-stream");
 }
 
-static int
-khttpd_set_mime_type_rules_proc(void *data)
+struct khttpd_mime_type_rule_set *
+khttpd_parse_mime_type_rules(const char *description)
 {
-	struct khttpd_set_mime_type_rules_args *args;
-	struct khttpd_route *root, *route;
-	struct khttpd_file_route_data *route_data;
-	const char *suffix;
-
-	args = data;
-
-	TRACE("enter %s", args->mount_point);
-
-	root = khttpd_server_route_root(khttpd_get_admin_server());
-	route = khttpd_route_find(root, args->mount_point, &suffix);
-	if (route == NULL || *suffix != '\0') {
-		TRACE("error enoent");
-		return (ENOENT);
-	}
-
-	if (khttpd_route_type(route) != &khttpd_route_type_file) {
-		TRACE("error eopnotsupp");
-		return (EOPNOTSUPP);
-	}
-
-	route_data = (struct khttpd_file_route_data *)
-	    khttpd_route_data(route);
-	khttpd_mime_type_rule_set_free(route_data->rule_set);
-	route_data->rule_set = args->rule_set;
-
-	return (0);
-}
-
-int
-khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
-{
-	char mount_point[PATH_MAX];
 	struct khttpd_mime_type_rule_slist rules;
 	struct khttpd_mime_type_rule_set *rule_set;
 	struct khttpd_mime_type_rule *rule, *rp;
 	char *buf, *cp, *end, *last_end, *next, *suffix, *type;
 	size_t bufsize;
 	uint32_t rule_count, hash, hash_size;
-	int error;
 	char dummy;
 
-	rule_set = NULL;
-
-	error = copyinstr(args->mount_point, mount_point, sizeof(mount_point),
-	    NULL);
-	if (error != 0)
-		return (error);
-
-	args->mount_point = mount_point;
-
-	bufsize = args->bufsize;
-	buf = malloc(bufsize, M_KHTTPD, M_WAITOK);
-	error = copyin(args->buf, buf, bufsize);
-	if (error != 0)
-		goto out;
-
 	SLIST_INIT(&rules);
+
+	bufsize = strlen(description);
+	buf = khttpd_malloc(bufsize);
+	bcopy(description, buf, bufsize);
 
 	last_end = &dummy;
 	end = buf + bufsize;
@@ -755,33 +632,21 @@ khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args)
 
 	rule_set = khttpd_mime_type_rule_set_alloc(hash_size, buf);
 	buf = NULL;
-	args->rule_set = rule_set;
 
 	while ((rule = SLIST_FIRST(&rules)) != NULL) {
 		SLIST_REMOVE_HEAD(&rules, link);
 		hash = khttpd_hash32_str_ci(rule->suffix, 0) & (hash_size - 1);
 
-		SLIST_FOREACH(rp, &rule_set->hash_table[hash], link) {
-			if (strcasecmp(rp->suffix, rule->suffix) != 0)
-				continue;
-
-			printf("ERROR: there are duplicate entries "
-			    "for suffix %s.\n", rule->suffix);
-			error = EEXIST;
-			goto out;
-		}
+		SLIST_FOREACH(rp, &rule_set->hash_table[hash], link)
+			if (strcasecmp(rp->suffix, rule->suffix) == 0) {
+				khttpd_mime_type_rule_set_free(rule_set);
+				return (NULL);
+			}
 
 		SLIST_INSERT_HEAD(&rule_set->hash_table[hash], rule, link);
 	}
 
-	error = khttpd_run_proc(khttpd_set_mime_type_rules_proc, args);
-	if (error == 0)
-		rule_set = NULL;
-out:
-	khttpd_mime_type_rule_set_free(rule_set);
-	free(buf, M_KHTTPD);
-
-	return (error);
+	return (rule_set);
 }
 
 int khttpd_file_init(void)

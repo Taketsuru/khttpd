@@ -107,11 +107,14 @@ uint32_t khttpd_hash32_str_ci(const void *str, uint32_t hash);
 int khttpd_json_init(void);
 void khttpd_json_fini(void);
 
-int khttpd_sysctl_load(void);
-void khttpd_sysctl_unload(void);
+int khttpd_sysctl_route(struct khttpd_route *root);
 
-int khttpd_mount(struct khttpd_mount_args *data);
+void khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *);
+struct khttpd_mime_type_rule_set *
+    khttpd_parse_mime_type_rules(const char *description);
 int khttpd_set_mime_type_rules(struct khttpd_set_mime_type_rules_args *args);
+int khttpd_file_mount(const char *path, struct khttpd_route *root,
+    int rootdirfd, struct khttpd_mime_type_rule_set *rules);
 int khttpd_file_init(void);
 void khttpd_file_fini(void);
 

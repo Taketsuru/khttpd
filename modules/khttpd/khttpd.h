@@ -151,6 +151,12 @@ struct khttpd_set_mime_type_rules_args {
 	};
 };
 
+struct khttpd_config_admin_args {
+	int		rootfd;
+	int		*fds;
+	int		nfds;
+};
+
 #define KHTTPD_IOC 'h'
 
 #define KHTTPD_IOC_CONFIGURE_LOG			\
@@ -161,6 +167,8 @@ struct khttpd_set_mime_type_rules_args {
 	_IOW(KHTTPD_IOC, 2, struct khttpd_mount_args)
 #define KHTTPD_IOC_SET_MIME_TYPE_RULES			\
 	_IOW(KHTTPD_IOC, 3, struct khttpd_set_mime_type_rules_args)
+#define KHTTPD_IOC_CONFIG_ADMIN				\
+	_IOW(KHTTPD_IOC, 4, struct khttpd_config_admin_args)
 
 #define KHTTPD_LOG_DEBUG_TRACE		0x00000001
 #define KHTTPD_LOG_DEBUG_ALL		0x00000001
@@ -214,7 +222,7 @@ struct khttpd_route_type {
 	khttpd_received_header_t received_header;
 };
 
-int khttpd_route_add(struct khttpd_route *root, char *path,
+int khttpd_route_add(struct khttpd_route *root, const char *path,
     struct khttpd_route_type *route_type);
 void khttpd_route_remove(struct khttpd_route *route);
 struct khttpd_route *khttpd_route_find(struct khttpd_route *root,
@@ -377,5 +385,7 @@ void khttpd_set_options_response(struct khttpd_socket *socket,
     const char *allowed_methods);
 
 int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
+
+extern struct proc *khttpd_proc;
 
 #endif	/* _KERNEL */

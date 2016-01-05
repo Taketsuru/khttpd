@@ -29,7 +29,7 @@ if (target.run('kldload modules/khttpd/khttpd.ko').status !== 0) {
     process.exit();
 }
 
-if (target.run('usr.sbin/khttpdcontrol/khttpdcontrol ' + process.cwd() +
+if (target.run('usr.sbin/khttpd-init/khttpd-init -4 -r ' + process.cwd() +
                '/../sysui').status !== 0) {
     console.log('kldunload -f failed');
     process.exit();

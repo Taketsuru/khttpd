@@ -44,3 +44,5 @@ modules/khttpd/.depend
 modules/khttpd/vnode_if.h
 modules/khttpd/vnode_if_newproto.h
 modules/khttpd/vnode_if_typedef.h
+usr.sbin/khttpd-init/khttpd-init
+usr.sbin/khttpd-init/khttpd-init.1.gz
