@@ -22,5 +22,5 @@ function run(command) {
 }
 
 exports.name = '192.168.56.3';
-exports.port = 80;
+exports.port = 8080;
 exports.run = run;

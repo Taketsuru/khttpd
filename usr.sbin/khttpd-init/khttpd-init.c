@@ -73,10 +73,66 @@ add_element(struct fdvec *fdvec, int elem)
 }
 
 static void
+parse_name(int family, const char *name, char **host_name, char **service_name)
+{
+	static const char *default_service = "http";
+	const char *cp, *host_begin, *host_end, *service_begin, *service_end;
+
+	host_begin = name;
+	host_end = service_begin = service_end =
+	    name == NULL ? name : name + strlen(name);
+
+	if (name == NULL)
+		goto end;
+
+	if (family == AF_INET6 && name[0] == '[') {
+		cp = strchr(name, ']');
+		if (cp == NULL)
+			goto end;
+		host_begin = name + 1;
+		host_end = cp;
+		++cp;
+		if (*cp != ':')
+			goto end;
+		service_begin = cp + 1;
+	} else {
+		cp = strchr(name, ':');
+		if (cp == NULL)
+			goto end;
+		host_end = cp;
+		service_begin = cp + 1;
+	}
+
+end:
+	if (host_begin == host_end)
+		*host_name = NULL;
+	else {
+		if ((*host_name = malloc(host_end - host_begin)) == NULL)
+			errx(EX_OSERR, "failed to allocate memory");
+		memcpy(*host_name, host_begin, host_end - host_begin);
+		(*host_name)[host_end - host_begin] = '\0';
+	}
+
+	if (service_begin == service_end) {
+		service_begin = default_service;
+		service_end = default_service + strlen(default_service);
+	}
+
+	if ((*service_name = malloc(service_end - service_begin)) == NULL)
+		errx(EX_OSERR, "failed to allocate memory");
+	memcpy(*service_name, service_begin, service_end - service_begin);
+	(*service_name)[service_end - service_begin] = '\0';
+}
+
+static void
 open_server_port(struct fdvec *fdvec, int family, const char *name)
 {
+	char *host_name;
+	char *service_name;
 	struct addrinfo ai_hint, *ai_list, *ai_ptr;
 	int fd, gai_error;
+
+	parse_name(family, name, &host_name, &service_name);
 
 	bzero(&ai_hint, sizeof(ai_hint));
 	ai_hint.ai_flags = AI_PASSIVE;
@@ -84,7 +140,7 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 	ai_hint.ai_socktype = SOCK_STREAM;
 	ai_hint.ai_protocol = 0;
 
-	gai_error = getaddrinfo(name, "http", &ai_hint, &ai_list);
+	gai_error = getaddrinfo(host_name, service_name, &ai_hint, &ai_list);
 	if (gai_error != 0)
 		errx(EX_NOHOST, "failed to get address info: %s",
 		    gai_strerror(gai_error));
@@ -102,6 +158,8 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 	}
 
 	freeaddrinfo(ai_list);
+	free(host_name);
+	free(service_name);
 }
 
 int main(int argc, char **argv)
@@ -126,7 +184,7 @@ int main(int argc, char **argv)
 	accessfd = -1;
 	errorfd = -1;
 
-	while ((ch = getopt(argc, argv, "4::6::a:de:l:r:u:")) != -1) {
+	while ((ch = getopt(argc, argv, "4:6:a:de:l:r:u:")) != -1) {
 		switch (ch) {
 
 		case '4':	/* -4 <address>: open IPv4 socket */

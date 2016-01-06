@@ -29,7 +29,7 @@ if (target.run('kldload modules/khttpd/khttpd.ko').status !== 0) {
     process.exit();
 }
 
-if (target.run('usr.sbin/khttpd-init/khttpd-init -4 -r admin_docs ' +
+if (target.run('usr.sbin/khttpd-init/khttpd-init -4 192.168.56.3:8080 -r admin_docs ' +
                '-l access.log -e error.log').status !== 0) {
     console.log('kldunload -f failed');
     process.exit();

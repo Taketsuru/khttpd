@@ -1,5 +1,5 @@
 PROG = khttpd-init
 
-CFLAGS = -Werror
+CFLAGS = -Werror -g
 
 .include <bsd.prog.mk>
