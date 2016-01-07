@@ -332,4 +332,8 @@ int khttpd_run_proc(khttpd_command_proc_t proc, void *argument);
 
 extern struct proc *khttpd_proc;
 
+#define KHTTPD_CURPROC_IS_KHTTPD_ASSERT()				\
+	KASSERT(curproc == khttpd_proc,					\
+	    ("curproc %d is not the khttpd process", curproc->p_pid))
+
 #endif	/* _KERNEL */
