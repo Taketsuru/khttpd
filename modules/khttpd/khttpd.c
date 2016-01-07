@@ -1846,10 +1846,15 @@ khttpd_server_free(struct khttpd_server *server)
 }
 
 struct khttpd_server *
-khttpd_get_admin_server(void)
+khttpd_server_find(const char *name)
 {
+	struct khttpd_server *server;
 
-	return SLIST_FIRST(&khttpd_servers);
+	SLIST_FOREACH(server, &khttpd_servers, link)
+		if (strcmp(server->name, name) == 0)
+			return (server);
+
+	return (NULL);
 }
 
 struct khttpd_route *

@@ -283,7 +283,7 @@ void khttpd_socket_hold(struct khttpd_socket *socket);
 void khttpd_socket_free(struct khttpd_socket *socket);
 int khttpd_socket_fd(struct khttpd_socket *socket);
 
-struct khttpd_server *khttpd_get_admin_server(void);
+struct khttpd_server *khttpd_server_find(const char *name);
 struct khttpd_route *khttpd_server_route_root(struct khttpd_server *);
 
 void khttpd_set_response(struct khttpd_socket *socket,

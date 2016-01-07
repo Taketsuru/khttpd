@@ -115,6 +115,7 @@ int khttpd_file_mount(const char *path, struct khttpd_route *root,
 int khttpd_file_init(void);
 void khttpd_file_fini(void);
 
+int khttpd_sdt_mount(struct khttpd_route *root, const char *prefix);
 int khttpd_sdt_load(void);
 void khttpd_sdt_unload(void);
 int khttpd_sdt_quiesce(void);

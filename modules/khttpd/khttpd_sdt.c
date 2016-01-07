@@ -39,6 +39,7 @@
 #include <sys/sdt.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
+#include <sys/syslog.h>
 
 #include <machine/cpu.h>
 
@@ -46,10 +47,6 @@
 
 #include "khttpd.h"
 #include "khttpd_private.h"
-
-#ifndef KHTTPD_SDT_PREFIX
-#define KHTTPD_SDT_PREFIX KHTTPD_SYS_PREFIX "/sdt"
-#endif
 
 #ifndef KHTTPD_SDT_KO_FILE_HASH_SIZE
 #define KHTTPD_SDT_KO_FILE_HASH_SIZE	16
@@ -67,8 +64,8 @@
 #define KHTTPD_SDT_HISTORY_PAGES	64
 #endif
 
-#define KHTTPD_SDT_PROBE_PREFIX KHTTPD_SDT_PREFIX "/probe"
-#define KHTTPD_SDT_HISTORY_PREFIX KHTTPD_SDT_PREFIX "/history"
+#define KHTTPD_SDT_PROBE_PREFIX "/probe"
+#define KHTTPD_SDT_HISTORY_PREFIX "/history"
 
 /* --------------------------------------------------------- type definitions */
 
@@ -750,11 +747,36 @@ static int khttpd_sdt_on_each_linked_file(linker_file_t file, void *context)
 	return (0);
 }
 
+int khttpd_sdt_mount(struct khttpd_route *root, const char *prefix)
+{
+	int error;
+
+	/* XXX: prefix and KHTTPD_SDT_(PROBE|HISTORY)_PREFIX should be
+	   concatenated */
+
+	error = khttpd_route_add(root, KHTTPD_SDT_PROBE_PREFIX,
+	    &khttpd_route_type_sdt_probe);
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to add route %s: %d\n",
+		     KHTTPD_SDT_PROBE_PREFIX, error);
+		return (error);
+	}
+
+	error = khttpd_route_add(root, KHTTPD_SDT_HISTORY_PREFIX,
+	    &khttpd_route_type_sdt_history);
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to add route %s: %d\n",
+		    KHTTPD_SDT_HISTORY_PREFIX, error);
+		return (error);
+	}
+
+	return (0);
+}
+
 static int
 khttpd_sdt_load_proc(void *arg)
 {
-	struct khttpd_route *root;
-	int error, i;
+	int i;
 
 	TRACE("enter");
 
@@ -792,24 +814,7 @@ khttpd_sdt_load_proc(void *arg)
 
 	linker_file_foreach(khttpd_sdt_on_each_linked_file, NULL);
 
-	root = khttpd_server_route_root(khttpd_get_admin_server());
-	error = khttpd_route_add(root, KHTTPD_SDT_PROBE_PREFIX,
-	    &khttpd_route_type_sdt_probe);
-	if (error != 0) {
-		printf("khttpd: failed to add route " KHTTPD_SDT_PROBE_PREFIX
-		    ": %d\n", error);
-		return (error);
-	}
-
-	error = khttpd_route_add(root, KHTTPD_SDT_HISTORY_PREFIX,
-	    &khttpd_route_type_sdt_history);
-	if (error != 0) {
-		printf("khttpd: failed to add route "
-		    KHTTPD_SDT_HISTORY_PREFIX ": %d\n", error);
-		return (error);
-	}
-
-	return (error);
+	return (0);
 }
 
 static int
@@ -818,19 +823,9 @@ khttpd_sdt_unload_proc(void *arg)
 	struct sdt_provider *provider;
 	struct khttpd_sdt_ko_file *file;
 	struct khttpd_sdt_probe *probe;
-	struct khttpd_route *root, *route;
 	int i;
 
 	TRACE("enter");
-
-	root = khttpd_server_route_root(khttpd_get_admin_server());
-	route = khttpd_route_find(root, KHTTPD_SDT_HISTORY_PREFIX, NULL);
-	if (route != NULL)
-		khttpd_route_remove(route);
-
-	route = khttpd_route_find(root, KHTTPD_SDT_PROBE_PREFIX, NULL);
-	if (route != NULL)
-		khttpd_route_remove(route);
 
 	if (sdt_probe_func == khttpd_sdt_probe)
 		sdt_probe_func = sdt_probe_stub;
