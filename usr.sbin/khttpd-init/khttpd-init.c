@@ -46,8 +46,9 @@
 
 #include "../../modules/khttpd/khttpd.h"
 
-#define KHTTPD_DEFAULT_ACCESS_LOG	"/var/log/khttpd/access.log"
-#define KHTTPD_DEFAULT_ERROR_LOG	"/var/log/khttpd/error.log"
+#define KHTTPD_DEFAULT_DEVICE_FILE	"/dev/khttpd/ctrl"
+#define KHTTPD_DEFAULT_ACCESS_LOG	"/var/log/khttpd/ctrl/access.log"
+#define KHTTPD_DEFAULT_ERROR_LOG	"/var/log/khttpd/ctrl/error.log"
 
 static int debug_level;
 
@@ -168,23 +169,23 @@ int main(int argc, char **argv)
 	struct khttpd_config_args args;
 	struct fdvec fdvec;
 	const char *passwd_file;
-	const char *admin_root_path;
 	size_t len;
-	int accessfd, ch, devfd, errorfd, fd, i, sockfd;
+	int accessfd, ch, docrootfd, devfd, errorfd, i, sockfd;
 
 	bzero(&fdvec, sizeof(fdvec));
 
-	admin_root_path = "/usr/share/khttpd/admin_docs";
 	passwd_file = NULL;
 
 	add_element(&fdvec, -1);	/* root dir fd */
 	add_element(&fdvec, -1);	/* access log fd */
 	add_element(&fdvec, -1);	/* error log fd */
 
+	docrootfd = -1;
 	accessfd = -1;
 	errorfd = -1;
+	devfd = -1;
 
-	while ((ch = getopt(argc, argv, "4:6:a:de:l:r:u:")) != -1) {
+	while ((ch = getopt(argc, argv, "4:6:a:de:f:l:r:u:")) != -1) {
 		switch (ch) {
 
 		case '4':	/* -4 <address>: open IPv4 socket */
@@ -222,6 +223,14 @@ int main(int argc, char **argv)
 				    "file '%s'", optarg);
 			break;
 
+		case 'f':
+			if (0 < debug_level)
+				printf("device file: '%s'\n", optarg);
+			devfd = open(optarg, O_RDWR);
+			if (devfd == -1)
+				err(EX_NOINPUT, "failed to open %s", optarg);
+			break;
+
 		case 'l':
 			if (0 < debug_level)
 				printf("access log: '%s'\n", optarg);
@@ -234,9 +243,12 @@ int main(int argc, char **argv)
 
 		case 'r':
 			if (0 < debug_level)
-				printf("admin root directory: '%s'\n",
+				printf("docroot directory: '%s'\n",
 				    optarg == NULL ? "<none>" : optarg);
-			admin_root_path = optarg;
+			docrootfd = open(optarg, O_DIRECTORY|O_EXEC);
+			if (docrootfd == -1)
+				err(EX_NOINPUT, "failed to open docroot "
+				    "directory '%s'.", optarg);
 			break;
 
 		case 'u':	/* -u <path>: UNIX domain socket */
@@ -268,36 +280,35 @@ int main(int argc, char **argv)
 			break;
 
 		default:
-			err(EX_USAGE, "");
+			err(EX_USAGE, "unknown option is specified");
 		}
 	}
 
-	devfd = open("/dev/khttpd", O_RDWR);
-	if (devfd == -1)
-		err(EX_UNAVAILABLE, "failed to open /dev/khttpd");
+	if (devfd == -1) {
+		devfd = open(KHTTPD_DEFAULT_DEVICE_FILE, O_RDWR);
+		if (devfd == -1)
+			err(EX_NOINPUT, "failed to open '%s'",
+			    KHTTPD_DEFAULT_DEVICE_FILE);
+	}
 
 	if (accessfd == -1) {
 		accessfd = open(KHTTPD_DEFAULT_ACCESS_LOG,
 		    O_WRONLY | O_APPEND | O_CREAT, 0600);
 		if (accessfd == -1)
-			err(EX_NOINPUT, "failed to open access log '"
-			    KHTTPD_DEFAULT_ACCESS_LOG "'");
+			err(EX_NOINPUT, "failed to open access log '%s'",
+			    KHTTPD_DEFAULT_ACCESS_LOG);
 	}
 
 	if (errorfd == -1) {
 		errorfd = open(KHTTPD_DEFAULT_ERROR_LOG,
 		    O_WRONLY | O_APPEND | O_CREAT, 0600);
 		if (errorfd == -1)
-			err(EX_NOINPUT, "failed to open error log '"
-			    KHTTPD_DEFAULT_ERROR_LOG "'");
+			err(EX_NOINPUT, "failed to open error log '%s'",
+			    KHTTPD_DEFAULT_ERROR_LOG);
 	}
 
 	i = 0;
-	fd = open(admin_root_path, O_DIRECTORY|O_EXEC);
-	if (fd == -1)
-		err(EX_NOINPUT, "failed to open admin root directory.");
-	fdvec.memory[i++] = fd;
-
+	fdvec.memory[i++] = docrootfd;
 	fdvec.memory[i++] = accessfd;
 	fdvec.memory[i++] = errorfd;
 

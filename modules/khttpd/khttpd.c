@@ -107,10 +107,17 @@ enum {
 
 };
 
-struct khttpd_log_entry {
-	struct bintime	timestamp;
+struct khttpd_log {
 	int		fd;
-	int		type;
+	int		in_flight_count;
+	boolean_t	waiting;
+};
+
+struct khttpd_log_entry {
+	struct bintime		timestamp;
+	struct khttpd_log	*target;
+	int			fd;
+	int			type;
 	union {
 		struct {
 			lwpid_t		tid;
@@ -276,10 +283,12 @@ struct khttpd_route {
 
 struct khttpd_server {
 	SLIST_ENTRY(khttpd_server)	link;
-	struct khttpd_route		*route_root;
+	struct khttpd_log		access_log;
+	struct khttpd_log		error_log;
 	struct khttpd_server_port_list	ports;
-	int				access_log_fd;
-	int				error_log_fd;
+	struct cdev			*dev;
+	struct khttpd_route		*route_root;
+	const char			*name;
 };
 
 SLIST_HEAD(khttpd_server_list, khttpd_server);
@@ -293,6 +302,7 @@ struct khttpd_label {
 SLIST_HEAD(khttpd_label_list, khttpd_label);
 
 struct khttpd_config_proc_args {
+	struct khttpd_server	*server;
 	struct filedescent	*fdes;
 	int			nfdes;
 };
@@ -427,7 +437,6 @@ static struct khttpd_label_list khttpd_method_hash_table[64];
 static struct khttpd_label_list khttpd_field_hash_table[16];
 
 static struct mtx khttpd_lock;
-static struct cdev *khttpd_dev;
 struct proc *khttpd_proc;
 static struct thread *khttpd_logger_thread;
 static struct mbufq khttpd_logger_queue;
@@ -478,7 +487,7 @@ static uma_zone_t khttpd_socket_zone;
 static uma_zone_t khttpd_request_zone;
 static uma_zone_t khttpd_response_zone;
 static int khttpd_kqueue;
-static int khttpd_debug_log_fd = -1;
+static struct khttpd_log khttpd_debug_log;
 
 /* --------------------------------------------------- function definitions */
 
@@ -492,6 +501,75 @@ void khttpd_free(void *mem)
 {
 
 	free(mem, M_KHTTPD);
+}
+
+static void khttpd_log_init(struct khttpd_log *log)
+{
+	log->fd = -1;
+	log->in_flight_count = 0;
+	log->waiting = FALSE;
+}
+
+static void khttpd_log_wait_to_drain(struct khttpd_log *log)
+{
+	mtx_lock(&khttpd_lock);
+	while (0 < log->in_flight_count) {
+		log->waiting = TRUE;
+		mtx_sleep(&log->in_flight_count, &khttpd_lock, 0,
+		    "khttpd-log-flush", 0);
+	}
+	mtx_unlock(&khttpd_lock);
+}
+
+static void khttpd_log_close(struct khttpd_log *log)
+{
+	khttpd_log_wait_to_drain(log);
+
+	if (log->fd != -1) {
+		kern_close(curthread, log->fd);
+		log->fd = -1;
+	}
+}
+
+static void khttpd_log_set_fd(struct khttpd_log *log, int fd)
+{
+	int old_fd;
+
+	khttpd_log_wait_to_drain(log);
+
+	old_fd = log->fd;
+	log->fd = fd;
+	if (old_fd != -1)
+		kern_close(curthread, old_fd);
+}
+
+static struct mbuf *
+khttpd_log_entry_alloc(int type, struct khttpd_log_entry **entry,
+    struct khttpd_log *log)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+
+	m = m_get(M_WAITOK, MT_DATA);
+	m_align(m, rounddown2(MLEN, sizeof(void*)));
+	m->m_len = sizeof(*e);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->type = type;
+	e->target = log;
+	bintime(&e->timestamp);
+
+	return (m);
+}
+
+static void
+khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
+{
+	switch (entry->type) {
+
+	default:
+		break;
+	}
 }
 
 /*
@@ -1733,14 +1811,18 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
  */
 
 static struct khttpd_server *
-khttpd_server_alloc(void)
+khttpd_server_alloc(const char *name)
 {
 	struct khttpd_server *result;
 
 	result = khttpd_malloc(sizeof(struct khttpd_server));
+	result->name = strdup(name, M_KHTTPD);
+	result->dev = NULL;
 	result->route_root = uma_zalloc_arg(khttpd_route_zone,
 	    &khttpd_route_type_null, M_WAITOK);
 	SLIST_INIT(&result->ports);
+	khttpd_log_init(&result->access_log);
+	khttpd_log_init(&result->error_log);
 
 	return (result);
 }
@@ -1748,9 +1830,18 @@ khttpd_server_alloc(void)
 static void
 khttpd_server_free(struct khttpd_server *server)
 {
+	struct thread *td;
 
+	td = curthread;
+
+	khttpd_log_close(&server->access_log);
+	khttpd_log_close(&server->error_log);
 	khttpd_route_clear_all(server->route_root);
 	khttpd_route_free(server->route_root);
+	if (server->dev != NULL)
+		destroy_dev(server->dev);
+	free((void *)server->name, M_KHTTPD);
+
 	khttpd_free(server);
 }
 
@@ -3264,35 +3355,9 @@ khttpd_logger_wait(const char *wmsg)
 }
 
 static void
-khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
-{
-	switch (entry->type) {
-
-	default:
-		break;
-	}
-}
-
-static struct mbuf *
-khttpd_alloc_log_entry(int type, struct khttpd_log_entry **entry)
-{
-	struct mbuf *m;
-	struct khttpd_log_entry *e;
-
-	m = m_get(M_WAITOK, MT_DATA);
-	m_align(m, rounddown2(MLEN, sizeof(void*)));
-	m->m_len = sizeof(*e);
-
-	e = mtod(m, struct khttpd_log_entry *);
-	e->type = type;
-	bintime(&e->timestamp);
-
-	return (m);
-}
-
-static void
 khttpd_log_enqueue(struct mbuf *m)
 {
+	struct khttpd_log *log;
 
 	KASSERT(curthread != khttpd_logger_thread,
 	    ("current thread is the logger thread"));
@@ -3308,6 +3373,10 @@ khttpd_log_enqueue(struct mbuf *m)
 			if (khttpd_logger_state == KHTTPD_LOGGER_IDLE &&
 			    mbufq_len(&khttpd_logger_queue) == 1)
 				khttpd_logger_set_state(KHTTPD_LOGGER_BUSY);
+
+			log = mtod(m, struct khttpd_log_entry *)->target;
+			++log->in_flight_count;
+
 			m = NULL;
 			break;
 		}
@@ -3316,6 +3385,7 @@ khttpd_log_enqueue(struct mbuf *m)
 		mtx_sleep(&khttpd_logger_waiting_empty_slot, &khttpd_lock, 0,
 		    "khttpd-slow-log", 0);
 	}
+
 	mtx_unlock(&khttpd_lock);
 
 	if (m != NULL) {
@@ -3334,11 +3404,10 @@ khttpd_error(struct khttpd_server *server, int severity, const char *fmt, ...)
 	if (curthread == khttpd_logger_thread)
 		return;
 
-	m = khttpd_alloc_log_entry(KHTTPD_LOG_ERROR, &e);
+	m = khttpd_log_entry_alloc(KHTTPD_LOG_ERROR, &e, &server->error_log);
 
 	e = mtod(m, struct khttpd_log_entry *);
 	e->error.severity = severity;
-	e->fd = server->error_log_fd;
 
 	va_start(vl, fmt);
 	khttpd_mbuf_vprintf(m, fmt, vl);
@@ -3357,10 +3426,9 @@ khttpd_debug(const char *func, const char *fmt, ...)
 	if (curthread == khttpd_logger_thread)
 		return;
 
-	m = khttpd_alloc_log_entry(KHTTPD_LOG_DEBUG, &e);
+	m = khttpd_log_entry_alloc(KHTTPD_LOG_DEBUG, &e, &khttpd_debug_log);
 
 	e = mtod(m, struct khttpd_log_entry *);
-	e->fd = khttpd_debug_log_fd;
 	e->debug.tid = curthread->td_tid;
 	e->debug.func = func;
 
@@ -3380,8 +3448,9 @@ khttpd_logger_put(void)
 	const CODE *codep;
 	struct mbuf *hd, *m, *n;
 	struct khttpd_log_entry *e;
+	struct khttpd_log *log;
 	ssize_t resid;
-	int error, fd, i, len, type;
+	int error, i, len, type;
 
 	mtx_assert(&khttpd_lock, MA_OWNED);
 
@@ -3409,7 +3478,7 @@ khttpd_logger_put(void)
 		hd = m_get(M_WAITOK, MT_DATA);
 
 		type = e->type;
-		fd = e->fd;
+		log = e->target;
 
 		switch (type) {
 
@@ -3465,7 +3534,7 @@ khttpd_logger_put(void)
 			auio.uio_resid = resid;
 			auio.uio_offset = 0;
 			while (auio.uio_resid) {
-				error = kern_writev(curthread, fd, &auio);
+				error = kern_writev(curthread, log->fd, &auio);
 				if (error != 0)
 					break;
 			}
@@ -3475,6 +3544,13 @@ khttpd_logger_put(void)
 		} while (m != NULL);
 
 		m_freem(hd);
+
+		mtx_lock(&khttpd_lock);
+		if (--log->in_flight_count == 0 && log->waiting) {
+			log->waiting = FALSE;
+			wakeup(&log->in_flight_count);
+		}
+		mtx_unlock(&khttpd_lock);
 	}
 
 	mtx_lock(&khttpd_lock);
@@ -3654,7 +3730,7 @@ khttpd_main(void *arg)
 		    error);
 		goto cont;
 	}
-	khttpd_debug_log_fd = td->td_retval[0];
+	khttpd_log_set_fd(&khttpd_debug_log, td->td_retval[0]);
 	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
 
 	bzero(&sigact, sizeof(sigact));
@@ -3696,10 +3772,22 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 
-	server = khttpd_server_alloc();
+	error = khttpd_file_init();
+	if (error != 0)
+		goto cont;
+
+	server = khttpd_server_alloc("ctrl");
 	SLIST_INSERT_HEAD(&khttpd_servers, server, link);
 
-	error = khttpd_file_init();
+	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &server->dev,
+	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd/%s",
+	    server->name);
+	if (error != 0) {
+		log(LOG_ERR, "khttpd: failed to create the device file: %d",
+		    error);
+		goto cont;
+	}
+	server->dev->si_drv1 = server;
 
 cont:
 	mtx_lock(&khttpd_lock);
@@ -3765,8 +3853,7 @@ cont:
 		khttpd_logger_wait("khttpd-log-exit");
 	mtx_unlock(&khttpd_lock);
 
-	if (khttpd_debug_log_fd != -1)
-		kern_close(td, khttpd_debug_log_fd);
+	khttpd_log_close(&khttpd_debug_log);
 
 	uma_zdestroy(khttpd_socket_zone);
 	uma_zdestroy(khttpd_request_zone);
@@ -3876,7 +3963,7 @@ khttpd_config_proc(void *argptr)
 	args = argptr;
 	td = curthread;
 	fdp = td->td_proc->p_fd;
-	server = khttpd_get_admin_server();
+	server = args->server;
 
 	nfds = 0;
 	for (i = 0; i < args->nfdes; ++i)
@@ -3928,10 +4015,7 @@ khttpd_config_proc(void *argptr)
 
 	FILEDESC_XUNLOCK(fdp);
 
-	TRACE("nsocks %d", nsocks);
 	for (i = 0; i < nsocks; ++i) {
-		TRACE("socket %d", sockfds[i]);
-
 		port = malloc(sizeof(*port), M_KHTTPD, M_WAITOK);
 		port->event_type.handle_event = khttpd_accept_client;
 		port->fd = sockfds[i];
@@ -3984,13 +4068,8 @@ khttpd_config_proc(void *argptr)
 		}
 	}
 
-	if (server->access_log_fd != -1)
-		kern_close(td, server->access_log_fd);
-	server->access_log_fd = access_log_fd;
-
-	if (server->error_log_fd != -1)
-		kern_close(td, server->error_log_fd);
-	server->error_log_fd = error_log_fd;
+	khttpd_log_set_fd(&server->access_log, access_log_fd);
+	khttpd_log_set_fd(&server->error_log, error_log_fd);
 
 	SLIST_SWAP(&server->ports, &ports, khttpd_server_port);
 
@@ -4024,7 +4103,7 @@ bad1:
 }
 
 static int
-khttpd_config(struct khttpd_config_args *args)
+khttpd_config(struct khttpd_server *server, struct khttpd_config_args *args)
 {
 	struct filedesc *fdp;
 	struct khttpd_config_proc_args proc_args;
@@ -4043,6 +4122,7 @@ khttpd_config(struct khttpd_config_args *args)
 	if (error != 0)
 		goto bad1;
 
+	proc_args.server = server;
 	proc_args.fdes = khttpd_malloc(nfds * sizeof(struct filedescent));
 	bzero(proc_args.fdes, nfds * sizeof(struct filedescent));
 	proc_args.nfdes = nfds;
@@ -4094,7 +4174,8 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 	switch (cmd) {
 
 	case KHTTPD_IOC_CONFIG:
-		error = khttpd_config((struct khttpd_config_args *)data);
+		error = khttpd_config(dev->si_drv1,
+		    (struct khttpd_config_args *)data);
 		break;
 
 	default:
@@ -4110,9 +4191,6 @@ khttpd_unload(void)
 	struct khttpd_command_list worklist;
 	struct khttpd_command *command;
 	struct proc *proc;
-
-	if (khttpd_dev != NULL)
-		destroy_dev(khttpd_dev);
 
 	STAILQ_INIT(&worklist);
 
@@ -4150,6 +4228,8 @@ khttpd_load(void)
 
 	mtx_init(&khttpd_lock, "khttpd", NULL, MTX_DEF);
 
+	khttpd_log_init(&khttpd_debug_log);
+
 	error = kproc_create(khttpd_main, NULL, &khttpd_proc, 0, 0, "khttpd");
 	if (error != 0) {
 		log(LOG_ERR, "khttpd: failed to fork khttpd: %d", error);
@@ -4159,25 +4239,19 @@ khttpd_load(void)
 	khttpd_pid = khttpd_proc->p_pid;
 
 	mtx_lock(&khttpd_lock);
+
 	while (khttpd_state == KHTTPD_LOADING)
 		mtx_sleep(&khttpd_state, &khttpd_lock, 0, "khttpd-load", 0);
+
 	if (khttpd_state == KHTTPD_FAILED) {
 		error = khttpd_server_status;
-		goto bad;
+		khttpd_set_state(KHTTPD_UNLOADING);
 	}
+
 	mtx_unlock(&khttpd_lock);
 
-	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &khttpd_dev,
-	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd");
-	if (error == 0)
-		return (0);
-	log(LOG_ERR, "khttpd: failed to create the device file: %d", error);
-
-	mtx_lock(&khttpd_lock);
-bad:
-	khttpd_set_state(KHTTPD_UNLOADING);
-	mtx_unlock(&khttpd_lock);
-	khttpd_unload();
+	if (error != 0)
+		khttpd_unload();
 
 	return (error);
 }
