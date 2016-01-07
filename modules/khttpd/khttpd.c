@@ -314,12 +314,9 @@ static int khttpd_route_compare(struct khttpd_route *x,
 
 static void khttpd_kevent_nop(struct kevent *event);
 
-static int khttpd_transmit_status_line
+static int khttpd_transmit_status_line_and_header
     (struct khttpd_socket *socket, struct khttpd_request *request,
 	struct khttpd_response *response, struct mbuf **out);
-static int khttpd_transmit_body_mbuf(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out);
 
 static int khttpd_receive_chunk(struct khttpd_socket *socket);
 static int khttpd_receive_body(struct khttpd_socket *socket);
@@ -1479,7 +1476,6 @@ khttpd_response_set_body_mbuf(struct khttpd_response *response,
 
 	khttpd_response_set_content_length(response, m_length(data, NULL));
 
-	response->transmit_body = khttpd_transmit_body_mbuf;
 	response->body = data;
 }
 
@@ -1501,8 +1497,7 @@ khttpd_response_set_body_bytes(struct khttpd_response *response,
 
 	khttpd_response_set_content_length(response, size);
 
-	response->transmit_body = khttpd_transmit_body_mbuf;
-	response->body = m = m_gethdr(M_WAITOK, MT_DATA);
+	response->body = m = m_get(M_WAITOK, MT_DATA);
 	m->m_ext.ext_cnt = &response->body_refcnt;
 	m_extadd(m, data, size, free_data == NULL ?
 	    khttpd_response_free_body_extbuf_null :
@@ -1540,7 +1535,7 @@ khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
 	socket = mem;
 
 	socket->receive = khttpd_receive_request_line;
-	socket->transmit = khttpd_transmit_status_line;
+	socket->transmit = khttpd_transmit_status_line_and_header;
 
 	bzero(&socket->khttpd_socket_zctor_begin,
 	    offsetof(struct khttpd_socket, khttpd_socket_zctor_end) - 
@@ -1968,7 +1963,7 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 	else if (close)
 		khttpd_socket_shutdown(socket);
 
-	socket->transmit = khttpd_transmit_status_line;
+	socket->transmit = khttpd_transmit_status_line_and_header;
 
 	return (0);
 }
@@ -2031,57 +2026,7 @@ khttpd_transmit_chunk(struct khttpd_socket *socket,
 }
 
 static int
-khttpd_transmit_body_mbuf(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-
-	TRACE("enter");
-	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
-
-	*out = response->body;
-	response->body = NULL;
-	socket->transmit = khttpd_transmit_end;
-
-	return (0);
-}
-
-static int
-khttpd_transmit_header(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	struct mbuf *m;
-
-	TRACE("enter");
-	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
-
-	*out = m = response->header;
-	response->header = NULL;
-
-	if (m == NULL)
-		m = m_gethdr(M_WAITOK, MT_DATA);
-
-	khttpd_mbuf_append(m, khttpd_crlf, khttpd_crlf + sizeof(khttpd_crlf));
-
-	if (response->status == 204 || response->status == 304 ||
-	    request->method == KHTTPD_METHOD_HEAD)
-		socket->transmit = khttpd_transmit_end;
-
-	else if (response->transfer_encoding_chunked)
-		socket->transmit = khttpd_transmit_chunk;
-
-	else if (0 < response->content_length)
-		socket->transmit = response->transmit_body;
-
-	else
-		socket->transmit = khttpd_transmit_end;
-
-	return (0);
-}
-
-static int
-khttpd_transmit_status_line(struct khttpd_socket *socket,
+khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
     struct khttpd_request *request, struct khttpd_response *response,
     struct mbuf **out)
 {
@@ -2094,7 +2039,29 @@ khttpd_transmit_status_line(struct khttpd_socket *socket,
 	khttpd_mbuf_printf(m, "HTTP/1.%d %d n/a\r\n", response->version_minor,
 	    response->status);
 	response->header_closed = TRUE;
-	socket->transmit = khttpd_transmit_header;
+
+	m_cat(m, response->header);
+	response->header = NULL;
+
+	khttpd_mbuf_append(m, khttpd_crlf, khttpd_crlf + sizeof(khttpd_crlf));
+
+	if (response->status == 204 || response->status == 304 ||
+	    request->method == KHTTPD_METHOD_HEAD)
+		socket->transmit = khttpd_transmit_end;
+
+	else if (response->transfer_encoding_chunked)
+		socket->transmit = khttpd_transmit_chunk;
+
+	else if (0 < response->content_length) {
+		if (response->body == NULL)
+			socket->transmit = response->transmit_body;
+		else {
+			m_cat(m, response->body);
+			response->body = NULL;
+			socket->transmit = khttpd_transmit_end;
+		}
+	} else
+		socket->transmit = khttpd_transmit_end;
 
 	return (0);
 }
