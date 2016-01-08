@@ -134,6 +134,8 @@ enum {
 
 struct kevent;
 struct mbuf;
+struct sockaddr_in;
+struct sockaddr_in6;
 
 struct khttpd_json;
 struct khttpd_request;
@@ -251,6 +253,8 @@ int khttpd_mbuf_next_list_element(struct khttpd_mbuf_pos *pos,
     struct sbuf *output);
 boolean_t khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos,
     char *token, boolean_t ignore_case);
+void khttpd_mbuf_print_sockaddr_in(struct mbuf *, struct sockaddr_in *);
+void khttpd_mbuf_print_sockaddr_in6(struct mbuf *, struct sockaddr_in6 *);
 
 void khttpd_request_hold(struct khttpd_request *request);
 void khttpd_request_free(struct khttpd_request *request);

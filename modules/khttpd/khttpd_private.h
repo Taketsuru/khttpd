@@ -83,6 +83,8 @@ extern int khttpd_debug_mask;
 void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
 
+void khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
+    struct khttpd_request *request);
 void khttpd_error(struct khttpd_server *server, int severity,
     const char *fmt, ...);
 void khttpd_debug(const char *func, const char *fmt, ...);

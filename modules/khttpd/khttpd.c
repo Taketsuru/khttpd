@@ -48,11 +48,14 @@
 #include <sys/systm.h>
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
+#include <sys/un.h>
 
 #define SYSLOG_NAMES
 #include <sys/syslog.h>
 
 #include <vm/uma.h>
+
+#include <netinet/in.h>
 
 #include "khttpd.h"
 #include "khttpd_private.h"
@@ -116,8 +119,6 @@ struct khttpd_log {
 struct khttpd_log_entry {
 	struct bintime		timestamp;
 	struct khttpd_log	*target;
-	int			fd;
-	int			type;
 	union {
 		struct {
 			lwpid_t		tid;
@@ -126,7 +127,12 @@ struct khttpd_log_entry {
 		struct {
 			int	severity;
 		} error;
+		struct {
+			struct khttpd_socket *socket;
+			struct khttpd_request *request;
+		} access;
 	};
+	char			type;
 };
 
 struct khttpd_command;
@@ -215,6 +221,7 @@ struct khttpd_request {
 	 */
 #define khttpd_request_zctor_begin	content_length
 	off_t			content_length;
+	off_t			payload_size;
 	struct khttpd_mbuf_pos	header;
 	struct mbuf		*request_line;
 	struct mbuf		*trailer;
@@ -246,6 +253,7 @@ struct khttpd_response {
 	 */
 #define khttpd_response_zctor_begin content_length
 	off_t		content_length;
+	off_t		payload_size;
 	khttpd_transmit_t transmit_body;
 	struct mbuf	*header;
 	struct mbuf	*trailer;
@@ -563,6 +571,11 @@ static void
 khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
 {
 	switch (entry->type) {
+
+	case KHTTPD_LOG_ACCESS:
+		khttpd_socket_free(entry->access.socket);
+		khttpd_request_free(entry->access.request);
+		break;
 
 	default:
 		break;
@@ -1455,6 +1468,7 @@ khttpd_response_set_body_proc(struct khttpd_response *response,
 		response, response->transfer_encoding_chunked,
 		response->has_content_length));
 
+	response->payload_size = content_length;
 	response->transmit_body = proc;
 	khttpd_response_set_content_length(response, content_length);
 }
@@ -1463,6 +1477,7 @@ void
 khttpd_response_set_body_mbuf(struct khttpd_response *response,
     struct mbuf *data)
 {
+	off_t len;
 
 	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
 	KASSERT(response->body == NULL,
@@ -1474,8 +1489,9 @@ khttpd_response_set_body_mbuf(struct khttpd_response *response,
 		response, response->transfer_encoding_chunked,
 		response->has_content_length));
 
-	khttpd_response_set_content_length(response, m_length(data, NULL));
-
+	len = m_length(data, NULL);
+	khttpd_response_set_content_length(response, len);
+	response->payload_size = len;
 	response->body = data;
 }
 
@@ -1497,6 +1513,7 @@ khttpd_response_set_body_bytes(struct khttpd_response *response,
 
 	khttpd_response_set_content_length(response, size);
 
+	response->payload_size = size;
 	response->body = m = m_get(M_WAITOK, MT_DATA);
 	m->m_ext.ext_cnt = &response->body_refcnt;
 	m_extadd(m, data, size, free_data == NULL ?
@@ -1997,6 +2014,7 @@ khttpd_transmit_chunk(struct khttpd_socket *socket,
     struct mbuf **out)
 {
 	struct mbuf *m, *head;
+	off_t len;
 	int error;
 
 	TRACE("enter");
@@ -2018,7 +2036,9 @@ khttpd_transmit_chunk(struct khttpd_socket *socket,
 	    ("provide_chunk_data returned an empty chain"));
 
 	*out = head = m_gethdr(M_WAITOK, MT_DATA);
-	khttpd_mbuf_printf(head, "%jx\r\n", m_length(m, NULL));
+	len = m_length(m, NULL);
+	response->payload_size += len;
+	khttpd_mbuf_printf(head, "%jx\r\n", (uintmax_t)len);
 	m_cat(head, m);
 	khttpd_mbuf_printf(head, "\r\n");
 
@@ -2056,6 +2076,8 @@ khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
 		if (response->body == NULL)
 			socket->transmit = response->transmit_body;
 		else {
+			response->payload_size = m_length(response->body,
+			    NULL);
 			m_cat(m, response->body);
 			response->body = NULL;
 			socket->transmit = khttpd_transmit_end;
@@ -2466,6 +2488,7 @@ khttpd_receive_chunk(struct khttpd_socket *socket)
 		socket->receive = khttpd_receive_header_or_trailer;
 
 	} else {
+		request->payload_size += len;
 		khttpd_socket_set_limit(socket, len);
 		socket->receive = khttpd_receive_body;
 	}
@@ -2709,6 +2732,7 @@ khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
 		return;
 	}
 
+	request->payload_size = request->content_length;
 	khttpd_socket_set_limit(socket, request->content_length);
 	socket->receive = khttpd_receive_body;
 }
@@ -3436,13 +3460,34 @@ khttpd_log_enqueue(struct mbuf *m)
 }
 
 void
+khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct mbuf *m;
+	struct khttpd_log_entry *e;
+
+	if (curthread == khttpd_logger_thread || server->error_log.fd == -1)
+		return;
+
+	m = khttpd_log_entry_alloc(KHTTPD_LOG_ACCESS, &e, &server->access_log);
+
+	e = mtod(m, struct khttpd_log_entry *);
+	e->access.socket = socket;
+	khttpd_socket_hold(socket);
+	e->access.request = request;
+	khttpd_request_hold(request);
+
+	khttpd_log_enqueue(m);
+}
+
+void
 khttpd_error(struct khttpd_server *server, int severity, const char *fmt, ...)
 {
 	struct mbuf *m;
 	struct khttpd_log_entry *e;
 	va_list vl;
 
-	if (curthread == khttpd_logger_thread)
+	if (curthread == khttpd_logger_thread || server->error_log.fd == -1)
 		return;
 
 	m = khttpd_log_entry_alloc(KHTTPD_LOG_ERROR, &e, &server->error_log);
@@ -3464,7 +3509,7 @@ khttpd_debug(const char *func, const char *fmt, ...)
 	struct khttpd_log_entry *e;
 	va_list vl;
 
-	if (curthread == khttpd_logger_thread)
+	if (curthread == khttpd_logger_thread || khttpd_debug_log.fd == -1)
 		return;
 
 	m = khttpd_log_entry_alloc(KHTTPD_LOG_DEBUG, &e, &khttpd_debug_log);
@@ -3478,6 +3523,90 @@ khttpd_debug(const char *func, const char *fmt, ...)
 	va_end(vl);
 
 	khttpd_log_enqueue(m);
+}
+
+static void
+khttpd_logger_put_request_line(struct mbuf *out,
+    struct khttpd_request *request)
+{
+	struct mbuf *m, *e;
+	const char *begin, *end;
+	boolean_t no_last_ch;
+
+	no_last_ch = request->header.off == 0 && request->header.unget != -1;
+
+	e = request->header.ptr;
+	for (m = request->request_line; m != e && m != NULL; m = m->m_next) {
+		begin = mtod(m, char *);
+		end = begin + m->m_len;
+		if (no_last_ch && m->m_next == e)
+			--end;
+		khttpd_json_mbuf_append_string_wo_quote(out, begin, end);
+	}
+	if (m != NULL) {
+		begin = mtod(m, char *);
+		end = begin + request->header.off;
+		if (request->header.unget != -1)
+			--end;
+		khttpd_json_mbuf_append_string_wo_quote(out, begin, end);
+	}
+}
+
+static void
+khttpd_logger_put_access_log(struct mbuf *out, struct timeval *tv,
+    struct khttpd_log_entry *e)
+{
+	struct khttpd_socket *socket;
+	struct khttpd_request *request;
+	struct khttpd_response *response;
+
+	socket = e->access.socket;
+	request = e->access.request;
+	response = request->response;
+
+	khttpd_mbuf_printf(out, "{\"timestamp\": %ld, \"request\": \"",
+	    tv->tv_sec);
+	khttpd_logger_put_request_line(out, request);
+
+	switch (socket->peer_addr.ss_family) {
+
+	case AF_INET:
+		khttpd_mbuf_printf(out, "\", \"family\": \"inet\""
+		    "\"address\": \"");
+		khttpd_mbuf_print_sockaddr_in(out,
+		    (struct sockaddr_in *)&socket->peer_addr);
+		khttpd_mbuf_append_ch(out, '"');
+		break;
+
+	case AF_INET6:
+		khttpd_mbuf_printf(out, "\", \"family\": \"inet6\""
+		    "\"address\": \"");
+		khttpd_mbuf_print_sockaddr_in6(out,
+		    (struct sockaddr_in6 *)&socket->peer_addr);
+		khttpd_mbuf_append_ch(out, '"');
+		break;
+
+	case AF_UNIX:
+		khttpd_mbuf_printf(out, "\", \"family\": \"unix\"");
+		break;
+
+	default:
+		break;
+	}
+
+	khttpd_mbuf_printf(out, ", \"status\": %d", response->status);
+
+	if (response->payload_size != 0)
+		khttpd_mbuf_printf(out, ", \"responsePayloadSize\": %jd",
+		    (uintmax_t)response->payload_size);
+
+	if (request->payload_size != 0)
+		khttpd_mbuf_printf(out, ", \"requestPayloadSize\": %jd",
+		    (uintmax_t)response->payload_size);
+
+	khttpd_mbuf_printf(out, "}\n");
+
+	khttpd_log_entry_dtor(e);
 }
 
 static void
@@ -3531,6 +3660,10 @@ khttpd_logger_put(void)
 			m_adj(m, sizeof(struct khttpd_log_entry));
 			m_cat(hd, m);
 			khttpd_mbuf_append_ch(hd, '\n');
+			break;
+
+		case KHTTPD_LOG_ACCESS:
+			khttpd_logger_put_access_log(hd, &tv, e);
 			break;
 
 		case KHTTPD_LOG_ERROR:

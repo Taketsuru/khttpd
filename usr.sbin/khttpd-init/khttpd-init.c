@@ -261,7 +261,7 @@ int main(int argc, char **argv)
 				errc(EX_USAGE, ENAMETOOLONG,
 				    "failed to create a UNIX domain socket");
 			unix_addr.sun_len =
-			    offsetof(struct sockaddr_un, sun_path) + len;
+			    offsetof(struct sockaddr_un, sun_path) + len + 1;
 			unix_addr.sun_family = AF_UNIX;
 
 			sockfd = socket(PF_UNIX, SOCK_STREAM, 0);

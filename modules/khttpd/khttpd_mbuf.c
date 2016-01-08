@@ -32,6 +32,8 @@
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
+#include <netinet/in.h>
+
 #include "khttpd.h"
 #include "khttpd_private.h"
 
@@ -603,4 +605,67 @@ khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos, char *token,
 	}
 
 	return (FALSE);
+}
+
+void
+khttpd_mbuf_print_sockaddr_in(struct mbuf *out, struct sockaddr_in *addr)
+{
+	char *ap;
+	int i;
+
+	addr = (struct sockaddr_in *)addr;
+	ap = (char *)&addr->sin_addr.s_addr;
+	khttpd_mbuf_printf(out, "%d", ap[0]);
+	for (i = 1; i < sizeof(addr->sin_addr.s_addr); ++i)
+		khttpd_mbuf_printf(out, ".%d", ap[i]);
+}
+
+void
+khttpd_mbuf_print_sockaddr_in6(struct mbuf *out, struct sockaddr_in6 *addr)
+{
+	uint16_t *sp;
+	int i, ns, current_run_pos, longest_run_pos;
+	int current_run_len, longest_run_len;
+
+	sp = addr->sin6_addr.s6_addr16;
+
+	longest_run_pos = -1;
+	longest_run_len = 0;
+	current_run_len = 0;
+	ns = sizeof(addr->sin6_addr.s6_addr16) / sizeof(uint16_t);
+	for (i = 0; i < ns; ++i) {
+		if (sp[i] != 0) {
+			current_run_len = 0;
+			continue;
+		}
+
+		if (i == 0 || sp[i - 1] != 0) {
+			current_run_len = 1;
+			current_run_pos = i;
+			continue;
+		}
+
+		if (++current_run_len <= longest_run_len)
+			continue;
+
+		longest_run_pos = current_run_pos;
+		longest_run_len = current_run_len;
+	}
+
+	if (longest_run_len <= 1)
+		longest_run_pos = -1;
+
+	for (i = 0; i < ns; ) { 
+		if (i == longest_run_pos) {
+			khttpd_mbuf_printf(out, ":");
+			i += longest_run_len;
+			if (i == ns)
+				khttpd_mbuf_printf(out, ":");
+			continue;
+		}
+
+		khttpd_mbuf_printf(out, i == 0 ? "%x" : ":%x",
+		    ntohs(sp[i]));
+		++i;
+	}
 }
