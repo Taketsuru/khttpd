@@ -610,11 +610,11 @@ khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos, char *token,
 void
 khttpd_mbuf_print_sockaddr_in(struct mbuf *out, struct sockaddr_in *addr)
 {
-	char *ap;
+	uint8_t *ap;
 	int i;
 
 	addr = (struct sockaddr_in *)addr;
-	ap = (char *)&addr->sin_addr.s_addr;
+	ap = (uint8_t *)&addr->sin_addr.s_addr;
 	khttpd_mbuf_printf(out, "%d", ap[0]);
 	for (i = 1; i < sizeof(addr->sin_addr.s_addr); ++i)
 		khttpd_mbuf_printf(out, ".%d", ap[i]);

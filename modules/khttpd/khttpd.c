@@ -1231,7 +1231,7 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	    offsetof(struct khttpd_request, khttpd_request_zctor_end) -
 	    offsetof(struct khttpd_request, khttpd_request_zctor_begin));
 
-	request->ref_count = 2;	/* recv_request & xmit_queue */
+	refcount_init(&request->ref_count, 2);	/* recv_request & xmit_queue */
 	request->method_name[0] = '\0';
 
 	return (0);
@@ -1249,20 +1249,20 @@ khttpd_request_dtor(void *mem, int size, void *arg)
 	sbuf_clear(&request->target);
 	m_freem(request->request_line);
 	m_freem(request->trailer);
-	uma_zfree(khttpd_response_zone, request->response);
+	khttpd_response_free(request->response);
 	khttpd_route_free(request->route);
 }
 
 void khttpd_request_hold(struct khttpd_request *request)
 {
 
-	++request->ref_count;
+	refcount_acquire(&request->ref_count);
 }
 
 void khttpd_request_free(struct khttpd_request *request)
 {
 
-	if (request != NULL && --request->ref_count == 0)
+	if (request != NULL && refcount_release(&request->ref_count))
 		uma_zfree(khttpd_request_zone, request);
 }
 
@@ -1559,7 +1559,7 @@ khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
 	    offsetof(struct khttpd_socket, khttpd_socket_zctor_begin));
 
 	socket->fd = -1;
-	socket->refcount = 1;
+	refcount_init(&socket->refcount, 1);
 	socket->recv_limit = khttpd_message_size_limit;
 
 	return (0);
@@ -1597,7 +1597,7 @@ khttpd_socket_hold(struct khttpd_socket *socket)
 {
 
 	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
-	++socket->refcount;
+	refcount_acquire(&socket->refcount);
 }
 
 void
@@ -1605,7 +1605,7 @@ khttpd_socket_free(struct khttpd_socket *socket)
 {
 
 	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
-	if (socket != NULL && --socket->refcount == 0)
+	if (socket != NULL && refcount_release(&socket->refcount))
 		uma_zfree(khttpd_socket_zone, socket);
 }
 
@@ -1628,8 +1628,11 @@ khttpd_socket_clear_all_requests(struct khttpd_socket *socket)
 		STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
 		khttpd_request_free(request);
 	}
-	khttpd_request_free(socket->recv_request);
-	socket->recv_request = NULL;
+	request = socket->recv_request;
+	if (request != NULL) {
+		khttpd_request_free(request);
+		socket->recv_request = NULL;
+	}
 }
 
 static void
@@ -1965,13 +1968,14 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 	TRACE("enter");
 	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
 
-	KASSERT(request == STAILQ_FIRST(&socket->xmit_queue),
-	    ("request %p, first %p", request,
-		STAILQ_FIRST(&socket->xmit_queue)));
-
 	td = curthread;
 	close = response->close;
 
+	khttpd_access(socket->port->server, socket, request);
+
+	KASSERT(request == STAILQ_FIRST(&socket->xmit_queue),
+	    ("request %p, first %p", request,
+		STAILQ_FIRST(&socket->xmit_queue)));
 	STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
 	khttpd_request_free(request);
 
@@ -2389,11 +2393,16 @@ khttpd_finish_receiving_request(struct khttpd_socket *socket,
 	TRACE("enter");
 	KHTTPD_CURPROC_IS_KHTTPD_ASSERT();
 
+#if 0
+	KASSERT(request == socket->recv_request,
+	    ("request=%p, socket->recv_request=%p", request,
+		socket->recv_request));
+#endif
 	if (request->close)
 		khttpd_socket_drain(socket);
 	request->end_of_message(socket, request);
+	khttpd_request_free(socket->recv_request);
 	socket->recv_request = NULL;
-	khttpd_request_free(request);
 	socket->receive = khttpd_receive_request_line;
 	khttpd_socket_set_limit(socket, khttpd_message_size_limit);
 }
@@ -2799,14 +2808,6 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	}
 
 	/*
-	 * If it's the first line of a header, set the beginning of this line
-	 * to request->header_pos.
-	 */
-
-	if (request->header.ptr == NULL)
-		khttpd_mbuf_pos_copy(&pos, &request->header);
-
-	/*
 	 * Extract the field name from the line.  If the character just before
 	 * ':' is a white space, set 'bad request' response.
 	 */
@@ -3033,17 +3034,32 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	}
 
 	/*
+	 * Record the beginning of the header.
+	 */
+
+	if (socket->recv_ptr == NULL)
+		khttpd_socket_read(socket);
+	khttpd_mbuf_pos_init(&request->header, socket->recv_ptr,
+	    socket->recv_off);
+
+	/*
 	 * Take the ownership of the receiving mbuf chain.
 	 */
 
 	m = socket->recv_leftovers;
-	if (pos.ptr != m || pos.off != 0) {
-		khttpd_terminate_received_mbuf_chain(socket);
-		m_freem(m);
-		m = socket->recv_leftovers;
+	while (m != NULL && m != pos.ptr)
+		m = m_free(m);
+	socket->recv_leftovers = NULL;
+
+	m = pos.ptr;
+	if (pos.off != 0) {
+		m = m_split(pos.ptr, pos.off, M_WAITOK);
+		m_freem(pos.ptr);
+		pos.ptr = m;
+		pos.off = 0;
+		m_length(m, &socket->recv_tail);
 	}
 	request->request_line = m;
-	socket->recv_leftovers = NULL;
 
 	/*
 	 * Find the method of this request message.
@@ -3466,7 +3482,7 @@ khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
 	struct mbuf *m;
 	struct khttpd_log_entry *e;
 
-	if (curthread == khttpd_logger_thread || server->error_log.fd == -1)
+	if (curthread == khttpd_logger_thread || server->access_log.fd == -1)
 		return;
 
 	m = khttpd_log_entry_alloc(KHTTPD_LOG_ACCESS, &e, &server->access_log);
@@ -3572,7 +3588,7 @@ khttpd_logger_put_access_log(struct mbuf *out, struct timeval *tv,
 
 	case AF_INET:
 		khttpd_mbuf_printf(out, "\", \"family\": \"inet\""
-		    "\"address\": \"");
+		    ", \"address\": \"");
 		khttpd_mbuf_print_sockaddr_in(out,
 		    (struct sockaddr_in *)&socket->peer_addr);
 		khttpd_mbuf_append_ch(out, '"');
@@ -3580,7 +3596,7 @@ khttpd_logger_put_access_log(struct mbuf *out, struct timeval *tv,
 
 	case AF_INET6:
 		khttpd_mbuf_printf(out, "\", \"family\": \"inet6\""
-		    "\"address\": \"");
+		    ", \"address\": \"");
 		khttpd_mbuf_print_sockaddr_in6(out,
 		    (struct sockaddr_in6 *)&socket->peer_addr);
 		khttpd_mbuf_append_ch(out, '"');
