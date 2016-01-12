@@ -80,6 +80,12 @@ extern int khttpd_debug_mask;
 
 #endif
 
+extern struct proc *khttpd_proc;
+
+#define KHTTPD_ASSERT_CURPROC_IS_KHTTPD()				\
+	KASSERT(curproc == khttpd_proc,					\
+	    ("curproc %d is not the khttpd process", curproc->p_pid))
+
 void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
 
