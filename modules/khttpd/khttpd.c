@@ -992,7 +992,8 @@ khttpd_route_find(struct khttpd_route *root,
 
 		if (ptr == NULL ||
 		    strncmp(ptr->label, cp, ptr->label_len) != 0 ||
-		    (cp + ptr->label_len < end && cp[ptr->label_len] != '/'))
+		    (cp + ptr->label_len < end && cp[ptr->label_len] != '/' &&
+			strncmp(ptr->label, "/", ptr->label_len) != 0))
 			break;
 
 		parent = ptr;
