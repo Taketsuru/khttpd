@@ -464,14 +464,16 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
 				code |= 63;
 			else if (ch == '=')
 				++equals;
-			else
+			else {
+				free(buf, M_KHTTPD);
 				return (EINVAL);
+			}
 			ch = khttpd_mbuf_getc(iter);
 		}
 		khttpd_mbuf_ungetc(iter, ch);
 
 		if (bufsize < size + 3 - equals) {
-			bufsize = bufsize < 65536 ? bufsize <<= 1
+			bufsize = bufsize < 65536 ? bufsize << 1
 			    : bufsize + 65536;
 			buf = realloc(buf, bufsize, M_KHTTPD, M_WAITOK);
 		}

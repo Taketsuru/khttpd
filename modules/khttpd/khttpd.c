@@ -2890,8 +2890,9 @@ again:
 		switch (ch) {
 
 		case '\n':
-			error = EBADMSG;
-			goto end;
+			sbuf_clear(output);
+			*query = NULL;
+			return (EBADMSG);
 
 		case '\0':
 			notfound = TRUE;
@@ -3053,6 +3054,8 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		request->method = KHTTPD_METHOD_UNKNOWN;
 		request->method_name[sizeof(request->method_name) - 1] = '\0';
 		error = khttpd_mbuf_next_segment(&pos, ' ');
+		if (error != 0)
+			goto bad;
 		khttpd_set_not_implemented_response(socket, request, FALSE);
 
 	} else
@@ -3893,7 +3896,7 @@ khttpd_main(void *arg)
 	if (KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH < longest) {
 		log(LOG_WARNING, "khttpd: longest known field name "
 		    "expected:%zd, actual:%zd", longest,
-		    KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
+		    (size_t)KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
 		error = EDOOFUS;
 		goto cont;
 	}
@@ -4087,13 +4090,17 @@ khttpd_internalize_fd(struct filedesc *fdp, int fd, struct filedescent *ent,
 
 	FILEDESC_LOCK_ASSERT(fdp);
 
-	TRACE("enter %d %p", fd, fdp->fd_ofiles[fd].fde_file);
+	TRACE("enter %d", fd);
+
+	if (fd < 0 || fdp->fd_lastfile < fd) {
+		TRACE("error EBADF 1");
+		return (EBADF);
+	}
 
 	fdep = &fdp->fd_ofiles[fd];
 
-	if (fd < 0 || fdp->fd_lastfile < fd || (fp = fdep->fde_file) == NULL ||
-	    (fp->f_flag & flags) != flags) {
-		TRACE("error EBADF");
+	if ((fp = fdep->fde_file) == NULL || (fp->f_flag & flags) != flags) {
+		TRACE("error EBADF 2");
 		return (EBADF);
 	}
 

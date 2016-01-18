@@ -231,6 +231,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 	khttpd_mbuf_printf(body, "]");
 
 	khttpd_mbuf_printf(body, ",\n\"items\":[");
+	itembuf = NULL;
 	item_count = FALSE;
 	cur_oid[0] = 1;
 	cur_oidlen = sizeof(int);
@@ -387,8 +388,7 @@ again:
 	    "application/json");
 	khttpd_set_response(socket, request, response);
 
-	if (itembuf != NULL)
-		m_freem(itembuf);
+	m_freem(itembuf);
 	khttpd_free(strbuf);
 }
 

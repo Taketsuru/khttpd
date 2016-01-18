@@ -275,6 +275,7 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 
 	TRACE("enter %s", khttpd_request_suffix(request));
 
+	buffer = NULL;
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '/')
 		++suffix;
@@ -294,8 +295,8 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 
 	mtx_lock(&khttpd_sdt_history_lock);
 
-	for (i = 0; khttpd_sdt_history_pages[i].seqno != page &&
-		 i < KHTTPD_SDT_HISTORY_PAGES; ++i)
+	for (i = 0; i < KHTTPD_SDT_HISTORY_PAGES &&
+		 khttpd_sdt_history_pages[i].seqno != page; ++i)
 		; /* nothing */
 
 	if (KHTTPD_SDT_HISTORY_PAGES <= i) {
@@ -321,6 +322,7 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 
 enoent:
 	khttpd_set_not_found_response(socket, request, FALSE);
+	khttpd_free(buffer);
 }
 
 static void

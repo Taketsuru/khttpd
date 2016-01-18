@@ -597,12 +597,12 @@ khttpd_parse_mime_type_rules(const char *description)
 
 	SLIST_INIT(&rules);
 
-	bufsize = strlen(description);
+	bufsize = strlen(description) + 1;
 	buf = khttpd_malloc(bufsize);
 	bcopy(description, buf, bufsize);
 
 	last_end = &dummy;
-	end = buf + bufsize;
+	end = buf + bufsize - 1;
 	rule_count = 0;
 	for (cp = buf; cp < end; cp = next + 1) {
 		next = khttpd_find_ch_in(cp, end, '\n');
