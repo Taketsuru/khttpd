@@ -1382,7 +1382,8 @@ void khttpd_response_vadd_field(struct khttpd_response *response,
 
 	if (response->header_closed) {
 		if (!response->transfer_encoding_chunked)
-			panic("Field %s is added to a closed header.", field);
+			log(LOG_WARNING,
+			    "Field %s is added to a closed header.", field);
 		m = response->trailer;
 		if (m == NULL)
 			response->trailer = m = m_gethdr(M_WAITOK, MT_DATA);
@@ -1906,32 +1907,38 @@ khttpd_set_response(struct khttpd_socket *socket,
 	TRACE("enter");
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	if (response->status == 0 || response->status / 100 == 1)
-		panic("invalid status %d for %p.", response->status, response);
+	if (response->status == 0 || response->status / 100 == 1) {
+		log(LOG_WARNING, "invalid status %d for %p.", response->status,
+		    response);
+		khttpd_set_bad_request_response(socket, request);
+		return;
+	}
 
 	if (request->close)
 		khttpd_response_set_connection_close(response);
 
 	if (request->response != NULL) {
 		if (request->response->status / 100 == 2)
-			panic("a successful response(%d) followed by a "
+			log(LOG_WARNING,
+			    "a successful response(%d) followed by a "
 			    "response(%d)", request->response->status,
 			    response->status);
 
 		if (response->status / 100 == 2)
-			panic("a response(%d) followed by a successful "
-			    "response(%d)", request->response->status,
-			    response->status);
+			log(LOG_WARNING, "a response(%d) followed by a "
+			    "successful response(%d)",
+			    request->response->status, response->status);
 
-		if (!response->close || request->response->close) {
+		if (request->may_respond)
+			log(LOG_WARNING, "a non-closing response %p has "
+			    "already started sending for request %p",
+			    request->response, request);
+
+		if (request->may_respond || !response->close ||
+		    request->response->close) {
 			khttpd_response_free(response);
 			return;
 		}
-
-		if (request->may_respond)
-			panic("a non-closing response %p has already started "
-			    "sending for request %p", request->response,
-			    request);
 
 		khttpd_response_free(request->response);
 	}
@@ -1943,7 +1950,8 @@ khttpd_set_response(struct khttpd_socket *socket,
 		khttpd_socket_drain(socket);
 	}
 
-	if (request->may_respond && STAILQ_FIRST(&socket->xmit_queue) == request)
+	if (request->may_respond &&
+	    STAILQ_FIRST(&socket->xmit_queue) == request)
 		khttpd_socket_transmit_resume(socket);
 }
 
@@ -3245,9 +3253,6 @@ khttpd_socket_transmit(struct khttpd_socket *socket)
 				break;
 			}
 
-			TRACE("space=%ld, len=%ld, total=%u",
-			    space, len, m_length(m, NULL));
-
 			prev->m_next = NULL;
 			socket->xmit_buf = end;
 			if ((m->m_flags & M_PKTHDR) == 0) {
@@ -3329,9 +3334,6 @@ khttpd_socket_receive(struct khttpd_socket *socket)
 			break;
 	}
 
-	TRACE("error %d eof %d drain %d",
-	    error, socket->recv_eof, socket->recv_drain);
-
 	if (error == EWOULDBLOCK)
 		khttpd_kevent_enable_read(khttpd_kqueue, socket->fd,
 		    &socket->event_type);
@@ -3373,7 +3375,9 @@ khttpd_handle_socket_event(struct kevent *event)
 		break;
 
 	default:
-		panic("%s: unknown filter %d", __func__, event->filter);
+		log(LOG_WARNING, "%s: unknown filter %d", __func__,
+		    event->filter);
+		break;
 	}
 
 	khttpd_socket_free(socket);
@@ -3626,9 +3630,9 @@ khttpd_logger_put(void)
 	const CODE *codep;
 	struct mbuf *hd, *m, *n;
 	struct khttpd_log_entry *e;
-	struct khttpd_log *log;
+	struct khttpd_log *dest;
 	ssize_t resid;
-	int error, i, len, type;
+	int i, len, type;
 
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 	mtx_assert(&khttpd_lock, MA_OWNED);
@@ -3657,7 +3661,7 @@ khttpd_logger_put(void)
 		hd = m_get(M_WAITOK, MT_DATA);
 
 		type = e->type;
-		log = e->target;
+		dest = e->target;
 
 		switch (type) {
 
@@ -3693,7 +3697,8 @@ khttpd_logger_put(void)
 			break;
 
 		default:
-			panic("unknown log type: %d", type);
+			log(LOG_WARNING, "khttpd: unknown log type: %d", type);
+			m_freem(m);
 		}
 
 		m = hd;
@@ -3716,11 +3721,9 @@ khttpd_logger_put(void)
 			auio.uio_iovcnt = i;
 			auio.uio_resid = resid;
 			auio.uio_offset = 0;
-			while (auio.uio_resid) {
-				error = kern_writev(curthread, log->fd, &auio);
-				if (error != 0)
-					break;
-			}
+			while (auio.uio_resid &&
+			    kern_writev(curthread, dest->fd, &auio) == 0)
+				; /* nothing */
 
 			resid = 0;
 			i = 0;
@@ -3729,9 +3732,9 @@ khttpd_logger_put(void)
 		m_freem(hd);
 
 		mtx_lock(&khttpd_lock);
-		if (--log->in_flight_count == 0 && log->waiting) {
-			log->waiting = FALSE;
-			wakeup(&log->in_flight_count);
+		if (--dest->in_flight_count == 0 && dest->waiting) {
+			dest->waiting = FALSE;
+			wakeup(&dest->in_flight_count);
 		}
 		mtx_unlock(&khttpd_lock);
 	}
@@ -3863,27 +3866,6 @@ khttpd_main(void *arg)
 	td = curthread;
 	error = 0;
 
-	khttpd_label_hash_init(khttpd_method_hash_table,
-	    sizeof(khttpd_method_hash_table) /
-	    sizeof(khttpd_method_hash_table[0]), khttpd_methods,
-	    sizeof(khttpd_methods) / sizeof(khttpd_methods[0]), FALSE);
-
-	longest = 0;
-	for (i = 0; i < sizeof(khttpd_fields) / sizeof(khttpd_fields[0]);
-	     ++i) {
-		len = strlen(khttpd_fields[i].name) + 1;
-		if (longest < len)
-			longest = len;
-	}
-	if (KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH < longest)
-		panic("longest known field name  expected:%zd, actual:%zd",
-		    longest, KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
-
-	khttpd_label_hash_init(khttpd_field_hash_table,
-	    sizeof(khttpd_field_hash_table) /
-	    sizeof(khttpd_field_hash_table[0]), khttpd_fields,
-	    sizeof(khttpd_fields) / sizeof(khttpd_fields[0]), TRUE);
-
 	khttpd_route_zone = uma_zcreate("khttp-route",
 	    sizeof(struct khttpd_route),
 	    khttpd_route_ctor, khttpd_route_dtor, khttpd_route_init, NULL,
@@ -3905,6 +3887,31 @@ khttpd_main(void *arg)
 	    UMA_ALIGN_PTR, 0);
 
 	khttpd_kqueue = -1;
+
+	khttpd_label_hash_init(khttpd_method_hash_table,
+	    sizeof(khttpd_method_hash_table) /
+	    sizeof(khttpd_method_hash_table[0]), khttpd_methods,
+	    sizeof(khttpd_methods) / sizeof(khttpd_methods[0]), FALSE);
+
+	khttpd_label_hash_init(khttpd_field_hash_table,
+	    sizeof(khttpd_field_hash_table) /
+	    sizeof(khttpd_field_hash_table[0]), khttpd_fields,
+	    sizeof(khttpd_fields) / sizeof(khttpd_fields[0]), TRUE);
+
+	longest = 0;
+	for (i = 0; i < sizeof(khttpd_fields) / sizeof(khttpd_fields[0]);
+	     ++i) {
+		len = strlen(khttpd_fields[i].name) + 1;
+		if (longest < len)
+			longest = len;
+	}
+	if (KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH < longest) {
+		log(LOG_WARNING,
+		    "khttpd: longest known field name  expected:%zd, actual:%zd",
+		    longest, KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
+		error = EDOOFUS;
+		goto cont;
+	}
 
 	error = khttpd_json_init();
 	if (error != 0)
