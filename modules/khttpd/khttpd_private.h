@@ -92,8 +92,9 @@ void khttpd_free(void *mem);
 void khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
     struct khttpd_request *request);
 void khttpd_error(struct khttpd_server *server, int severity,
-    const char *fmt, ...);
-void khttpd_debug(const char *func, const char *fmt, ...);
+    const char *fmt, ...) __attribute__ ((__format__ (__printf__, 3, 4)));
+void khttpd_debug(const char *func, const char *fmt, ...)
+	__attribute__ ((__format__ (__printf__, 2, 3)));
 void khttpd_logger_suspend(void);
 void khttpd_logger_resume(void);
 

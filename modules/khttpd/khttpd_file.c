@@ -220,7 +220,7 @@ khttpd_file_transmit(struct khttpd_socket *socket,
 	fdrop(fp, td);
 
 	if (error == 0 || error == EWOULDBLOCK) {
-		TRACE("sent=%d, residual=%zd, offset=%zd",
+		TRACE("sent=%ld, residual=%zd, offset=%zd",
 		    sent, data->xmit_residual, data->xmit_offset);
 		if ((data->xmit_residual -= sent) == 0)
 			khttpd_transmit_finished(socket);

@@ -1,3 +1,0 @@
-- The valid range of mbuf_pos->off is change from [0, mbuf->m_len) to [0, mbuf->m_len].
-- khttpd_config_admin must validate the given directory and sockets.
-- khttpd_config_admin must check the given sockets are bound.

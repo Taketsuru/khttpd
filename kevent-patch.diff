@@ -1,0 +1,14 @@
+diff --git a/sys/kern/kern_event.c b/sys/kern/kern_event.c
+index d41ac96..6584294 100644
+--- a/sys/kern/kern_event.c
++++ b/sys/kern/kern_event.c
+@@ -1284,7 +1284,8 @@ done_ev_add:
+ 		kn->kn_status |= KN_DISABLED;
+ 	}
+ 
+-	if ((kn->kn_status & KN_DISABLED) == 0)
++	if ((kev->flags & EV_ENABLE) ||
++	    (kn->kn_status & KN_DISABLED) == 0)
+ 		event = kn->kn_fop->f_event(kn, 0);
+ 	else
+ 		event = 0;
