@@ -49,6 +49,7 @@
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 #include <sys/un.h>
+#include <sys/ktr.h>
 
 #define SYSLOG_NAMES
 #include <sys/syslog.h>
@@ -223,7 +224,6 @@ struct khttpd_request {
 #define khttpd_request_zctor_begin	content_length
 	off_t			content_length;
 	off_t			payload_size;
-	struct khttpd_mbuf_pos	header;
 	struct mbuf		*request_line;
 	struct mbuf		*trailer;
 	struct khttpd_response	*response;
@@ -1778,7 +1778,6 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 
 	for (;;) {
 		/* Find the first '\n' in a mbuf. */
-
 		begin = mtod(ptr, char *);
 		end = begin + ptr->m_len;
 		cp = khttpd_find_ch_in(begin + off, end, '\n');
@@ -3017,15 +3016,6 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	}
 
 	/*
-	 * Record the beginning of the header.
-	 */
-
-	if (socket->recv_ptr == NULL)
-		khttpd_socket_read(socket);
-	khttpd_mbuf_pos_init(&request->header, socket->recv_ptr,
-	    socket->recv_off);
-
-	/*
 	 * Take the ownership of the receiving mbuf chain.
 	 */
 
@@ -3036,11 +3026,11 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 
 	m = pos.ptr;
 	if (pos.off != 0) {
-		m = m_split(pos.ptr, pos.off, M_WAITOK);
-		m_freem(pos.ptr);
-		pos.ptr = m;
+		if (m == socket->recv_ptr)
+			socket->recv_off -= pos.off;
+		m_adj(m, pos.off);
 		pos.off = 0;
-		m_length(m, &socket->recv_tail);
+		socket->recv_tail = m_last(m);
 	}
 	request->request_line = m;
 
@@ -3541,26 +3531,21 @@ static void
 khttpd_logger_put_request_line(struct mbuf *out,
     struct khttpd_request *request)
 {
-	struct mbuf *m, *e;
-	const char *begin, *end;
-	boolean_t no_last_ch;
+	struct mbuf *m;
+	const char *begin, *end, *cp;
 
-	no_last_ch = request->header.off == 0 && request->header.unget != -1;
-
-	e = request->header.ptr;
-	for (m = request->request_line; m != e && m != NULL; m = m->m_next) {
+	for (m = request->request_line; m != NULL; m = m->m_next) {
 		begin = mtod(m, char *);
 		end = begin + m->m_len;
-		if (no_last_ch && m->m_next == e)
-			--end;
-		khttpd_json_mbuf_append_string_wo_quote(out, begin, end);
-	}
-	if (m != NULL) {
-		begin = mtod(m, char *);
-		end = begin + request->header.off;
-		if (request->header.unget != -1)
-			--end;
-		khttpd_json_mbuf_append_string_wo_quote(out, begin, end);
+		cp = khttpd_find_ch_in(begin, end, '\n');
+		if (cp == NULL)
+			khttpd_json_mbuf_append_string_wo_quote(out, begin,
+			    end);
+		else  {
+			khttpd_json_mbuf_append_string_wo_quote(out, begin,
+			    cp + 1);
+			break;
+		}
 	}
 }
 
@@ -3906,9 +3891,9 @@ khttpd_main(void *arg)
 			longest = len;
 	}
 	if (KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH < longest) {
-		log(LOG_WARNING,
-		    "khttpd: longest known field name  expected:%zd, actual:%zd",
-		    longest, KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
+		log(LOG_WARNING, "khttpd: longest known field name "
+		    "expected:%zd, actual:%zd", longest,
+		    KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH);
 		error = EDOOFUS;
 		goto cont;
 	}
@@ -3925,7 +3910,7 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 	khttpd_log_set_fd(&khttpd_debug_log, td->td_retval[0]);
-	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
+	//khttpd_debug_mask = KHTTPD_DEBUG_ALL;
 
 	bzero(&sigact, sizeof(sigact));
 	sigact.sa_handler = SIG_IGN;

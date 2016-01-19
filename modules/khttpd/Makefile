@@ -5,6 +5,6 @@ SRCS += khttpd_sysctl.c khttpd_file.c khttpd_sdt.c
 KMOD = khttpd
 
 #CFLAGS +=
-CFLAGS += -DINVARIANTS -DKTR -DKHTTPD_DEBUG -g
+CFLAGS += -DINVARIANTS -DKTR -DKTR_COMPILE=1 -DKHTTPD_DEBUG -g
 
 .include <bsd.kmod.mk>

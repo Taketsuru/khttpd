@@ -24,7 +24,32 @@ describe('khttpd', function () {
         });
     });
 
-    xdescribe('receiving CRLFs preceding a request', function () {
+    describe('receiving CRLFs followed by EOF', function () {
+        var session = {};
+
+        it('accepts a connection request', function (done) {
+            httpTest.connect(session, done);
+        });
+
+        it('closes if the client closes', function (done) {
+            var crlfs, i, n;
+            crlfs = '';
+            n = 512;
+            for (i = 0; i + 2 <= n; i += 2) {
+                crlfs += '\r\n';
+            }
+            session.chan.once('end', done);
+            session.chan.write(crlfs);
+            session.chan.end();
+        });
+
+        it('doesn\'t send any data', function (done) {
+            expect(session.data.length).toBe(0);
+            done();
+        });
+    });
+
+    describe('receiving CRLFs preceding a request', function () {
         var session = {};
 
         it('accepts a connection request', function (done) {
@@ -51,6 +76,61 @@ describe('khttpd', function () {
             session.response = httpTest.parseMessage(session.data);
             httpTest.expectSuccessfulOptionsResponse(session.response);
             expect(session.response.header.connection).toBe('close');
+        });
+    });
+
+    describe('receiving a fragmented request line', function () {
+        var session = {};
+
+        it('accepts a connection request', function (done) {
+            httpTest.connect(session, done);
+        });
+
+        it('receives a partial request line', function (done) {
+            session.chan.write('OPTIONS *');
+            setTimeout(function () { done(); }, 1000);
+        });
+
+        it('receives the rest of the request line', function (done) {
+            session.chan.write(' HTTP/1.1\r\n\r\n');
+            session.chan.once('close', done);
+            session.chan.end();
+        });
+
+        it('sends a successful response', function (done) {
+            session.response = httpTest.parseMessage(session.data);
+            httpTest.expectSuccessfulOptionsResponse(session.response);
+            done();
+        });
+    });
+
+    describe('receiving a request line whose size < limit', function () {
+        var session = {};
+
+        it('accepts a connection request', function (done) {
+            httpTest.connect(session, done);
+        });
+
+        it('half-closes after sending a response to the request',
+           function (done) {
+               var head = 'GET ',
+                   tail = ' HTTP/1.1\r\n\r\n',
+                   target = '/',
+                   i, n;
+
+               n = httpTest.messageSizeMax - head.length - tail.length;
+               for (i = 1; i < n; ++i) {
+                   target += 'a';
+               }
+               session.chan.write(head + target + tail);
+               session.chan.once('close', done);
+               session.chan.end();
+           });
+
+        it('sends a "Not Found" response', function (done) {
+            session.response = httpTest.parseMessage(session.data);
+            httpTest.expectNotFoundResponse(session.response);
+            done();
         });
     });
 
