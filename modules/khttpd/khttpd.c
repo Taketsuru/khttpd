@@ -200,6 +200,7 @@ struct khttpd_socket {
 	unsigned		recv_eof:1;
 	unsigned		recv_drain:1;
 	unsigned		recv_shutdown:1;
+	unsigned		:0;
 	unsigned		xmit_busy:1;
 
 #define khttpd_socket_zctor_end	peer_addr
@@ -244,7 +245,6 @@ struct khttpd_request {
 
 #define khttpd_request_zctor_end	ref_count
 	u_int		ref_count;
-	char		method_name[24];
 };
 
 struct khttpd_response {
@@ -1211,7 +1211,6 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	    offsetof(struct khttpd_request, khttpd_request_zctor_begin));
 
 	refcount_init(&request->ref_count, 2);	/* recv_request & xmit_queue */
-	request->method_name[0] = '\0';
 
 	return (0);
 }
@@ -2953,6 +2952,7 @@ static int
 khttpd_receive_request_line(struct khttpd_socket *socket)
 {
 	static const char version_prefix[] = "HTTP/1.";
+	char method_name[24];
 	struct mbuf *m;
 	struct khttpd_mbuf_pos pos, tmppos;
 	const char *cp;
@@ -3039,20 +3039,18 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 * Find the method of this request message.
 	 */
 
-	error = khttpd_mbuf_copy_segment(&pos, ' ', request->method_name,
-	    sizeof(request->method_name) - 1, &end);
+	error = khttpd_mbuf_copy_segment(&pos, ' ', method_name,
+	    sizeof(method_name) - 1, &end);
 
 	if (error != 0)
 		TRACE("error copy_segment(method) %d", error);
 
 	if (error == 0) {
 		*end = '\0';
-		request->method =
-		    khttpd_method_find(request->method_name, end);
+		request->method = khttpd_method_find(method_name, end);
 
 	} else if (error == ENOMEM) {
 		request->method = KHTTPD_METHOD_UNKNOWN;
-		request->method_name[sizeof(request->method_name) - 1] = '\0';
 		error = khttpd_mbuf_next_segment(&pos, ' ');
 		if (error != 0)
 			goto bad;
