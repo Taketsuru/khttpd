@@ -84,7 +84,7 @@ static struct khttpd_mime_type_rule_set *khttpd_mime_type_rule_set_alloc
 static const char *khttpd_mime_type_rule_set_find
     (struct khttpd_mime_type_rule_set *rule_set, const char *path);
 
-static void khttpd_file_received_header(struct khttpd_socket *socket,
+static void khttpd_file_received_header(struct khttpd_receiver *receiver,
     struct khttpd_request *request);
 
 /* --------------------------------------------------- variable definitions */
@@ -189,7 +189,7 @@ again:
 }
 
 static int
-khttpd_file_transmit(struct khttpd_socket *socket,
+khttpd_file_transmit(struct khttpd_xmitter *xmitter,
     struct khttpd_request *request, struct khttpd_response *response,
     struct mbuf **out)
 {
@@ -197,11 +197,13 @@ khttpd_file_transmit(struct khttpd_socket *socket,
 	struct khttpd_file_request_data *data;
 	struct file *fp;
 	struct thread *td;
+	struct khttpd_socket *socket;
 	off_t sent;
 	int error;
 
 	td = curthread;
 	data = khttpd_request_data(request);
+	socket = khttpd_xmitter_socket(xmitter);
 
 	TRACE("enter %d %s", khttpd_socket_fd(socket), data->path);
 
@@ -223,7 +225,7 @@ khttpd_file_transmit(struct khttpd_socket *socket,
 		TRACE("sent=%ld, residual=%zd, offset=%zd",
 		    sent, data->xmit_residual, data->xmit_offset);
 		if ((data->xmit_residual -= sent) == 0)
-			khttpd_transmit_finished(socket);
+			khttpd_transmit_finished(xmitter);
 		else
 			data->xmit_offset += sent;
 	}
@@ -308,7 +310,7 @@ khttpd_file_open(int dirfd, const char *path, int *fd_out,
 }
 
 static void
-khttpd_file_redirect_to_index(struct khttpd_socket *socket,
+khttpd_file_redirect_to_index(struct khttpd_receiver *receiver,
     struct khttpd_request *request, int fd)
 {
 	struct stat statbuf;
@@ -317,7 +319,8 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	size_t len, target_len, index_len;
 	int error, i, n, tmpfd;
 
-	TRACE("enter %d %s %d", khttpd_socket_fd(socket),
+	TRACE("enter %d %s %d",
+	    khttpd_socket_fd(khttpd_receiver_socket(receiver)),
 	    ((struct khttpd_file_request_data *)khttpd_request_data(request))
 	    ->path, fd);
 
@@ -334,7 +337,7 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	}
 
 	if (i == n) {
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(receiver, request, FALSE);
 		return;
 	}
 
@@ -350,13 +353,13 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	len += index_len;
 	path[len] = '\0';
 
-	khttpd_set_moved_permanently_response(socket, request, NULL, path);
+	khttpd_set_moved_permanently_response(receiver, request, NULL, path);
 
 	free(path, M_KHTTPD);
 }
 
 static void
-khttpd_file_get_or_head(struct khttpd_socket *socket,
+khttpd_file_get_or_head(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 	struct stat statbuf;
@@ -368,7 +371,7 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 	const char *type, *path, *suffix;
 	int dirfd, error, fd;
 
-	TRACE("enter %d %s", khttpd_socket_fd(socket),
+	TRACE("enter %d %s", khttpd_socket_fd(khttpd_receiver_socket(receiver)),
 	    khttpd_request_suffix(request));
 
 	td = curthread;
@@ -382,7 +385,7 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 	if (error != 0) {
 		TRACE("error normalize %d", error);
 		khttpd_file_request_data_free(data);
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(receiver, request, FALSE);
 		return;
 	}
 
@@ -402,20 +405,20 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 
 	case ENAMETOOLONG:
 	case ENOENT:
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(receiver, request, FALSE);
 		return;
 
 	case EACCES:
 	case EPERM:
-		khttpd_set_conflict_response(socket, request, FALSE);
+		khttpd_set_conflict_response(receiver, request, FALSE);
 		return;
 
 	case EISDIR:
-		khttpd_file_redirect_to_index(socket, request, fd);
+		khttpd_file_redirect_to_index(receiver, request, fd);
 		return;
 
 	default:
-		khttpd_set_internal_error_response(socket, request);
+		khttpd_set_internal_error_response(receiver, request);
 		return;
 	}
 
@@ -433,11 +436,11 @@ khttpd_file_get_or_head(struct khttpd_socket *socket,
 	    data->path);
 	khttpd_response_add_field(response, "Content-Type", "%s", type);
 
-	khttpd_set_response(socket, request, response);
+	khttpd_set_response(receiver, request, response);
 }
 
 static void
-khttpd_file_received_header(struct khttpd_socket *socket,
+khttpd_file_received_header(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
@@ -447,11 +450,11 @@ khttpd_file_received_header(struct khttpd_socket *socket,
 
 	case KHTTPD_METHOD_GET:
 	case KHTTPD_METHOD_HEAD:
-		khttpd_file_get_or_head(socket, request);
+		khttpd_file_get_or_head(receiver, request);
 		break;
 
 	default:
-		khttpd_set_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(receiver, request, FALSE);
 	}
 }
 

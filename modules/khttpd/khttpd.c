@@ -31,6 +31,7 @@
 #include <sys/queue.h>
 #include <sys/tree.h>
 #include <sys/malloc.h>
+#include <sys/smp.h>
 #include <sys/mbuf.h>
 #include <sys/sbuf.h>
 #include <sys/kernel.h>
@@ -49,7 +50,6 @@
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 #include <sys/un.h>
-#include <sys/ktr.h>
 
 #define SYSLOG_NAMES
 #include <sys/syslog.h>
@@ -111,6 +111,19 @@ enum {
 
 };
 
+enum {
+	/* triggered when all the worker threads should exit */
+	KHTTPD_EVENT_SHUTDOWN_WORKERS,
+};
+
+/*
+ *	* - read only
+ *	0 - only the receiver or the xmitter can access
+ *	a - atomic
+ *	p - khttpd_lock
+ *	s - khttpd_socket lock
+ */
+
 struct khttpd_log {
 	int		fd;
 	int		in_flight_count;
@@ -168,45 +181,56 @@ struct khttpd_server_port {
 
 SLIST_HEAD(khttpd_server_port_list, khttpd_server_port);
 
-typedef int (*khttpd_receive_t)(struct khttpd_socket *);
+typedef int (*khttpd_receive_t)(struct khttpd_receiver *);
 
-struct khttpd_socket {
+struct khttpd_receiver {
 	/* must be &event_type == &<this struct> */
 	struct khttpd_event_type event_type;
-	LIST_ENTRY(khttpd_socket) link;
-	STAILQ_HEAD(, khttpd_request) xmit_queue;
-	struct khttpd_server_port *port;
-	cap_rights_t		rights;
+	struct khttpd_socket	*socket;
 	khttpd_receive_t	receive;
-	khttpd_transmit_t	transmit;
-
-	/*
-	 * Members from khttpd_socket_zctor_begin to khttpd_socket_zctor_end
-	 * is cleared by ctor.
-	 */
-#define khttpd_socket_zctor_begin recv_limit
 	off_t			recv_limit;
-	struct file		*fp;
+
+#define khttpd_receiver_zero_begin recv_leftovers
 	struct mbuf		*recv_leftovers;
 	struct mbuf		*recv_ptr;
 	struct mbuf		*recv_bol_ptr;
 	struct khttpd_request	*recv_request;
 	struct mbuf		*recv_tail;
-	struct mbuf		*xmit_buf;
 	u_int			recv_off;
 	u_int			recv_bol_off;
-	unsigned		in_sockets_list:1;
 	unsigned		recv_found_bol:1;
 	unsigned		recv_eof:1;
 	unsigned		recv_drain:1;
-	unsigned		recv_shutdown:1;
-	unsigned		:0;
-	unsigned		xmit_busy:1;
+};
 
-#define khttpd_socket_zctor_end	peer_addr
-	struct sockaddr_storage peer_addr;
-	int		fd;
-	u_int		refcount;
+struct khttpd_xmitter {
+	/* must be &event_type == &<this struct> */
+	struct khttpd_event_type event_type;
+	struct khttpd_socket	*socket;
+	khttpd_transmit_t	transmit;
+
+#define khttpd_xmitter_zero_begin xmit_buf
+	struct mbuf		*xmit_buf;
+	unsigned		xmit_busy:1;
+};
+
+struct khttpd_socket {
+	LIST_ENTRY(khttpd_socket) link;		  /* (p) */
+	STAILQ_HEAD(, khttpd_request) xmit_queue; /* (s) */
+	struct mtx		lock;
+	int			fd;		   /* (r) */
+	u_int			refcount;	   /* (a) */
+	struct khttpd_receiver  recv;		   /* (0) */
+	struct khttpd_xmitter   xmit;		   /* (0) */
+
+#define khttpd_socket_zero_begin peer_addr
+	struct sockaddr_storage peer_addr;	   /* (r) */
+	struct khttpd_server_port *port;	   /* (r) */
+	struct file		*fp;		   /* (r) */
+	unsigned		recv_shutdown:1;   /* (s) */
+	unsigned		xmit_shutdown:1;   /* (s) */
+	unsigned		xmit_scheduled:1;  /* (s) */
+	unsigned		in_sockets_list:1; /* (p) */
 };
 
 LIST_HEAD(khttpd_socket_list, khttpd_socket);
@@ -233,15 +257,16 @@ struct khttpd_request {
 	const char	*query;
 	const char	*suffix;
 	u_int		transfer_encoding_count;
-	unsigned	may_respond:1;
+	unsigned	method:8;
+	unsigned	version_minor:8;
+	unsigned	close:1;
+	unsigned	continue_response:1;
 	unsigned	has_content_length:1;
 	unsigned	has_transfer_encoding:1;
-	unsigned	transfer_encoding_chunked:1;
+	unsigned	has_expect_continue:1;
+	unsigned	response_committed:1;
 	unsigned	receiving_chunk_and_trailer:1;
-	unsigned	continue_response:1;
-	unsigned	close:1;
-	char		method;
-	char		version_minor;
+	unsigned	transfer_encoding_chunked:1;
 
 #define khttpd_request_zctor_end	ref_count
 	u_int		ref_count;
@@ -260,12 +285,12 @@ struct khttpd_response {
 	struct mbuf	*trailer;
 	struct mbuf	*body;
 	u_int		body_refcnt;
+	unsigned	status:16;
 	unsigned	has_content_length:1;
 	unsigned	has_transfer_encoding:1;
 	unsigned	transfer_encoding_chunked:1;
 	unsigned	header_closed:1;
 	unsigned	close:1;
-	short		status;
 
 #define khttpd_response_zctor_end version_minor
 	char		version_minor;
@@ -316,25 +341,39 @@ struct khttpd_config_proc_args {
 	int			nfdes;
 };
 
+struct khttpd_worker {
+	TAILQ_ENTRY(khttpd_worker) link;
+};
+
+TAILQ_HEAD(khttpd_worker_queue, khttpd_worker);
+
 /* -------------------------------------------------- prototype declrations */
 
 static int khttpd_route_compare(struct khttpd_route *x,
     struct khttpd_route *y);
 
-static void khttpd_kevent_nop(struct kevent *event);
-
 static int khttpd_transmit_status_line_and_header
-    (struct khttpd_socket *socket, struct khttpd_request *request,
+    (struct khttpd_xmitter *xmitter, struct khttpd_request *request,
 	struct khttpd_response *response, struct mbuf **out);
 
-static int khttpd_receive_chunk(struct khttpd_socket *socket);
-static int khttpd_receive_body(struct khttpd_socket *socket);
-static int khttpd_receive_header_or_trailer(struct khttpd_socket *socket);
-static int khttpd_receive_request_line(struct khttpd_socket *socket);
+static int khttpd_receive_chunk(struct khttpd_receiver *receiver);
+static int khttpd_receive_body(struct khttpd_receiver *receiver);
+static int khttpd_receive_header_or_trailer(struct khttpd_receiver *receiver);
+static int khttpd_receive_request_line(struct khttpd_receiver *receiver);
 
-static void khttpd_handle_socket_event(struct kevent *event);
+static void khttpd_xmitter_init(struct khttpd_xmitter *,
+    struct khttpd_socket *);
+static void khttpd_xmitter_ctor(struct khttpd_xmitter *);
+static void khttpd_xmitter_dtor(struct khttpd_xmitter *);
+static void khttpd_xmitter_handle_event(struct kevent *event);
 
-static void khttpd_asterisc_received_header(struct khttpd_socket *socket,
+static void khttpd_receiver_init(struct khttpd_receiver *,
+    struct khttpd_socket *);
+static void khttpd_receiver_ctor(struct khttpd_receiver *);
+static void khttpd_receiver_dtor(struct khttpd_receiver *);
+static void khttpd_receiver_handle_event(struct kevent *event);
+
+static void khttpd_asterisc_received_header(struct khttpd_receiver *receiver,
     struct khttpd_request *request);
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
@@ -441,8 +480,10 @@ static const char *khttpd_default_mime_type_rules =
 static struct khttpd_label_list khttpd_method_hash_table[64];
 static struct khttpd_label_list khttpd_field_hash_table[16];
 
+static cap_rights_t khttpd_socket_rights;
 static struct mtx khttpd_lock;
 struct proc *khttpd_proc;
+struct thread *khttpd_main_thread;
 static struct thread *khttpd_logger_thread;
 static struct mbufq khttpd_logger_queue;
 static size_t khttpd_message_size_limit = 16384;
@@ -467,10 +508,6 @@ static struct cdevsw khttpd_cdevsw = {
  * khttpd process-local variables
  */
 
-static struct khttpd_event_type khttpd_stop_request_type = {
-	.handle_event = khttpd_kevent_nop
-};
-
 static struct khttpd_route_type khttpd_route_type_null = {
 	.name = "<no route>",
 	.received_header = khttpd_received_header_null,
@@ -487,11 +524,16 @@ static struct khttpd_socket_list khttpd_sockets =
 static struct khttpd_server_list khttpd_servers =
     SLIST_HEAD_INITIALIZER(khttpd_server_list);
 
+static struct khttpd_worker_queue khttpd_waiting_workers =
+    TAILQ_HEAD_INITIALIZER(khttpd_waiting_workers);
 static uma_zone_t khttpd_route_zone;
 static uma_zone_t khttpd_socket_zone;
 static uma_zone_t khttpd_request_zone;
 static uma_zone_t khttpd_response_zone;
 static int khttpd_kqueue;
+static int khttpd_worker_count;
+static int khttpd_worker_count_max;
+static boolean_t khttpd_worker_shutdown;
 static struct khttpd_log khttpd_debug_log;
 
 /* --------------------------------------------------- function definitions */
@@ -528,6 +570,9 @@ static void khttpd_log_wait_to_drain(struct khttpd_log *log)
 
 static void khttpd_log_close(struct khttpd_log *log)
 {
+
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
 	khttpd_log_wait_to_drain(log);
 
 	if (log->fd != -1) {
@@ -539,6 +584,8 @@ static void khttpd_log_close(struct khttpd_log *log)
 static void khttpd_log_set_fd(struct khttpd_log *log, int fd)
 {
 	int old_fd;
+
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	khttpd_log_wait_to_drain(log);
 
@@ -667,12 +714,6 @@ khttpd_field_find(const char *begin, const char *end)
  * kevent
  */
 
-static void
-khttpd_kevent_nop(struct kevent *event)
-{
-	TRACE("enter");
-}
-
 static int
 khttpd_kevent_copyout(void *arg, struct kevent *kevp, int count)
 {
@@ -698,149 +739,18 @@ khttpd_kevent_copyin(void *arg, struct kevent *kevp, int count)
 }
 
 static int
-khttpd_kevent_connection_arrival(int kq, int fd,
-    struct khttpd_event_type *etype)
+khttpd_kevent(int kq, struct kevent *changes, int nchanges,
+    struct kevent *eventlist, int nevents, int *nevent_out,
+    const struct timespec *timeout)
 {
-
-	TRACE("enter %d", fd);
-
-	struct kevent change = {
-		.ident	     = fd,
-		.filter	     = EVFILT_READ,
-		.flags	     = EV_ADD,
-		.fflags	     = 0,
-		.data	     = 0,
-		.udata	     = etype
-	};
-
-	struct khttpd_kevent_args args = {
-		.changelist = &change,
-		.eventlist  = NULL
-	};
-
-	struct kevent_copyops k_ops = {
-		&args,
-		khttpd_kevent_copyout,
-		khttpd_kevent_copyin	
-	};
-
-	return (kern_kevent(curthread, kq, 1, 0, &k_ops, NULL));
-}
-
-static int
-khttpd_kevent_socket_io(int kq, int fd, struct khttpd_event_type *etype)
-{
-
-	TRACE("enter %d", fd);
-
-	struct kevent changes[] = {
-		{
-			.ident	     = fd,
-			.filter	     = EVFILT_READ,
-			.flags	     = EV_ADD|EV_DISPATCH,
-			.fflags	     = 0,
-			.data	     = 0,
-			.udata	     = etype
-		},
-		{
-			.ident	     = fd,
-			.filter	     = EVFILT_WRITE,
-			.flags	     = EV_ADD|EV_DISPATCH|EV_DISABLE,
-			.fflags	     = 0,
-			.data	     = 0,
-			.udata	     = etype
-		}
-	};
-
-	struct khttpd_kevent_args args = {
-		.changelist = changes,
-		.eventlist  = NULL
-	};
-
-	struct kevent_copyops k_ops = {
-		&args,
-		khttpd_kevent_copyout,
-		khttpd_kevent_copyin	
-	};
-
-	return (kern_kevent(curthread, kq,
-		sizeof(changes) / sizeof(changes[0]), 0, &k_ops, NULL));
-}
-
-static int
-khttpd_kevent_enable_read(int kq, int fd, struct khttpd_event_type *etype)
-{
-	struct kevent change;
-	struct khttpd_kevent_args args = {
-		.changelist = &change,
-		.eventlist  = NULL
-	};
-	struct kevent_copyops k_ops = {
-		&args,
-		khttpd_kevent_copyout,
-		khttpd_kevent_copyin	
-	};
-
-	TRACE("enter %d", fd);
-
-	EV_SET(&change, fd, EVFILT_READ, EV_ENABLE, 0, 0, etype);
-
-	return (kern_kevent(curthread, kq, 1, 0, &k_ops, NULL));
-}
-
-static int
-khttpd_kevent_enable_write(int kq, int fd, struct khttpd_event_type *etype)
-{
-	struct kevent change;
-	struct khttpd_kevent_args args = {
-		.changelist = &change,
-		.eventlist  = NULL
-	};
-	struct kevent_copyops k_ops = {
-		&args,
-		khttpd_kevent_copyout,
-		khttpd_kevent_copyin	
-	};
-
-	TRACE("enter %d", fd);
-
-	EV_SET(&change, fd, EVFILT_WRITE, EV_ENABLE, 0, 0, etype);
-
-	return (kern_kevent(curthread, kq, 1, 0, &k_ops, NULL));
-}
-
-static int
-khttpd_kevent_add_signal(int kq, int signo, struct khttpd_event_type *etype)
-{
-	struct kevent change;
-	struct khttpd_kevent_args args = {
-		.changelist = &change,
-		.eventlist  = NULL,
-	};
-	struct kevent_copyops k_ops = {
-		&args,
-		khttpd_kevent_copyout,
-		khttpd_kevent_copyin	
-	};
-
-	TRACE("enter");
-
-	EV_SET(&change, signo, EVFILT_SIGNAL, EV_ADD, 0, 0,
-	    &khttpd_stop_request_type);
-
-	return (kern_kevent(curthread, kq, 1, 0, &k_ops, NULL));
-}
-
-static int
-khttpd_kevent_get(int kq, struct kevent *event)
-{
+	struct thread *td;
 	int error;
 
 	TRACE("enter");
 
 	struct khttpd_kevent_args args = {
-		.changelist = NULL,
-		.eventlist  = event
+		.changelist = changes,
+		.eventlist  = eventlist
 	};
 
 	struct kevent_copyops k_ops = {
@@ -849,10 +759,10 @@ khttpd_kevent_get(int kq, struct kevent *event)
 		khttpd_kevent_copyin	
 	};
 
-	error = kern_kevent(curthread, kq, 0, 1, &k_ops, NULL);
-
-	if (error == 0 && curthread->td_retval[0] == 0)
-		error = ETIMEDOUT;
+	td = curthread;
+	error = kern_kevent(td, kq, nchanges, nevents, &k_ops, timeout);
+	if (nevent_out != NULL)
+		*nevent_out = td->td_retval[0];
 
 	return (error);
 }
@@ -946,7 +856,6 @@ khttpd_route_find(struct khttpd_route *root,
 	const char *cp, *end;
 
 	TRACE("enter %s", target);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	parent = root;
 	cp = target;
@@ -1325,11 +1234,11 @@ khttpd_response_ctor(void *mem, int size, void *arg, int flags)
 	struct khttpd_response *response;
 
 	response = mem;
-	response->version_minor = 1;
 
 	bzero(&response->khttpd_response_zctor_begin,
 	    offsetof(struct khttpd_response, khttpd_response_zctor_end) -
 	    offsetof(struct khttpd_response, khttpd_response_zctor_begin));
+	response->version_minor = 1;
 
 	return (0);
 }
@@ -1365,8 +1274,6 @@ void khttpd_response_add_field(struct khttpd_response *response,
 {
 	va_list vl;
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
 	va_start(vl, value_fmt);
 	khttpd_response_vadd_field(response, field, value_fmt, vl);
 	va_end(vl);
@@ -1376,8 +1283,6 @@ void khttpd_response_vadd_field(struct khttpd_response *response,
     const char *field, const char *value_fmt, va_list vl)
 {
 	struct mbuf *m;
-
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (response->header_closed) {
 		if (!response->transfer_encoding_chunked)
@@ -1401,18 +1306,15 @@ void
 khttpd_response_set_status(struct khttpd_response *response, int status)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
 	KASSERT(response->status == 0, ("status=%d", response->status));
 	response->status = status;
 }
 
-static void
+void
 khttpd_response_set_content_length(struct khttpd_response *response,
     off_t length)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 	KASSERT(!response->has_content_length,
 	    ("Content-Length has already been set"));
 
@@ -1426,8 +1328,6 @@ void
 khttpd_response_set_connection_close(struct khttpd_response *response)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
 	if (response->close)
 		return;
 	khttpd_response_add_field(response, "Connection", "%s", "close");
@@ -1439,12 +1339,10 @@ khttpd_response_set_body_proc(struct khttpd_response *response,
     khttpd_transmit_t proc, off_t content_length)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 	KASSERT(!response->has_transfer_encoding && 
 	    !response->has_content_length,
-	    ("response=%p, transfer_encoding_chunked=%d, "
-		"has_content_length=%d",
-		response, response->transfer_encoding_chunked,
+	    ("transfer_encoding_chunked=%d, has_content_length=%d",
+		response->transfer_encoding_chunked,
 		response->has_content_length));
 
 	response->payload_size = content_length;
@@ -1458,14 +1356,11 @@ khttpd_response_set_body_mbuf(struct khttpd_response *response,
 {
 	off_t len;
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-	KASSERT(response->body == NULL,
-	    ("response %p has body %p", response, response->body));
+	KASSERT(response->body == NULL, ("response->body=%p", response->body));
 	KASSERT(!response->has_transfer_encoding &&
 	    !response->has_content_length,
-	    ("response=%p, transfer_encoding_chunked=%d, "
-		"has_content_length=%d",
-		response, response->transfer_encoding_chunked,
+	    ("transfer_encoding_chunked=%d, has_content_length=%d",
+		response->transfer_encoding_chunked,
 		response->has_content_length));
 
 	len = m_length(data, NULL);
@@ -1480,14 +1375,11 @@ khttpd_response_set_body_bytes(struct khttpd_response *response,
 {
 	struct mbuf *m;
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-	KASSERT(response->body == NULL,
-	    ("response %p has body %p", response, response->body));
+	KASSERT(response->body == NULL, ("response->body=%p", response->body));
 	KASSERT(!response->has_transfer_encoding &&
 	    !response->has_content_length,
-	    ("response=%p, transfer_encoding_chunked=%d, "
-		"has_content_length=%d",
-		response, response->transfer_encoding_chunked,
+	    ("transfer_encoding_chunked=%d, has_content_length=%d",
+		response->transfer_encoding_chunked,
 		response->has_content_length));
 
 	khttpd_response_set_content_length(response, size);
@@ -1512,10 +1404,10 @@ khttpd_socket_init(void *mem, int size, int flags)
 
 	socket = mem;
 
-	socket->event_type.handle_event = khttpd_handle_socket_event;
 	STAILQ_INIT(&socket->xmit_queue);
-	cap_rights_init(&socket->rights, CAP_EVENT, CAP_RECV, CAP_SEND,
-	    CAP_SETSOCKOPT, CAP_SHUTDOWN);
+	mtx_init(&socket->lock, "khttpd-socket", NULL, MTX_DEF);
+	khttpd_receiver_init(&socket->recv, socket);
+	khttpd_xmitter_init(&socket->xmit, socket);
 
 	return (0);
 }
@@ -1526,20 +1418,15 @@ khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
 	struct khttpd_socket *socket;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	socket = mem;
-
-	socket->receive = khttpd_receive_request_line;
-	socket->transmit = khttpd_transmit_status_line_and_header;
-
-	bzero(&socket->khttpd_socket_zctor_begin,
-	    offsetof(struct khttpd_socket, khttpd_socket_zctor_end) - 
-	    offsetof(struct khttpd_socket, khttpd_socket_zctor_begin));
-
 	socket->fd = -1;
 	refcount_init(&socket->refcount, 1);
-	socket->recv_limit = khttpd_message_size_limit;
+	khttpd_receiver_ctor(&socket->recv);
+	khttpd_xmitter_ctor(&socket->xmit);
+	bzero(&socket->khttpd_socket_zero_begin,
+	    sizeof(struct khttpd_socket) -
+	    offsetof(struct khttpd_socket, khttpd_socket_zero_begin));
 
 	return (0);
 }
@@ -1560,9 +1447,8 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 	KASSERT(!socket->in_sockets_list, ("still in sockets list."));
 	KASSERT(socket->refcount == 0, ("refcount=%d", socket->refcount));
 
-	m_freem(socket->recv_leftovers);
-	m_freem(socket->xmit_buf);
-	khttpd_request_free(socket->recv_request);
+	khttpd_receiver_dtor(&socket->recv);
+	khttpd_xmitter_dtor(&socket->xmit);
 
 	if (socket->fd != -1)
 		kern_close(td, socket->fd);
@@ -1575,7 +1461,6 @@ void
 khttpd_socket_hold(struct khttpd_socket *socket)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 	refcount_acquire(&socket->refcount);
 }
 
@@ -1583,7 +1468,6 @@ void
 khttpd_socket_free(struct khttpd_socket *socket)
 {
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 	if (socket != NULL && refcount_release(&socket->refcount))
 		uma_zfree(khttpd_socket_zone, socket);
 }
@@ -1596,22 +1480,53 @@ khttpd_socket_fd(struct khttpd_socket *socket)
 }
 
 static void
-khttpd_socket_clear_all_requests(struct khttpd_socket *socket)
+khttpd_socket_clear_queue(struct khttpd_socket *socket)
 {
 	struct khttpd_request *request;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	while ((request = STAILQ_FIRST(&socket->xmit_queue)) != NULL) {
 		STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
 		khttpd_request_free(request);
 	}
-	request = socket->recv_request;
-	if (request != NULL) {
-		khttpd_request_free(request);
-		socket->recv_request = NULL;
+}
+
+static void
+khttpd_socket_enqueue(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+
+	STAILQ_INSERT_TAIL(&socket->xmit_queue, request, link);
+}
+
+static void
+khttpd_socket_dequeue(struct khttpd_socket *socket, boolean_t shutdown)
+{
+	struct shutdown_args shutdown_args;
+	struct khttpd_request *request;
+
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	request = STAILQ_FIRST(&socket->xmit_queue);
+	STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
+
+	if (!socket->recv_shutdown && shutdown) {
+		khttpd_socket_clear_queue(socket);
+
+		shutdown_args.s = socket->fd;
+		shutdown_args.how = SHUT_WR;
+		sys_shutdown(curthread, &shutdown_args);
 	}
+
+	khttpd_request_free(request);
+}
+
+static struct khttpd_request *
+khttpd_socket_queue_first(struct khttpd_socket *socket)
+{
+	
+	return (STAILQ_FIRST(&socket->xmit_queue));
 }
 
 static void
@@ -1644,56 +1559,139 @@ khttpd_socket_close(struct khttpd_socket *socket)
 }
 
 static void
-khttpd_socket_drain(struct khttpd_socket *socket)
+khttpd_socket_close_if_finished(struct khttpd_socket *socket,
+    boolean_t shutdown_receiver)
+{
+
+	if (shutdown_receiver)
+		socket->recv_shutdown = TRUE;
+
+	if (socket->recv_shutdown && STAILQ_EMPTY(&socket->xmit_queue))
+		khttpd_socket_close(socket);
+}
+
+static void
+khttpd_socket_transmit_continue(struct khttpd_socket *socket, boolean_t remote)
+{
+	struct kevent change;
+	int error;
+
+	TRACE("enter %d", socket->fd);
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	if (remote && socket->xmit_scheduled)
+		return;
+
+	socket->xmit_scheduled = TRUE;
+
+	EV_SET(&change, socket->fd, EVFILT_WRITE, EV_ENABLE, 0, 0,
+	    &socket->xmit.event_type);
+
+	error = khttpd_kevent(khttpd_kqueue, &change, 1, NULL, 0, NULL, NULL);
+	if (error != 0)
+		log(LOG_WARNING, "%s: kevent error %d", __func__, error);
+}
+
+static void
+khttpd_socket_transmit_done(struct khttpd_socket *socket)
+{
+
+	TRACE("enter %d", socket->fd);
+
+	KASSERT(socket->xmit_scheduled,
+	    ("xmit_scheduled is FALSE. fd:%d ", socket->fd));
+	socket->xmit_scheduled = FALSE;
+}
+
+static void
+khttpd_socket_commit_response(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+
+	KASSERT(!request->response_committed || request->response->close,
+	    ("request->response_committed=%d, request->response->close=%d",
+		request->response_committed, request->response->close));
+
+	if (request->response_committed)
+		return;
+
+	request->response_committed = TRUE;
+
+	if (STAILQ_FIRST(&socket->xmit_queue) == request)
+		khttpd_socket_transmit_continue(socket, TRUE);
+}
+
+/*
+ * receiver
+ */
+
+static void
+khttpd_receiver_init(struct khttpd_receiver *receiver,
+    struct khttpd_socket *socket)
+{
+
+	receiver->event_type.handle_event = khttpd_receiver_handle_event;
+	receiver->socket = socket;
+}
+
+static void
+khttpd_receiver_ctor(struct khttpd_receiver *receiver)
+{
+
+	receiver->receive = khttpd_receive_request_line;
+	receiver->recv_limit = khttpd_message_size_limit;
+	bzero(&receiver->khttpd_receiver_zero_begin,
+	    sizeof(struct khttpd_receiver) - 
+	    offsetof(struct khttpd_receiver, khttpd_receiver_zero_begin));
+}
+
+static void
+khttpd_receiver_dtor(struct khttpd_receiver *receiver)
+{
+
+	m_freem(receiver->recv_leftovers);
+	khttpd_request_free(receiver->recv_request);
+}
+
+struct khttpd_socket *khttpd_receiver_socket(struct khttpd_receiver *receiver)
+{
+
+	return (receiver->socket);
+}
+
+static void
+khttpd_receiver_drain(struct khttpd_receiver *receiver)
 {
 	struct mbuf *m;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	m = socket->recv_ptr;
+	m = receiver->recv_ptr;
 	if (m != NULL) {
-		m->m_len = socket->recv_off;
+		m->m_len = receiver->recv_off;
 		m_freem(m->m_next);
 		m->m_next = NULL;
 
-		socket->recv_ptr = NULL;
-		socket->recv_off = 0;
+		receiver->recv_ptr = NULL;
+		receiver->recv_off = 0;
 	}
 
-	socket->recv_drain = TRUE;
+	receiver->recv_drain = TRUE;
 }
 
 static void
-khttpd_socket_shutdown(struct khttpd_socket *socket)
-{
-	struct shutdown_args shutdown_args;
-
-	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	shutdown_args.s = socket->fd;
-	shutdown_args.how = SHUT_WR;
-	sys_shutdown(curthread, &shutdown_args);
-
-	khttpd_socket_clear_all_requests(socket);
-}
-
-static void
-khttpd_socket_set_limit(struct khttpd_socket *socket, off_t size)
+khttpd_receiver_set_limit(struct khttpd_receiver *receiver, off_t size)
 {
 	int len;
 
 	TRACE("enter %jd", (intmax_t)size);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	len = m_length(socket->recv_ptr, NULL) - socket->recv_off;
-	socket->recv_limit = size - len;
-	TRACE("enter %jd, %d", (intmax_t)socket->recv_limit, len);
+	len = m_length(receiver->recv_ptr, NULL) - receiver->recv_off;
+	receiver->recv_limit = size - len;
 }
 
 static int
-khttpd_socket_read(struct khttpd_socket *socket)
+khttpd_receiver_read(struct khttpd_receiver *receiver)
 {
 	struct uio auio;
 	struct mbuf *m;
@@ -1701,10 +1699,10 @@ khttpd_socket_read(struct khttpd_socket *socket)
 	ssize_t resid;
 	int error, flags;
 
-	TRACE("enter %ld", socket->recv_limit);
+	TRACE("enter %ld", receiver->recv_limit);
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	resid = MIN(SSIZE_MAX, socket->recv_limit);
+	resid = MIN(SSIZE_MAX, receiver->recv_limit);
 	if (resid <= 0) {
 		TRACE("error resid %jd", (intmax_t)resid);
 		return (ENOBUFS);
@@ -1715,34 +1713,34 @@ khttpd_socket_read(struct khttpd_socket *socket)
 	auio.uio_resid = resid;
 	flags = 0;
 	m = NULL;
-	error = soreceive(socket->fp->f_data, NULL, &auio, &m, NULL, &flags);
+	error = soreceive(receiver->socket->fp->f_data, NULL, &auio, &m, NULL,
+	    &flags);
 	if (error != 0) {
 		TRACE("error soreceive %d", error);
 		return (error);
 	}
 	if (auio.uio_resid == resid) {
 		TRACE("eof");
-		socket->recv_eof = TRUE;
+		receiver->recv_eof = TRUE;
 		return (0);
 	}
 
-	socket->recv_limit -= resid - auio.uio_resid;
-	TRACE("limit %ld (-%ld)", socket->recv_limit, resid - auio.uio_resid);
+	receiver->recv_limit -= resid - auio.uio_resid;
 
-	if (socket->recv_ptr == NULL)
-		socket->recv_ptr = m;
+	if (receiver->recv_ptr == NULL)
+		receiver->recv_ptr = m;
 	else {
-		m_cat(socket->recv_tail, m);
-		m = socket->recv_tail;
+		m_cat(receiver->recv_tail, m);
+		m = receiver->recv_tail;
 	}
 
-	m_length(m, &socket->recv_tail);
+	receiver->recv_tail = m == NULL ? NULL : m_last(m);
 
 	return (0);
 }
 
 static int
-khttpd_socket_next_line(struct khttpd_socket *socket, 
+khttpd_receiver_next_line(struct khttpd_receiver *receiver, 
     struct khttpd_mbuf_pos *bol)
 {
 	const char *begin, *cp, *end;
@@ -1751,37 +1749,44 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 	int error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	/*
 	 * If there is no receiving mbuf chain, receive from the socket.
 	 */
 
-	if (socket->recv_ptr == NULL) {
-		error = khttpd_socket_read(socket);
+	if (receiver->recv_ptr == NULL) {
+		error = khttpd_receiver_read(receiver);
 		if (error != 0)
 			return (error);
-		if (socket->recv_eof) {
+		if (receiver->recv_eof) {
 			khttpd_mbuf_pos_init(bol, NULL, 0);
 			return (ENOENT);
 		}
 	}
 
-	ptr = socket->recv_ptr;
-	off = socket->recv_off;
+	ptr = receiver->recv_ptr;
+	off = receiver->recv_off;
 
-	if (socket->recv_bol_ptr == NULL) {
-		socket->recv_bol_ptr = ptr;
-		socket->recv_bol_off = off;
+	if (receiver->recv_bol_ptr == NULL) {
+		receiver->recv_bol_ptr = ptr;
+		receiver->recv_bol_off = off;
 	}
 
 	for (;;) {
-		/* Find the first '\n' in a mbuf. */
+		/* Find the first '\n' in the mbuf pointed by ptr. */
+
 		begin = mtod(ptr, char *);
 		end = begin + ptr->m_len;
 		cp = khttpd_find_ch_in(begin + off, end, '\n');
-		if (cp != NULL)
-			break;
+		if (cp != NULL) {
+			receiver->recv_ptr = ptr;
+			receiver->recv_off = cp + 1 - begin;
+			khttpd_mbuf_pos_init(bol, receiver->recv_bol_ptr,
+			    receiver->recv_bol_off);
+			receiver->recv_bol_ptr = NULL;
+
+			return (0);
+		}
 
 		/*
 		 * No '\n' found.  Receive further if we reached the end of
@@ -1789,18 +1794,19 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 		 */
 
 		if (ptr->m_next == NULL) {
-			socket->recv_ptr = ptr;
-			socket->recv_off = off = ptr->m_len;
-			error = khttpd_socket_read(socket);
+			receiver->recv_ptr = ptr;
+			receiver->recv_off = off = ptr->m_len;
+			error = khttpd_receiver_read(receiver);
 			if (error != 0)
 				return (error);
-			if (socket->recv_eof) {
-				khttpd_mbuf_pos_init(bol, socket->recv_bol_ptr,
-				    socket->recv_bol_off);
-				socket->recv_bol_ptr = NULL;
-				return (ENOENT);
-			}
-			continue;
+			if (!receiver->recv_eof)
+				continue;
+
+			khttpd_mbuf_pos_init(bol, receiver->recv_bol_ptr,
+			    receiver->recv_bol_off);
+			receiver->recv_bol_ptr = NULL;
+
+			return (ENOENT);
 		}
 
 		/* Advance to the next mbuf */
@@ -1808,107 +1814,19 @@ khttpd_socket_next_line(struct khttpd_socket *socket,
 		ptr = ptr->m_next;
 		off = 0;
 	}
-
-	socket->recv_ptr = ptr;
-	socket->recv_off = cp + 1 - begin;
-	khttpd_mbuf_pos_init(bol, socket->recv_bol_ptr, socket->recv_bol_off);
-	socket->recv_bol_ptr = NULL;
-
-	return (0);
-}
-
-/*
- * 
- */
-
-static struct khttpd_server *
-khttpd_server_alloc(const char *name)
-{
-	struct khttpd_server *result;
-
-	result = khttpd_malloc(sizeof(struct khttpd_server));
-	result->name = strdup(name, M_KHTTPD);
-	result->dev = NULL;
-	result->route_root = uma_zalloc_arg(khttpd_route_zone,
-	    &khttpd_route_type_null, M_WAITOK);
-	SLIST_INIT(&result->ports);
-	khttpd_log_init(&result->access_log);
-	khttpd_log_init(&result->error_log);
-
-	return (result);
-}
-
-static void
-khttpd_server_free(struct khttpd_server *server)
-{
-	struct thread *td;
-
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	td = curthread;
-
-	khttpd_log_close(&server->access_log);
-	khttpd_log_close(&server->error_log);
-	khttpd_route_clear_all(server->route_root);
-	khttpd_route_free(server->route_root);
-	if (server->dev != NULL)
-		destroy_dev(server->dev);
-	free((void *)server->name, M_KHTTPD);
-
-	khttpd_free(server);
-}
-
-struct khttpd_server *
-khttpd_server_find(const char *name)
-{
-	struct khttpd_server *server;
-
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
- 
-	SLIST_FOREACH(server, &khttpd_servers, link)
-		if (strcmp(server->name, name) == 0)
-			return (server);
-
-	return (NULL);
-}
-
-struct khttpd_route *
-khttpd_server_route_root(struct khttpd_server *server)
-{
-
-	return server->route_root;
-}
-
-/*
- * 
- */
-
-static void
-khttpd_socket_transmit_resume(struct khttpd_socket *socket)
-{
-
-	TRACE("enter %d", socket->fd);
-
-	if (socket->xmit_busy)
-		return;
-
-	khttpd_kevent_enable_write(khttpd_kqueue, socket->fd,
-	    &socket->event_type);
-	socket->xmit_busy = TRUE;
 }
 
 void
-khttpd_set_response(struct khttpd_socket *socket,
+khttpd_set_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_response *response)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (response->status == 0 || response->status / 100 == 1) {
 		log(LOG_WARNING, "invalid status %d for %p.", response->status,
 		    response);
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return;
 	}
 
@@ -1927,12 +1845,12 @@ khttpd_set_response(struct khttpd_socket *socket,
 			    "successful response(%d)",
 			    request->response->status, response->status);
 
-		if (request->may_respond)
+		if (request->response_committed)
 			log(LOG_WARNING, "a non-closing response %p has "
 			    "already started sending for request %p",
 			    request->response, request);
 
-		if (request->may_respond || !response->close ||
+		if (request->response_committed || !response->close ||
 		    request->response->close) {
 			khttpd_response_free(response);
 			return;
@@ -1940,174 +1858,22 @@ khttpd_set_response(struct khttpd_socket *socket,
 
 		khttpd_response_free(request->response);
 	}
-	request->response = response;
 	request->continue_response = FALSE;
+	request->response = response;
 
 	if (response->close) {
-		request->may_respond = TRUE;
-		khttpd_socket_drain(socket);
+		khttpd_receiver_drain(receiver);
+		khttpd_socket_commit_response(receiver->socket, request);
 	}
-
-	if (request->may_respond &&
-	    STAILQ_FIRST(&socket->xmit_queue) == request)
-		khttpd_socket_transmit_resume(socket);
-}
-
-static int
-khttpd_transmit_end(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	struct thread *td;
-	boolean_t close;
-
-	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	td = curthread;
-	close = response->close;
-
-	khttpd_access(socket->port->server, socket, request);
-
-	KASSERT(request == STAILQ_FIRST(&socket->xmit_queue),
-	    ("request %p, first %p", request,
-		STAILQ_FIRST(&socket->xmit_queue)));
-	STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
-	khttpd_request_free(request);
-
-	socket->transmit = khttpd_transmit_status_line_and_header;
-
-	if (socket->recv_shutdown && STAILQ_EMPTY(&socket->xmit_queue))
-		khttpd_socket_close(socket);
-	else if (close)
-		khttpd_socket_shutdown(socket);
-
-	return (0);
-}
-
-static int
-khttpd_transmit_trailer(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	struct mbuf *m;
-
-	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	*out = m = m_gethdr(M_WAITOK, MT_DATA);
-	khttpd_mbuf_printf(m, "0\r\n");
-
-	m_cat(m, response->trailer);
-	response->trailer = NULL;
-
-	khttpd_mbuf_printf(m, "\r\n");
-
-	socket->transmit = khttpd_transmit_end;
-
-	return (0);
-}
-
-static int
-khttpd_transmit_chunk(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	struct mbuf *m, *head;
-	off_t len;
-	int error;
-
-	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	m = NULL;
-	error = response->transmit_body(socket, request, response, &m);
-	if (error != 0) {
-		TRACE("error provide_chunk_data %d", error);
-		return (error);
-	}
-
-	if (m == NULL) {
-		socket->transmit = khttpd_transmit_trailer;
-		return (0);
-	}
-
-	KASSERT(0 < m_length(m, NULL),
-	    ("provide_chunk_data returned an empty chain"));
-
-	*out = head = m_gethdr(M_WAITOK, MT_DATA);
-	len = m_length(m, NULL);
-	response->payload_size += len;
-	khttpd_mbuf_printf(head, "%jx\r\n", (uintmax_t)len);
-	m_cat(head, m);
-	khttpd_mbuf_printf(head, "\r\n");
-
-	return (0);
-}
-
-static int
-khttpd_transmit_status_line_and_header(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	struct mbuf *m;
-
-	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	*out = m = m_gethdr(M_WAITOK, MT_DATA);
-	khttpd_mbuf_printf(m, "HTTP/1.%d %d n/a\r\n", response->version_minor,
-	    response->status);
-	response->header_closed = TRUE;
-
-	m_cat(m, response->header);
-	response->header = NULL;
-
-	khttpd_mbuf_append(m, khttpd_crlf, khttpd_crlf + sizeof(khttpd_crlf));
-
-	if (response->status == 204 || response->status == 304 ||
-	    request->method == KHTTPD_METHOD_HEAD)
-		socket->transmit = khttpd_transmit_end;
-
-	else if (response->transfer_encoding_chunked)
-		socket->transmit = khttpd_transmit_chunk;
-
-	else if (0 < response->content_length) {
-		if (response->body == NULL)
-			socket->transmit = response->transmit_body;
-		else {
-			response->payload_size = m_length(response->body,
-			    NULL);
-			m_cat(m, response->body);
-			response->body = NULL;
-			socket->transmit = khttpd_transmit_end;
-		}
-	} else
-		socket->transmit = khttpd_transmit_end;
-
-	return (0);
-}
-
-void khttpd_transmit_finished(struct khttpd_socket *socket)
-{
-
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-	KASSERT(socket->transmit == 
-	    STAILQ_FIRST(&socket->xmit_queue)->response->transmit_body,
-	    ("khttpd_transmit_finished must not be called from other than "
-		"the specified transmit function"));
-
-	socket->transmit = khttpd_transmit_end;
 }
 
 void
-khttpd_set_static_response(struct khttpd_socket *socket,
+khttpd_set_static_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     int status, const char *content, boolean_t close)
 {
 
 	TRACE("enter %d %d", status, close);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (response == NULL)
 		response = khttpd_response_alloc();
@@ -2124,11 +1890,11 @@ khttpd_set_static_response(struct khttpd_socket *socket,
 		    "text/html; charset=US-ASCII");
 	}
 
-	khttpd_set_response(socket, request, response);
+	khttpd_set_response(receiver, request, response);
 }
 
 void
-khttpd_set_error_response(struct khttpd_socket *socket,
+khttpd_set_error_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     int status, const char *reason, const char *description, boolean_t close)
 {
@@ -2146,8 +1912,6 @@ khttpd_set_error_response(struct khttpd_socket *socket,
 
 	struct mbuf *mbuf;
 
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
 	if (response == NULL)
 		response = khttpd_response_alloc();
 
@@ -2161,50 +1925,47 @@ khttpd_set_error_response(struct khttpd_socket *socket,
 	khttpd_response_set_body_mbuf(response, mbuf);
 	khttpd_response_add_field(response, "Content-Type", "%s",
 	    "text/html; charset=US-ASCII");
-	khttpd_set_response(socket, request, response);
+	khttpd_set_response(receiver, request, response);
 }
 
 void
-khttpd_set_moved_permanently_response(struct khttpd_socket *socket,
+khttpd_set_moved_permanently_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     const char *target)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (response == NULL)
 		response = khttpd_response_alloc();
 	khttpd_response_add_field(response, "Location", "%s", target);
-	khttpd_set_error_response(socket, request, response, 301,
+	khttpd_set_error_response(receiver, request, response, 301,
 	    "Moved Permanently",
 	    "The target resource has been assigned a new permanent URI.",
 	    FALSE);
 }
 
 void
-khttpd_set_bad_request_response(struct khttpd_socket *socket,
+khttpd_set_bad_request_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 400,
+	khttpd_set_error_response(receiver, request, NULL, 400,
 	    "Bad Request",
 	    "A request that this server could not understand was sent.",
 	    TRUE);
 }
 
 void
-khttpd_set_length_required_response(struct khttpd_socket *socket,
+khttpd_set_length_required_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 411,
+	khttpd_set_error_response(receiver, request, NULL, 411,
 	    "Length Required",
 	    "The server refused to accept the request "
 	    "without a defined Content-Length.",
@@ -2212,87 +1973,81 @@ khttpd_set_length_required_response(struct khttpd_socket *socket,
 }
 
 void
-khttpd_set_payload_too_large_response(struct khttpd_socket *socket,
+khttpd_set_payload_too_large_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 413,
+	khttpd_set_error_response(receiver, request, NULL, 413,
 	    "Payload Too Large",
 	    "The request payload is larger than this server could handle.",
 	    TRUE);
 }
 
 void
-khttpd_set_not_implemented_response(struct khttpd_socket *socket,
+khttpd_set_not_implemented_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, boolean_t close)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 501,
+	khttpd_set_error_response(receiver, request, NULL, 501,
 	    "Not Implemented",
 	    "The server does not support the requested functionality.",
 	    close);
 }
 
 void
-khttpd_set_not_found_response(struct khttpd_socket *socket,
+khttpd_set_not_found_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, boolean_t close)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 404,
+	khttpd_set_error_response(receiver, request, NULL, 404,
 	    "Not Found",
 	    "The server does not have the requested resource.", close);
 }
 
 void
-khttpd_set_method_not_allowed_response(struct khttpd_socket *socket,
+khttpd_set_method_not_allowed_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, boolean_t close,
     const char *allowed_methods)
 {
 	struct khttpd_response *response;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	response = khttpd_response_alloc();
 	khttpd_response_add_field(response, "Allow", "%s", allowed_methods);
-	khttpd_set_error_response(socket, request, response, 405,
+	khttpd_set_error_response(receiver, request, response, 405,
 	    "Method Not Allowed",
 	    "The requested method is not supported by the target resource.",
 	    close);
 }
 
 void
-khttpd_set_conflict_response(struct khttpd_socket *socket,
+khttpd_set_conflict_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, boolean_t close)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 404,
+	khttpd_set_error_response(receiver, request, NULL, 404,
 	    "Conflict",
 	    "The request could not be completed due to a conflict with the "
 	    "current state of the target resource.", close);
 }
 
 void
-khttpd_set_uri_too_long_response(struct khttpd_socket *socket,
+khttpd_set_uri_too_long_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 414,
+	khttpd_set_error_response(receiver, request, NULL, 414,
 	    "URI Too Long",
 	    "The request target is longer than the "
 	    "server is willing to interpret.", TRUE);
@@ -2304,39 +2059,36 @@ khttpd_set_uri_too_long_response(struct khttpd_socket *socket,
  */
 void
 khttpd_set_request_header_field_too_large_response
-(struct khttpd_socket *socket, struct khttpd_request *request)
+(struct khttpd_receiver *receiver, struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 431,
+	khttpd_set_error_response(receiver, request, NULL, 431,
 	    "Request Header Fields Too Large",
 	    "The header fields in the request is too large.", TRUE);
 }
 
 void
-khttpd_set_internal_error_response(struct khttpd_socket *socket,
+khttpd_set_internal_error_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_set_error_response(socket, request, NULL, 500,
+	khttpd_set_error_response(receiver, request, NULL, 500,
 	    "Internal Server Error",
 	    "The server encountered an unexpected condition "
 	    "that prevent it from fulfilling the request.", TRUE);
 }
 
 void
-khttpd_set_options_response(struct khttpd_socket *socket,
+khttpd_set_options_response(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     const char *allowed_methods)
 {
 
 	TRACE("enter %s", allowed_methods);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (response == NULL)
 		response = khttpd_response_alloc();
@@ -2346,79 +2098,163 @@ khttpd_set_options_response(struct khttpd_socket *socket,
 	khttpd_response_set_content_length(response, 0);
 	khttpd_response_add_field(response, "Allow", "%s", allowed_methods);
 
-	khttpd_set_response(socket, request, response);
+	khttpd_set_response(receiver, request, response);
+}
+
+static int
+khttpd_receiver_receive_null(struct khttpd_receiver *receiver)
+{
+	struct uio auio;
+	struct socket *so;
+	struct thread *td;
+	struct mbuf *m;
+	int error, flags;
+
+	TRACE("enter");
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	td = curthread;
+	so = receiver->socket->fp->f_data;
+
+	bzero(&auio, sizeof(auio));
+	for (;;) {
+		auio.uio_resid = INT_MAX;
+		m = NULL;
+		flags = 0;
+		error = soreceive(so, NULL, &auio, &m, NULL, &flags);
+		m_freem(m);
+
+		if (error != 0) {
+			TRACE("error soreceive %d", error);
+			break;
+		}
+
+		if (auio.uio_resid == INT_MAX) {
+			receiver->recv_eof = TRUE;
+			break;
+		}
+	}
+
+	return (error);
+}
+
+static void
+khttpd_receiver_handle_event(struct kevent *event)
+{
+	struct kevent change;
+	struct khttpd_receiver *receiver;
+	struct khttpd_socket *socket;
+	int error;
+
+	TRACE("enter %td", event->ident);
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	receiver = event->udata;
+	socket = receiver->socket;
+
+	error = 0;
+	for (;;) {
+		if (receiver->recv_eof)
+			break;
+
+		if (receiver->recv_drain) {
+			if (receiver->recv_request != NULL) {
+				khttpd_request_free(receiver->recv_request);
+				receiver->recv_request = NULL;
+			}
+
+			error = khttpd_receiver_receive_null(receiver);
+		} else
+			error = receiver->receive(receiver);
+
+		if (error != 0)
+			break;
+	}
+
+	if (error == EWOULDBLOCK) {
+		EV_SET(&change, socket->fd, EVFILT_READ, EV_ENABLE, 0, 0,
+		    &receiver->event_type);
+		error = khttpd_kevent(khttpd_kqueue, &change, 1, NULL, 0, NULL,
+		    NULL);
+		if (error != 0)
+			log(LOG_WARNING, "%s: kevent failed: %d",
+			    __func__, error);
+
+	} else if (error != 0) {
+		log(LOG_WARNING,
+		    "khttpd: unexpected error in socket->receive: %d", error);
+		khttpd_receiver_drain(receiver);
+		receiver->recv_eof = TRUE;
+	}
+
+	khttpd_socket_close_if_finished(socket, receiver->recv_eof);
 }
 
 void
-khttpd_received_header_null(struct khttpd_socket *socket,
+khttpd_received_header_null(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 }
 
 void
-khttpd_received_body_null(struct khttpd_socket *socket,
+khttpd_received_body_null(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct mbuf *m)
 {
 }
 
 void
-khttpd_end_of_message_null(struct khttpd_socket *socket,
+khttpd_end_of_message_null(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 }
 
 static void
-khttpd_terminate_received_mbuf_chain(struct khttpd_socket *socket)
+khttpd_terminate_received_mbuf_chain(struct khttpd_receiver *receiver)
 {
 	struct mbuf *ptr;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	ptr = m_split(socket->recv_ptr, socket->recv_off, M_WAITOK);
-	socket->recv_ptr = socket->recv_leftovers = ptr;
-	socket->recv_off = 0;
-	m_length(ptr, &socket->recv_tail);
+	ptr = m_split(receiver->recv_ptr, receiver->recv_off, M_WAITOK);
+	receiver->recv_ptr = receiver->recv_leftovers = ptr;
+	receiver->recv_off = 0;
+	receiver->recv_tail = ptr == NULL ? NULL : m_last(ptr);
 }
 
 static void
-khttpd_finish_receiving_request(struct khttpd_socket *socket,
+khttpd_finish_receiving_request(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-	KASSERT(request == socket->recv_request,
-	    ("request=%p, socket->recv_request=%p", request,
-		socket->recv_request));
+	KASSERT(request == receiver->recv_request,
+	    ("request=%p, receiver->recv_request=%p", request,
+		receiver->recv_request));
 
-	request->end_of_message(socket, request);
+	request->end_of_message(receiver, request);
+	KASSERT(request->response != NULL, ("not responded"));
+	khttpd_socket_commit_response(receiver->socket, request);
 
-	if (request->close)
-		khttpd_socket_drain(socket);
-	else {
-		socket->receive = khttpd_receive_request_line;
-		khttpd_socket_set_limit(socket, khttpd_message_size_limit);
-	}
+	receiver->receive = khttpd_receive_request_line;
+	khttpd_receiver_set_limit(receiver, khttpd_message_size_limit);
 }
 
 static int
-khttpd_receive_crlf_following_chunk_data(struct khttpd_socket *socket)
+khttpd_receive_crlf_following_chunk_data(struct khttpd_receiver *receiver)
 {
 	struct khttpd_mbuf_pos pos;
 	struct khttpd_request *request;
 	int ch, error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	request = socket->recv_request;
+	request = receiver->recv_request;
 
-	error = khttpd_socket_next_line(socket, &pos);
+	error = khttpd_receiver_next_line(receiver, &pos);
 	if (error != 0)
 		TRACE("error %d", error);
 	if (error == ENOENT) {
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return (0);
 	}
 	if (error != 0)
@@ -2428,15 +2264,15 @@ khttpd_receive_crlf_following_chunk_data(struct khttpd_socket *socket)
 	if (ch == '\r')
 		ch = khttpd_mbuf_getc(&pos);
 	if (ch != '\n')
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 
-	socket->receive = khttpd_receive_chunk;
+	receiver->receive = khttpd_receive_chunk;
 
 	return (0);
 }
 
 static int
-khttpd_receive_chunk(struct khttpd_socket *socket)
+khttpd_receive_chunk(struct khttpd_receiver *receiver)
 {
 	struct khttpd_mbuf_pos pos;
 	off_t len;
@@ -2445,14 +2281,13 @@ khttpd_receive_chunk(struct khttpd_socket *socket)
 	char ch;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	request = socket->recv_request;
+	request = receiver->recv_request;
 
-	error = khttpd_socket_next_line(socket, &pos);
+	error = khttpd_receiver_next_line(receiver, &pos);
 	if (error != 0) {
 		TRACE("error next_line %d", error);
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return (0);
 	}
 
@@ -2470,7 +2305,7 @@ khttpd_receive_chunk(struct khttpd_socket *socket)
 
 		if ((len << 4) < len) {
 			TRACE("error range");
-			khttpd_set_payload_too_large_response(socket,
+			khttpd_set_payload_too_large_response(receiver,
 			    request);
 			return (0);
 		}
@@ -2478,23 +2313,23 @@ khttpd_receive_chunk(struct khttpd_socket *socket)
 		len = (len << 4) + nibble;
 	}
 
-	khttpd_terminate_received_mbuf_chain(socket);
+	khttpd_terminate_received_mbuf_chain(receiver);
 	m_freem(pos.ptr);
 
 	if (len == 0) {
-		socket->receive = khttpd_receive_header_or_trailer;
+		receiver->receive = khttpd_receive_header_or_trailer;
 
 	} else {
 		request->payload_size += len;
-		khttpd_socket_set_limit(socket, len);
-		socket->receive = khttpd_receive_body;
+		khttpd_receiver_set_limit(receiver, len);
+		receiver->receive = khttpd_receive_body;
 	}
 
 	return (0);
 }
 
 static int
-khttpd_receive_body(struct khttpd_socket *socket)
+khttpd_receive_body(struct khttpd_receiver *receiver)
 {
 	off_t resid;
 	struct khttpd_request *request;
@@ -2503,60 +2338,59 @@ khttpd_receive_body(struct khttpd_socket *socket)
 	int error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	td = curthread;
-	request = socket->recv_request;
-	resid = socket->recv_limit + m_length(socket->recv_leftovers, NULL);
+	request = receiver->recv_request;
+	resid = receiver->recv_limit +
+	    m_length(receiver->recv_leftovers, NULL);
 	while (0 < resid) {
-		m = socket->recv_leftovers;
+		m = receiver->recv_leftovers;
 		if (m == NULL) {
-			error = khttpd_socket_read(socket);
-			if (socket->recv_eof)
+			error = khttpd_receiver_read(receiver);
+			if (receiver->recv_eof)
 				error = 0;
 			if (error != 0)
 				return (error);
-			m = socket->recv_leftovers;
+			m = receiver->recv_leftovers;
 		}
 
 		tail = m_split(m, resid, M_WAITOK);
 
-		resid = tail != NULL ? 0 : socket->recv_limit;
-		socket->recv_leftovers = socket->recv_ptr = tail;
-		socket->recv_off = 0;
+		resid = tail != NULL ? 0 : receiver->recv_limit;
+		receiver->recv_leftovers = receiver->recv_ptr = tail;
+		receiver->recv_off = 0;
 
-		request->received_body(socket, request, m);
+		request->received_body(receiver, request, m);
 	}
 
 	if (request->receiving_chunk_and_trailer) {
-		khttpd_socket_set_limit(socket, khttpd_message_size_limit);
-		socket->receive = khttpd_receive_crlf_following_chunk_data;
+		khttpd_receiver_set_limit(receiver, khttpd_message_size_limit);
+		receiver->receive = khttpd_receive_crlf_following_chunk_data;
 
 	} else
-		khttpd_finish_receiving_request(socket, request);
+		khttpd_finish_receiving_request(receiver, request);
 
 	return (0);
 }
 
 static void
-khttpd_receive_content_length_field(struct khttpd_socket *socket,
+khttpd_receive_content_length_field(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_mbuf_pos *pos)
 {
 	uintmax_t value;
 	int error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	error = khttpd_mbuf_parse_digits(pos, &value);
 
 	if (error == ERANGE || OFF_MAX < value) {
-		khttpd_set_payload_too_large_response(socket, request);
+		khttpd_set_payload_too_large_response(receiver, request);
 		return;
 	}
 
 	if (error != 0 || request->has_content_length) {
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return;
 	}
 
@@ -2565,7 +2399,7 @@ khttpd_receive_content_length_field(struct khttpd_socket *socket,
 }
 
 static void
-khttpd_receive_transfer_encoding_field(struct khttpd_socket *socket,
+khttpd_receive_transfer_encoding_field(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_mbuf_pos *pos)
 {
 	char token_buffer[8];
@@ -2574,7 +2408,6 @@ khttpd_receive_transfer_encoding_field(struct khttpd_socket *socket,
 	boolean_t last_is_chunked;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	sbuf_new(&token, token_buffer, sizeof(token_buffer), SBUF_FIXEDLEN);
 
@@ -2605,16 +2438,15 @@ khttpd_receive_transfer_encoding_field(struct khttpd_socket *socket,
 	request->transfer_encoding_chunked = last_is_chunked;
 
 	if (1 < count || (0 < count && !last_is_chunked))
-		khttpd_set_not_implemented_response(socket, request, TRUE);
+		khttpd_set_not_implemented_response(receiver, request, TRUE);
 }
 
 static void
-khttpd_receive_connection_field(struct khttpd_socket *socket,
+khttpd_receive_connection_field(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_mbuf_pos *pos)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	request->close = khttpd_mbuf_list_contains_token(pos, "close", TRUE);
 	if (request->response != NULL)
@@ -2622,7 +2454,7 @@ khttpd_receive_connection_field(struct khttpd_socket *socket,
 }
 
 static void
-khttpd_receive_expect_field(struct khttpd_socket *socket,
+khttpd_receive_expect_field(struct khttpd_receiver *receiver,
     struct khttpd_request *request, struct khttpd_mbuf_pos *pos)
 {
 	char token_buffer[16];
@@ -2630,7 +2462,6 @@ khttpd_receive_expect_field(struct khttpd_socket *socket,
 	int error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	if (request->version_minor < 1 || request->continue_response)
 		return;
@@ -2657,14 +2488,13 @@ khttpd_receive_expect_field(struct khttpd_socket *socket,
 }
 
 static void
-khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
+khttpd_end_of_header_or_trailer(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	khttpd_terminate_received_mbuf_chain(socket);
+	khttpd_terminate_received_mbuf_chain(receiver);
 
 	/*
 	 * If this is the end of a trailer, we've done for this request
@@ -2672,7 +2502,7 @@ khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
 	 */
 
 	if (request->receiving_chunk_and_trailer) {
-		khttpd_finish_receiving_request(socket, request);
+		khttpd_finish_receiving_request(receiver, request);
 		return;
 	}
 
@@ -2680,7 +2510,7 @@ khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
 	 * Call route type's received_header handler.
 	 */
 
-	(*request->route->type->received_header)(socket, request);
+	(*request->route->type->received_header)(receiver, request);
 
 	/*
 	 * Start receiving chunked payload if chunked Transfer-Encoding is
@@ -2690,27 +2520,10 @@ khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
 	request->receiving_chunk_and_trailer = 
 	    request->transfer_encoding_chunked;
 	if (request->receiving_chunk_and_trailer) {
-		/*
-		 * We don't set may_respond TRUE in this case.  Once the
-		 * transmission of a response without 'Connection: close'
-		 * starts, we can't cancel it.  So setting may_respond
-		 * disables our ability to send an error response with
-		 * 'Connection: close' later and we need such an ability if
-		 * there is an error in a chunk.
-		 */
-		khttpd_socket_set_limit(socket, khttpd_message_size_limit);
-		socket->receive = khttpd_receive_chunk;
+		khttpd_receiver_set_limit(receiver, khttpd_message_size_limit);
+		receiver->receive = khttpd_receive_chunk;
 		return;
 	}
-
-	/*
-	 * After this code, the response corresponds to the request is
-	 * transmitted to the request sender.
-	 */
-
-	request->may_respond = TRUE;
-	if (STAILQ_FIRST(&socket->xmit_queue) == request)
-		khttpd_socket_transmit_resume(socket);
 
 	/*
 	 * Start receiving the payload of the request message.
@@ -2718,17 +2531,17 @@ khttpd_end_of_header_or_trailer(struct khttpd_socket *socket,
 
 	if (request->has_content_length ? request->content_length == 0 :
 	    !request->transfer_encoding_chunked) {
-		khttpd_finish_receiving_request(socket, request);
+		khttpd_finish_receiving_request(receiver, request);
 		return;
 	}
 
 	request->payload_size = request->content_length;
-	khttpd_socket_set_limit(socket, request->content_length);
-	socket->receive = khttpd_receive_body;
+	khttpd_receiver_set_limit(receiver, request->content_length);
+	receiver->receive = khttpd_receive_body;
 }
 
 static int
-khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
+khttpd_receive_header_or_trailer(struct khttpd_receiver *receiver)
 {
 	char field[KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH];
 	struct khttpd_mbuf_pos pos, tmppos;
@@ -2738,24 +2551,23 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	boolean_t last_ch_is_ws;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
-	request = socket->recv_request;
+	request = receiver->recv_request;
 
 	/* Get a line */
 
-	error = khttpd_socket_next_line(socket, &pos);
+	error = khttpd_receiver_next_line(receiver, &pos);
 	if (error != 0)
 		TRACE("error next_line %d", error);
 	switch (error) {
 	case 0:
 		break;
 	case ENOBUFS:
-		khttpd_set_request_header_field_too_large_response(socket, 
+		khttpd_set_request_header_field_too_large_response(receiver, 
 		    request);
 		return (0);
 	case ENOENT:
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return (0);
 	default:
 		return (error);
@@ -2770,7 +2582,7 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	if (ch == '\r')
 		ch = khttpd_mbuf_getc(&tmppos);
 	if (ch == '\n') {
-		khttpd_end_of_header_or_trailer(socket, request);
+		khttpd_end_of_header_or_trailer(receiver, request);
 		return (0);
 	}
 
@@ -2780,8 +2592,8 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 		 * the receiving mbuf chain.
 		 */
 		if (request->trailer == NULL) {
-			request->trailer = socket->recv_leftovers;
-			socket->recv_leftovers = NULL;
+			request->trailer = receiver->recv_leftovers;
+			receiver->recv_leftovers = NULL;
 		}
 
 		/* If it's a trailer, done. */
@@ -2809,7 +2621,7 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 			if (ch == ':' && !last_ch_is_ws)
 				break;
 			if (ch == ':' || ch == '\n') {
-				khttpd_set_bad_request_response(socket, 
+				khttpd_set_bad_request_response(receiver, 
 				    request);
 				break;
 			}
@@ -2819,7 +2631,7 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 		return (0);
 	}
 	if (error != 0 || end[-1] == ' ') {
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return (0);
 	}
 
@@ -2847,19 +2659,20 @@ khttpd_receive_header_or_trailer(struct khttpd_socket *socket)
 	switch (field_enum) {
 
 	case KHTTPD_FIELD_CONTENT_LENGTH:
-		khttpd_receive_content_length_field(socket, request, &pos);
+		khttpd_receive_content_length_field(receiver, request, &pos);
 		break;
 
 	case KHTTPD_FIELD_TRANSFER_ENCODING:
-		khttpd_receive_transfer_encoding_field(socket, request, &pos);
+		khttpd_receive_transfer_encoding_field(receiver, request,
+		    &pos);
 		break;
 
 	case KHTTPD_FIELD_CONNECTION:
-		khttpd_receive_connection_field(socket, request, &pos);
+		khttpd_receive_connection_field(receiver, request, &pos);
 		break;
 
 	case KHTTPD_FIELD_EXPECT:
-		khttpd_receive_expect_field(socket, request, &pos);
+		khttpd_receive_expect_field(receiver, request, &pos);
 		break;
 
 	default:
@@ -2949,7 +2762,7 @@ end:
 }
 
 static int
-khttpd_receive_request_line(struct khttpd_socket *socket)
+khttpd_receive_request_line(struct khttpd_receiver *receiver)
 {
 	static const char version_prefix[] = "HTTP/1.";
 	char method_name[24];
@@ -2962,13 +2775,12 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	int ch, error;
 
 	TRACE("enter");
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	/* 
 	 * Get a line.
 	 */
 
-	error = khttpd_socket_next_line(socket, &pos);
+	error = khttpd_receiver_next_line(receiver, &pos);
 	if (error != 0)
 		TRACE("error next_line %d", error);
 	if (error != 0 && error != ENOBUFS && error != ENOENT)
@@ -2984,7 +2796,7 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 			return (0);
 	}
 	if (error == 0) {
-		if (socket->recv_eof)
+		if (receiver->recv_eof)
 			return (0);
 
 		/* Ignore a line if it's empty. */
@@ -2995,16 +2807,16 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		if (ch == '\n')
 			return (0);
 
-		socket->receive = khttpd_receive_header_or_trailer;
+		receiver->receive = khttpd_receive_header_or_trailer;
 	}
 
 	/* 
 	 * Enlist a new request.
 	 */
 
-	socket->recv_request = request =
+	receiver->recv_request = request =
 	    uma_zalloc(khttpd_request_zone, M_WAITOK);
-	STAILQ_INSERT_TAIL(&socket->xmit_queue, request, link);
+	khttpd_socket_enqueue(receiver->socket, request);
 
 	/* 
 	 * If the request line is longer than khttpd_message_size_limit or is
@@ -3012,7 +2824,7 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 */
 
 	if (error == ENOBUFS || error == ENOENT) {
-		khttpd_set_bad_request_response(socket, request);
+		khttpd_set_bad_request_response(receiver, request);
 		return (0);
 	}
 
@@ -3020,18 +2832,18 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 * Take the ownership of the receiving mbuf chain.
 	 */
 
-	m = socket->recv_leftovers;
+	m = receiver->recv_leftovers;
+	receiver->recv_leftovers = NULL;
 	while (m != NULL && m != pos.ptr)
 		m = m_free(m);
-	socket->recv_leftovers = NULL;
 
 	m = pos.ptr;
 	if (pos.off != 0) {
-		if (m == socket->recv_ptr)
-			socket->recv_off -= pos.off;
+		if (m == receiver->recv_ptr)
+			receiver->recv_off -= pos.off;
 		m_adj(m, pos.off);
 		pos.off = 0;
-		socket->recv_tail = m_last(m);
+		receiver->recv_tail = m_last(m);
 	}
 	request->request_line = m;
 
@@ -3054,7 +2866,7 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 		error = khttpd_mbuf_next_segment(&pos, ' ');
 		if (error != 0)
 			goto bad;
-		khttpd_set_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(receiver, request, FALSE);
 
 	} else
 		goto bad;
@@ -3068,7 +2880,7 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	if (error != 0)
 		TRACE("error parse_target_uri(target) %d", error);
 	if (error == ENOENT)
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(receiver, request, FALSE);
 	else if (error != 0)
 		goto bad;
 
@@ -3077,11 +2889,12 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 */
 
 	route = khttpd_route_find(khttpd_server_route_root
-	    (socket->port->server),
+	    (receiver->socket->port->server),
 	    sbuf_data(&request->target), &request->suffix);
 	if (route == NULL) {
-		khttpd_set_not_found_response(socket, request, FALSE);
-		route = khttpd_server_route_root(socket->port->server);
+		khttpd_set_not_found_response(receiver, request, FALSE);
+		route = khttpd_server_route_root
+		    (receiver->socket->port->server);
 	}
 	khttpd_route_hold(route);
 	request->route = route;
@@ -3114,13 +2927,279 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	return (0);
 
 bad:
-	khttpd_set_bad_request_response(socket, request);
+	khttpd_set_bad_request_response(receiver, request);
 	return (0);
+}
+
+/*
+ * xmitter
+ */
+
+static void
+khttpd_xmitter_init(struct khttpd_xmitter *xmitter,
+    struct khttpd_socket *socket)
+{
+
+	xmitter->event_type.handle_event = khttpd_xmitter_handle_event;
+	xmitter->socket = socket;
+}
+
+static void
+khttpd_xmitter_ctor(struct khttpd_xmitter *xmitter)
+{
+
+	xmitter->transmit = khttpd_transmit_status_line_and_header;
+	bzero(&xmitter->khttpd_xmitter_zero_begin,
+	    sizeof(struct khttpd_xmitter) -
+	    offsetof(struct khttpd_xmitter, khttpd_xmitter_zero_begin));
+}
+
+static void
+khttpd_xmitter_dtor(struct khttpd_xmitter *xmitter)
+{
+
+	m_freem(xmitter->xmit_buf);
+}
+
+struct khttpd_socket *khttpd_xmitter_socket(struct khttpd_xmitter *xmitter)
+{
+
+	return (xmitter->socket);
+}
+
+static void
+khttpd_xmitter_handle_event(struct kevent *event)
+{
+	struct khttpd_request *request;
+	struct socket *so;
+	struct khttpd_socket *socket;
+	struct thread *td;
+	struct mbuf *m, *end, *head, *prev;
+	struct khttpd_xmitter *xmitter;
+	ssize_t space, len;
+	int error;
+
+	TRACE("enter %td", event->ident);
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	xmitter = event->udata;
+	socket = xmitter->socket;
+	error = 0;
+
+	td = curthread;
+	so = socket->fp->f_data;
+
+	for (;;) {
+		m = xmitter->xmit_buf;
+		if (m != NULL) {
+			SOCKBUF_LOCK(&so->so_snd);
+			space = sbspace(&so->so_snd);
+			SOCKBUF_UNLOCK(&so->so_snd);
+
+			prev = NULL;
+			len = 0;
+			for (end = m; end != NULL && len + end->m_len <= space;
+			     prev = end, end = end->m_next)
+				len += end->m_len;
+			if (prev == NULL) {
+				error = EWOULDBLOCK;
+				break;
+			}
+
+			prev->m_next = NULL;
+			xmitter->xmit_buf = end;
+			if ((m->m_flags & M_PKTHDR) == 0) {
+				head = m_gethdr(M_WAITOK, MT_DATA);
+				m_cat(head, m);
+				m = head;
+			}
+			m->m_pkthdr.len = len;
+
+			error = sosend(so, NULL, NULL, m, NULL, 0, td);
+			if (error != 0) {
+				log(LOG_WARNING,
+				    "khttpd: unexpected sosend error: %d",
+				    error);
+				khttpd_socket_dequeue(socket, TRUE);
+				error = EDOOFUS;
+				break;
+			}
+
+			continue;
+		}
+
+		request = khttpd_socket_queue_first(socket);
+		if (request == NULL || (!request->response_committed &&
+			!request->continue_response)) {
+			error = EINPROGRESS;
+			break;
+		}
+
+		if (request->continue_response) {
+			xmitter->xmit_buf = m = m_gethdr(M_WAITOK, MT_DATA);
+			khttpd_mbuf_printf(m, "HTTP/1.1 100 Continue\r\n\r\n");
+			request->continue_response = FALSE;
+			continue;
+		}
+
+		error = xmitter->transmit(xmitter, request, request->response,
+		    &xmitter->xmit_buf);
+		if (error != 0)
+			break;
+	}
+
+	if (error == EWOULDBLOCK)
+		khttpd_socket_transmit_continue(socket, FALSE);
+	else
+		khttpd_socket_transmit_done(socket);
+
+	khttpd_socket_close_if_finished(socket, FALSE);
+}
+
+static int
+khttpd_transmit_end(struct khttpd_xmitter *xmitter,
+    struct khttpd_request *request, struct khttpd_response *response,
+    struct mbuf **out)
+{
+	struct thread *td;
+	struct khttpd_socket *socket;
+	boolean_t close;
+
+	TRACE("enter");
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	td = curthread;
+	close = response->close;
+	socket = xmitter->socket;
+	xmitter->transmit = khttpd_transmit_status_line_and_header;
+
+	khttpd_access(socket->port->server, socket, request);
+
+	khttpd_socket_dequeue(socket, close);
+
+	return (0);
+}
+
+static int
+khttpd_transmit_trailer(struct khttpd_xmitter *xmitter,
+    struct khttpd_request *request, struct khttpd_response *response,
+    struct mbuf **out)
+{
+	struct mbuf *m;
+
+	TRACE("enter");
+
+	*out = m = m_gethdr(M_WAITOK, MT_DATA);
+	khttpd_mbuf_printf(m, "0\r\n");
+
+	m_cat(m, response->trailer);
+	response->trailer = NULL;
+
+	khttpd_mbuf_printf(m, "\r\n");
+
+	xmitter->transmit = khttpd_transmit_end;
+
+	return (0);
+}
+
+static int
+khttpd_transmit_chunk(struct khttpd_xmitter *xmitter,
+    struct khttpd_request *request, struct khttpd_response *response,
+    struct mbuf **out)
+{
+	struct mbuf *m, *head;
+	off_t len;
+	int error;
+
+	TRACE("enter");
+
+	m = NULL;
+	error = response->transmit_body(xmitter, request, response, &m);
+	if (error != 0) {
+		TRACE("error provide_chunk_data %d", error);
+		return (error);
+	}
+
+	if (m == NULL) {
+		xmitter->transmit = khttpd_transmit_trailer;
+		return (0);
+	}
+
+	KASSERT(0 < m_length(m, NULL),
+	    ("provide_chunk_data returned an empty chain"));
+
+	*out = head = m_gethdr(M_WAITOK, MT_DATA);
+	len = m_length(m, NULL);
+	response->payload_size += len;
+	khttpd_mbuf_printf(head, "%jx\r\n", (uintmax_t)len);
+	m_cat(head, m);
+	khttpd_mbuf_printf(head, "\r\n");
+
+	return (0);
+}
+
+static int
+khttpd_transmit_status_line_and_header(struct khttpd_xmitter *xmitter,
+    struct khttpd_request *request, struct khttpd_response *response,
+    struct mbuf **out)
+{
+	struct mbuf *m;
+
+	TRACE("enter");
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	*out = m = m_gethdr(M_WAITOK, MT_DATA);
+	khttpd_mbuf_printf(m, "HTTP/1.%d %d n/a\r\n", response->version_minor,
+	    response->status);
+
+	response->header_closed = TRUE;
+	m_cat(m, response->header);
+	response->header = NULL;
+
+	khttpd_mbuf_append(m, khttpd_crlf, khttpd_crlf + sizeof(khttpd_crlf));
+
+	if (response->status == 204 || response->status == 304 ||
+	    request->method == KHTTPD_METHOD_HEAD)
+		xmitter->transmit = khttpd_transmit_end;
+
+	else if (response->transfer_encoding_chunked)
+		xmitter->transmit = khttpd_transmit_chunk;
+
+	else if (0 < response->content_length) {
+		if (response->body == NULL)
+			xmitter->transmit = response->transmit_body;
+		else {
+			response->payload_size = m_length(response->body,
+			    NULL);
+			m_cat(m, response->body);
+			response->body = NULL;
+			xmitter->transmit = khttpd_transmit_end;
+		}
+	} else
+		xmitter->transmit = khttpd_transmit_end;
+
+	return (0);
+}
+
+void khttpd_transmit_finished(struct khttpd_xmitter *xmitter)
+{
+
+	xmitter->transmit = khttpd_transmit_end;
 }
 
 static void
 khttpd_accept_client(struct kevent *event)
 {
+	struct kevent changes[2];
+	struct khttpd_kevent_args args = {
+		.changelist = changes,
+		.eventlist  = NULL
+	};
+	struct kevent_copyops k_ops = {
+		&args,
+		khttpd_kevent_copyout,
+		khttpd_kevent_copyin	
+	};
 	struct sockaddr *name;
 	struct khttpd_server_port *port;
 	struct khttpd_socket *socket;
@@ -3150,17 +3229,22 @@ khttpd_accept_client(struct kevent *event)
 	TRACE("new_client %d", fd);
 
 	socket->fd = fd;
-	error = getsock_cap(td, socket->fd, &socket->rights, &socket->fp,
+	error = getsock_cap(td, socket->fd, &khttpd_socket_rights, &socket->fp,
 	    NULL);
 	if (error != 0) {
 		TRACE("error getsock_cap %d", error);
 		goto bad;
 	}
 
-	error = khttpd_kevent_socket_io(khttpd_kqueue, socket->fd, 
-	    &socket->event_type);
+	EV_SET(&changes[0], fd, EVFILT_READ, EV_ADD|EV_DISPATCH,
+	    0, 0, &socket->recv);
+	EV_SET(&changes[1], fd, EVFILT_WRITE, EV_ADD|EV_DISPATCH|EV_DISABLE,
+	    0, 0, &socket->xmit);
+
+	error = kern_kevent(curthread, khttpd_kqueue, sizeof(changes) /
+	    sizeof(changes[0]), 0, &k_ops, NULL);
 	if (error != 0) {
-		TRACE("error kevent_socket_io %d", error);
+		TRACE("error kevent %d", error);
 		goto bad;
 	}
 
@@ -3173,226 +3257,87 @@ bad:
 	khttpd_socket_free(socket);
 }
 
-static int
-khttpd_socket_receive_null(struct khttpd_socket *socket)
-{
-	struct uio auio;
-	struct socket *so;
-	struct thread *td;
-	struct mbuf *m;
-	int error, flags;
+/*
+ * server
+ */
 
-	TRACE("enter");
+static struct khttpd_server *
+khttpd_server_alloc(const char *name)
+{
+	struct khttpd_server *result;
+
+	result = khttpd_malloc(sizeof(struct khttpd_server));
+	result->name = strdup(name, M_KHTTPD);
+	result->dev = NULL;
+	result->route_root = uma_zalloc_arg(khttpd_route_zone,
+	    &khttpd_route_type_null, M_WAITOK);
+	SLIST_INIT(&result->ports);
+	khttpd_log_init(&result->access_log);
+	khttpd_log_init(&result->error_log);
+
+	return (result);
+}
+
+static void
+khttpd_server_free(struct khttpd_server *server)
+{
+	struct thread *td;
+
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	td = curthread;
-	so = socket->fp->f_data;
 
-	bzero(&auio, sizeof(auio));
-	for (;;) {
-		auio.uio_resid = INT_MAX;
-		m = NULL;
-		flags = 0;
-		error = soreceive(so, NULL, &auio, &m, NULL, &flags);
-		m_freem(m);
+	khttpd_log_close(&server->access_log);
+	khttpd_log_close(&server->error_log);
+	khttpd_route_clear_all(server->route_root);
+	khttpd_route_free(server->route_root);
+	if (server->dev != NULL)
+		destroy_dev(server->dev);
+	free((void *)server->name, M_KHTTPD);
 
-		if (error != 0) {
-			TRACE("error soreceive %d", error);
-			break;
-		}
-
-		if (auio.uio_resid == INT_MAX) {
-			socket->recv_eof = TRUE;
-			break;
-		}
-	}
-
-	return (error);
+	khttpd_free(server);
 }
 
-static void
-khttpd_socket_transmit(struct khttpd_socket *socket)
+struct khttpd_server *
+khttpd_server_find(const char *name)
 {
-	struct khttpd_request *request;
-	struct khttpd_response *response;
-	struct socket *so;
-	struct thread *td;
-	struct mbuf *m, *end, *head, *prev;
-	ssize_t space, len;
-	int error;
+	struct khttpd_server *server;
 
-	TRACE("enter %d", socket->fd);
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+ 
+	SLIST_FOREACH(server, &khttpd_servers, link)
+		if (strcmp(server->name, name) == 0)
+			return (server);
 
-	td = curthread;
-	so = socket->fp->f_data;
-
-	for (;;) {
-		m = socket->xmit_buf;
-		if (m != NULL) {
-			SOCKBUF_LOCK(&so->so_snd);
-			space = sbspace(&so->so_snd);
-			SOCKBUF_UNLOCK(&so->so_snd);
-
-			prev = NULL;
-			len = 0;
-			for (end = m; end != NULL && len + end->m_len <= space;
-			     prev = end, end = end->m_next)
-				len += end->m_len;
-			if (prev == NULL) {
-				error = EWOULDBLOCK;
-				break;
-			}
-
-			prev->m_next = NULL;
-			socket->xmit_buf = end;
-			if ((m->m_flags & M_PKTHDR) == 0) {
-				head = m_gethdr(M_WAITOK, MT_DATA);
-				m_cat(head, m);
-				m = head;
-			}
-			m->m_pkthdr.len = len;
-
-			error = sosend(so, NULL, NULL, m, NULL, 0, td);
-			if (error != 0) {
-				log(LOG_WARNING,
-				    "khttpd: unexpected sosend error: %d",
-				    error);
-				break;
-			}
-
-			continue;
-		}
-
-		error = EINPROGRESS;
-
-		request = STAILQ_FIRST(&socket->xmit_queue);
-		if (request == NULL || !request->may_respond)
-			break;
-
-		if (request->continue_response) {
-			socket->xmit_buf = m = m_gethdr(M_WAITOK, MT_DATA);
-			khttpd_mbuf_printf(m, "HTTP/1.1 100 Continue\r\n\r\n");
-			request->continue_response = FALSE;
-			continue;
-		}
-
-		response = request->response;
-		if (response == NULL)
-			break;
-
-		error = socket->transmit(socket, request, response,
-		    &socket->xmit_buf);
-		if (error != 0)
-			break;
-	}
-
-	if (STAILQ_EMPTY(&socket->xmit_queue) && socket->recv_shutdown) {
-		khttpd_socket_close(socket);
-		return;
-	}
-
-	socket->xmit_busy = error == EWOULDBLOCK;
-	if (socket->xmit_busy)
-		khttpd_kevent_enable_write(khttpd_kqueue, socket->fd,
-		    &socket->event_type);
+	return (NULL);
 }
 
-static void
-khttpd_socket_receive(struct khttpd_socket *socket)
+struct khttpd_route *
+khttpd_server_route_root(struct khttpd_server *server)
 {
-	int error;
 
-	TRACE("enter %d", socket->fd);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	error = 0;
-	for (;;) {
-		if (socket->recv_eof)
-			break;
-
-		if (socket->recv_drain) {
-			if (socket->recv_request != NULL) {
-				khttpd_request_free(socket->recv_request);
-				socket->recv_request = NULL;
-			}
-
-			error = khttpd_socket_receive_null(socket);
-		} else
-			error = socket->receive(socket);
-
-		if (error != 0)
-			break;
-	}
-
-	if (error == EWOULDBLOCK)
-		khttpd_kevent_enable_read(khttpd_kqueue, socket->fd,
-		    &socket->event_type);
-
-	else if (error != 0) {
-		log(LOG_WARNING,
-		    "khttpd: unexpected error in socket->receive: %d", error);
-		khttpd_socket_drain(socket);
-		socket->recv_eof = TRUE;
-	}
-
-	if (socket->recv_eof && socket->fd != -1) {
-		TRACE("eof");
-		socket->recv_shutdown = TRUE;
-		if (STAILQ_EMPTY(&socket->xmit_queue))
-			khttpd_socket_close(socket);
-	}
-}
-
-static void
-khttpd_handle_socket_event(struct kevent *event)
-{
-	struct khttpd_socket *socket;
-
-	TRACE("enter %td %d", event->ident, event->filter);
-	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-
-	socket = event->udata;
-	khttpd_socket_hold(socket);
-
-	switch (event->filter) {
-
-	case EVFILT_READ:
-		khttpd_socket_receive(socket);
-		break;
-
-	case EVFILT_WRITE:
-		khttpd_socket_transmit(socket);
-		break;
-
-	default:
-		log(LOG_WARNING, "%s: unknown filter %d", __func__,
-		    event->filter);
-		break;
-	}
-
-	khttpd_socket_free(socket);
+	return server->route_root;
 }
 
 /* --------------------------------------------------------------- asterisc */
 
 static void
-khttpd_asterisc_received_header(struct khttpd_socket *socket,
+khttpd_asterisc_received_header(struct khttpd_receiver *receiver,
     struct khttpd_request *request)
 {
 
-	TRACE("enter %d", socket->fd);
+	TRACE("enter %d", receiver->socket->fd);
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
 	switch (request->method) {
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_set_options_response(socket, request, NULL,
+		khttpd_set_options_response(receiver, request, NULL,
 		    "OPTIONS, HEAD, GET, PUT, POST, DELETE");
 		break;
 
 	default:
-		khttpd_set_not_implemented_response(socket, request, FALSE);
+		khttpd_set_not_implemented_response(receiver, request, FALSE);
 		break;
 	}
 }
@@ -3797,7 +3742,112 @@ khttpd_logger_resume(void)
 	    KHTTPD_LOGGER_IDLE : KHTTPD_LOGGER_BUSY);
 }
 
+/* --------------------------------------------------------- worker thread */
+
+static void
+khttpd_worker_main(void *arg)
+{
+	struct khttpd_worker entry;
+	struct kevent event;
+	struct khttpd_worker *head, *next;
+	int error, nevent;
+	boolean_t need_new_thread;
+
+	TRACE("enter");
+
+	for (;;) {
+		mtx_lock(&khttpd_lock);
+		head = TAILQ_FIRST(&khttpd_waiting_workers);
+		if (head == NULL)
+			TAILQ_INSERT_HEAD(&khttpd_waiting_workers, &entry,
+			    link);
+		else {
+			TAILQ_INSERT_AFTER(&khttpd_waiting_workers, head,
+			    &entry, link);
+			error = mtx_sleep(&entry, &khttpd_lock, 0,
+			    "khttpd-idling", 1 * hz);
+			if (error == EWOULDBLOCK &&
+			    &entry != TAILQ_FIRST(&khttpd_waiting_workers)) {
+				TAILQ_REMOVE(&khttpd_waiting_workers, &entry,
+				    link);
+				break;
+			}
+		}
+		mtx_unlock(&khttpd_lock);
+
+		error = khttpd_kevent(khttpd_kqueue, NULL, 0, &event, 1,
+		    &nevent, NULL);
+		if (error != 0)
+			TRACE("error kevent_get %d", error);
+
+		mtx_lock(&khttpd_lock);
+
+		TAILQ_REMOVE(&khttpd_waiting_workers, &entry, link);
+		next = TAILQ_FIRST(&khttpd_waiting_workers);
+		need_new_thread = next == NULL && !khttpd_worker_shutdown &&
+		    khttpd_worker_count < khttpd_worker_count_max;
+
+		if (next != NULL)
+			wakeup(next);
+		else if (need_new_thread)
+			++khttpd_worker_count;
+
+		if (khttpd_worker_shutdown)
+			break;
+
+		mtx_unlock(&khttpd_lock);
+
+		if (need_new_thread) {
+			error = kthread_add(khttpd_worker_main, NULL,
+			    khttpd_proc, NULL, 0, 0, "khttpd-worker");
+			if (error != 0) {
+				mtx_lock(&khttpd_lock);
+				--khttpd_worker_count;
+				mtx_unlock(&khttpd_lock);
+
+				log(LOG_WARNING, "khttpd: failed to create a "
+				    "worker thread: %d", error);
+			}
+		}
+
+		if (0 < nevent)
+			((struct khttpd_event_type *)event.udata)->
+			    handle_event(&event);
+	}
+
+	if (--khttpd_worker_count == 0)
+		wakeup(&khttpd_worker_count);
+	mtx_unlock(&khttpd_lock);
+
+	kthread_exit();
+}
+
 /* ---------------------------------------------------------- khttpd daemon */
+
+int
+khttpd_run_proc(khttpd_command_proc_t proc, void *argument)
+{
+	struct khttpd_command command;
+	int error;
+
+	command.command = proc;
+	command.argument = argument;
+	command.status = -1;
+
+	mtx_lock(&khttpd_lock);
+
+	if (STAILQ_EMPTY(&khttpd_command_queue))
+		wakeup(&khttpd_command_queue);
+
+	STAILQ_INSERT_TAIL(&khttpd_command_queue, &command, link);
+
+	while ((error = command.status) == -1)
+		mtx_sleep(&command, &khttpd_lock, 0, "khttpd-cmd", 0);
+
+	mtx_unlock(&khttpd_lock);
+
+	return (error);
+}
 
 static void
 khttpd_set_state(int state)
@@ -3809,13 +3859,11 @@ khttpd_set_state(int state)
 	old_state = khttpd_state;
 	if (old_state == state)
 		return;
-	if (old_state == KHTTPD_READY && khttpd_proc != NULL) {
-		PROC_LOCK(khttpd_proc);
-		kern_psignal(khttpd_proc, SIGUSR1);
-		PROC_UNLOCK(khttpd_proc);
-	}
 	khttpd_state = state;
 	wakeup(&khttpd_state);
+
+	if (old_state == KHTTPD_READY && curthread != khttpd_main_thread)
+		wakeup(&khttpd_command_queue);
 }
 
 static void
@@ -3827,6 +3875,7 @@ khttpd_main(void *arg)
 	struct kevent event;
 	struct khttpd_command *command;
 	struct khttpd_server_port *port;
+	struct khttpd_request *request;
 	struct khttpd_server *server;
 	struct khttpd_socket *socket;
 	struct thread *td;
@@ -3835,6 +3884,9 @@ khttpd_main(void *arg)
 
 	TRACE("enter %p", arg);
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	khttpd_main_thread = curthread;
+	khttpd_worker_count_max = mp_ncpus * 3;
 
 	kthread_add(khttpd_logger_main, NULL, khttpd_proc,
 	    &khttpd_logger_thread, 0, 0, "khttpd_logger");
@@ -3847,6 +3899,9 @@ khttpd_main(void *arg)
 	while (khttpd_logger_state == KHTTPD_LOGGER_INITIALIZING)
 		khttpd_logger_wait("khttpd-log-ready");
 	mtx_unlock(&khttpd_lock);
+
+	cap_rights_init(&khttpd_socket_rights, CAP_EVENT, CAP_RECV, CAP_SEND,
+	    CAP_SETSOCKOPT, CAP_SHUTDOWN);
 
 	STAILQ_INIT(&worklist);
 	td = curthread;
@@ -3944,11 +3999,13 @@ khttpd_main(void *arg)
 	}
 	khttpd_kqueue = td->td_retval[0];
 
-	error = khttpd_kevent_add_signal(khttpd_kqueue, SIGUSR1,
-	    &khttpd_stop_request_type);
+	EV_SET(&event, KHTTPD_EVENT_SHUTDOWN_WORKERS, EVFILT_USER,
+	    EV_ADD, 0, 0, NULL);
+	error = khttpd_kevent(khttpd_kqueue, &event, 1, NULL, 0, NULL,
+	    NULL);
 	if (error != 0) {
-		log(LOG_WARNING, "khttpd: kevent(EVFILT_SIGNAL, SIGUSR1) "
-		    "failed: %d", error);
+		log(LOG_WARNING, "khttpd: kevent(EVFILT_USER) failed: %d",
+		    error);
 		goto cont;
 	}
 
@@ -3971,17 +4028,59 @@ khttpd_main(void *arg)
 
 cont:
 	mtx_lock(&khttpd_lock);
+
 	khttpd_server_status = error;
 	khttpd_set_state(error == 0 ? KHTTPD_READY : KHTTPD_FAILED);
 
-	while (khttpd_state != KHTTPD_UNLOADING) {
-		if (khttpd_state == KHTTPD_FAILED) {
-			mtx_sleep(&khttpd_state, &khttpd_lock, 0,
-			    "khttpd-failed", 0);
-			continue;
-		}
+	while (khttpd_state == KHTTPD_FAILED)
+		mtx_sleep(&khttpd_state, &khttpd_lock, 0,
+		    "khttpd-failed", 0);
+
+	mtx_unlock(&khttpd_lock);
+
+	while (khttpd_state == KHTTPD_READY) {
+		EV_SET(&event, KHTTPD_EVENT_SHUTDOWN_WORKERS, EVFILT_USER,
+		    EV_CLEAR, 0, 0, NULL);
+		error = khttpd_kevent(khttpd_kqueue, &event, 1, NULL, 0, NULL,
+		    NULL);
+		if (error != 0)
+			log(LOG_WARNING, "khttpd: failed to clear "
+			    "KHTTPD_EVENT_SHUTDOWN_WORKERS: %d", error);
+
+		error = kthread_add(khttpd_worker_main, NULL, khttpd_proc,
+		    NULL, 0, 0, "khttpd-worker");
+		if (error != 0)
+			log(LOG_WARNING, "khttpd: failed to create a "
+			    "worker thread: %d", error);
+
+		mtx_lock(&khttpd_lock);
+
+		++khttpd_worker_count;
+
+		while (khttpd_state == KHTTPD_READY &&
+		    STAILQ_EMPTY(&khttpd_command_queue))
+			mtx_sleep(&khttpd_command_queue, &khttpd_lock, 0,
+			    "khttpd-command", 0);
+
+		khttpd_worker_shutdown = TRUE;
+		mtx_unlock(&khttpd_lock);
+
+		EV_SET(&event, KHTTPD_EVENT_SHUTDOWN_WORKERS, EVFILT_USER,
+		    0, NOTE_TRIGGER, 0, NULL);
+		error = khttpd_kevent(khttpd_kqueue, &event, 1, NULL, 0, NULL,
+		    NULL);
+		if (error != 0)
+			log(LOG_WARNING, "khttpd: failed to notify "
+			    "KHTTPD_EVENT_SHUTDOWN_WORKERS: %d", error);
+
+		mtx_lock(&khttpd_lock);
+		while (0 < khttpd_worker_count)
+			mtx_sleep(&khttpd_worker_count, &khttpd_lock, 0,
+			    "khttpd-shutdown", 0);
 
 		STAILQ_SWAP(&worklist, &khttpd_command_queue, khttpd_command);
+		khttpd_worker_shutdown = FALSE;
+
 		mtx_unlock(&khttpd_lock);
 
 		while ((command = STAILQ_FIRST(&worklist)) != NULL) {
@@ -3990,24 +4089,17 @@ cont:
 			    command->command(command->argument);
 			wakeup(command);
 		}
-
-		error = khttpd_kevent_get(khttpd_kqueue, &event);
-		if (error != 0)
-			TRACE("error kevent_get %d", error);
-		if (error == 0)
-			((struct khttpd_event_type *)event.udata)->
-			    handle_event(&event);
-
-		KASSERT(error == 0 || error == EINTR || error == ETIMEDOUT,
-		    ("kevent_get error=%d", error));
-
-		mtx_lock(&khttpd_lock);
 	}
 
-	mtx_unlock(&khttpd_lock);
-
 	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL) {
-		khttpd_socket_clear_all_requests(socket);
+		khttpd_socket_clear_queue(socket);
+
+		request = socket->recv.recv_request;
+		if (request != NULL) {
+			khttpd_request_free(request);
+			socket->recv.recv_request = NULL;
+		}
+
 		khttpd_socket_close(socket);
 	}
 
@@ -4046,37 +4138,6 @@ cont:
 }
 
 /* --------------------------------------------------------- ioctl handlers */
-
-int
-khttpd_run_proc(khttpd_command_proc_t proc, void *argument)
-{
-	struct khttpd_command *command;
-	int error;
-
-	command = malloc(sizeof(*command), M_KHTTPD, M_WAITOK);
-	command->command = proc;
-	command->argument = argument;
-	command->status = -1;
-
-	mtx_lock(&khttpd_lock);
-
-	if (STAILQ_EMPTY(&khttpd_command_queue)) {
-		PROC_LOCK(khttpd_proc);
-		kern_psignal(khttpd_proc, SIGUSR1);
-		PROC_UNLOCK(khttpd_proc);
-	}
-
-	STAILQ_INSERT_TAIL(&khttpd_command_queue, command, link);
-
-	while ((error = command->status) == -1)
-		mtx_sleep(command, &khttpd_lock, 0, "khttpd-cmd", 0);
-
-	mtx_unlock(&khttpd_lock);
-
-	free(command, M_KHTTPD);
-
-	return (error);
-}
 
 static int
 khttpd_internalize_fd(struct filedesc *fdp, int fd, struct filedescent *ent,
@@ -4142,6 +4203,7 @@ khttpd_externalize_fd(struct filedesc *fdp, int fd, struct filedescent *ent)
 static int
 khttpd_config_proc(void *argptr)
 {
+	struct kevent event;
 	struct listen_args listen_args;
 	struct khttpd_server_port_list ports;	
 	struct khttpd_config_proc_args *args;
@@ -4230,8 +4292,10 @@ khttpd_config_proc(void *argptr)
 			goto bad2;
 		}
 
-		error = khttpd_kevent_connection_arrival(khttpd_kqueue,
-		    port->fd, &port->event_type);
+		EV_SET(&event, fd, EVFILT_READ, EV_ADD, 0, 0,
+		    &port->event_type);
+		error = khttpd_kevent(khttpd_kqueue, &event, 1, NULL, 0, NULL,
+		    NULL);
 		if (error != 0) {
 			log(LOG_WARNING, "khttpd: failed to kevent"
 			    "(EVFILT_READ) on the given sockets: %d", error);
