@@ -142,18 +142,16 @@ struct khttpd_request;
 struct khttpd_response;
 struct khttpd_route;
 struct khttpd_socket;
-struct khttpd_receiver;
-struct khttpd_xmitter;
 struct khttpd_header;
 struct khttpd_header_field;
 
-typedef void (*khttpd_received_header_t)(struct khttpd_receiver *,
+typedef void (*khttpd_received_header_t)(struct khttpd_socket *,
     struct khttpd_request *);
-typedef void (*khttpd_received_body_t)(struct khttpd_receiver *,
+typedef void (*khttpd_received_body_t)(struct khttpd_socket *,
     struct khttpd_request *, struct mbuf *);
-typedef void (*khttpd_end_of_message_t)(struct khttpd_receiver *,
+typedef void (*khttpd_end_of_message_t)(struct khttpd_socket *,
     struct khttpd_request *);
-typedef int (*khttpd_transmit_t)(struct khttpd_xmitter *,
+typedef int (*khttpd_transmit_t)(struct khttpd_socket *,
     struct khttpd_request *, struct khttpd_response *, struct mbuf **);
 typedef void (*khttpd_request_dtor_t)(struct khttpd_request *, void *);
 typedef void (*khttpd_route_dtor_t)(struct khttpd_route *);
@@ -181,11 +179,11 @@ void *khttpd_route_data(struct khttpd_route *route);
 const char *khttpd_route_path(struct khttpd_route *route);
 struct khttpd_route_type *khttpd_route_type(struct khttpd_route *route);
 
-void khttpd_received_header_null(struct khttpd_receiver *,
+void khttpd_received_header_null(struct khttpd_socket *,
     struct khttpd_request *);
-void khttpd_end_of_message_null(struct khttpd_receiver *,
+void khttpd_end_of_message_null(struct khttpd_socket *,
     struct khttpd_request *);
-void khttpd_received_body_null(struct khttpd_receiver *,
+void khttpd_received_body_null(struct khttpd_socket *,
     struct khttpd_request *, struct mbuf *);
 void khttpd_request_dtor_null(struct khttpd_request *request, void *data);
 
@@ -291,50 +289,47 @@ void khttpd_socket_hold(struct khttpd_socket *socket);
 void khttpd_socket_free(struct khttpd_socket *socket);
 int khttpd_socket_fd(struct khttpd_socket *socket);
 
-struct khttpd_socket *khttpd_receiver_socket(struct khttpd_receiver *);
-struct khttpd_socket *khttpd_xmitter_socket(struct khttpd_xmitter *);
-
 struct khttpd_server *khttpd_server_find(const char *name);
 struct khttpd_route *khttpd_server_route_root(struct khttpd_server *);
 
-void khttpd_transmit_finished(struct khttpd_xmitter *);
+void khttpd_transmit_finished(struct khttpd_socket *);
 void khttpd_ready_to_send(struct khttpd_socket *);
 
-void khttpd_set_response(struct khttpd_receiver *receiver,
+void khttpd_set_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response);
-void khttpd_set_continue_response(struct khttpd_receiver *receiver,
+void khttpd_set_continue_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response);
-void khttpd_set_static_response(struct khttpd_receiver *receiver,
+void khttpd_set_static_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     int status, const char *content, boolean_t close);
-void khttpd_set_error_response(struct khttpd_receiver *receiver,
+void khttpd_set_error_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     int status, const char *reason, const char *description, boolean_t close);
-void khttpd_set_moved_permanently_response(struct khttpd_receiver *receiver,
+void khttpd_set_moved_permanently_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     const char *target);
-void khttpd_set_bad_request_response(struct khttpd_receiver *receiver,
+void khttpd_set_bad_request_response(struct khttpd_socket *receiver,
     struct khttpd_request *request);
-void khttpd_set_length_required_response(struct khttpd_receiver *receiver,
+void khttpd_set_length_required_response(struct khttpd_socket *receiver,
     struct khttpd_request *request);
-void khttpd_set_payload_too_large_response(struct khttpd_receiver *receiver,
+void khttpd_set_payload_too_large_response(struct khttpd_socket *receiver,
     struct khttpd_request *request);
-void khttpd_set_not_implemented_response(struct khttpd_receiver *receiver,
+void khttpd_set_not_implemented_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, boolean_t close);
-void khttpd_set_not_found_response(struct khttpd_receiver *receiver,
+void khttpd_set_not_found_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, boolean_t close);
-void khttpd_set_conflict_response(struct khttpd_receiver *receiver,
+void khttpd_set_conflict_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, boolean_t close);
-void khttpd_set_uri_too_long_response(struct khttpd_receiver *receiver,
+void khttpd_set_uri_too_long_response(struct khttpd_socket *receiver,
     struct khttpd_request *request);
-void khttpd_set_method_not_allowed_response(struct khttpd_receiver *receiver,
+void khttpd_set_method_not_allowed_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, boolean_t close, 
     const char *allowed_methods);
 void khttpd_set_request_header_field_too_large_response
-(struct khttpd_receiver *receiver, struct khttpd_request *request);
-void khttpd_set_internal_error_response(struct khttpd_receiver *receiver,
+(struct khttpd_socket *receiver, struct khttpd_request *request);
+void khttpd_set_internal_error_response(struct khttpd_socket *receiver,
     struct khttpd_request *request);
-void khttpd_set_options_response(struct khttpd_receiver *receiver,
+void khttpd_set_options_response(struct khttpd_socket *receiver,
     struct khttpd_request *request, struct khttpd_response *response,
     const char *allowed_methods);
 

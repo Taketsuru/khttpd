@@ -108,9 +108,9 @@ TAILQ_HEAD(khttpd_sdt_probe_list, khttpd_sdt_probe);
 
 static int khttpd_sdt_probe_tree_comparator(struct khttpd_sdt_probe *x,
     struct khttpd_sdt_probe *y);
-static void khttpd_sdt_history_received_header(struct khttpd_receiver *receiver, 
+static void khttpd_sdt_history_received_header(struct khttpd_socket *socket, 
     struct khttpd_request *request);
-static void khttpd_sdt_probe_received_header(struct khttpd_receiver *receiver, 
+static void khttpd_sdt_probe_received_header(struct khttpd_socket *socket, 
     struct khttpd_request *request);
 
 #pragma clang diagnostic push
@@ -262,7 +262,7 @@ khttpd_sdt_probe_tree_comparator(struct khttpd_sdt_probe *x,
 }
 
 static void
-khttpd_sdt_history_leaf_get_or_head(struct khttpd_receiver *receiver,
+khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 	struct khttpd_response *response;
@@ -316,17 +316,17 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_receiver *receiver,
 	khttpd_response_set_body_bytes(response, buffer, size, khttpd_free);
 	khttpd_response_add_field(response, "Content-Type", "%s",
 	    "application/octet-stream");
-	khttpd_set_response(receiver, request, response);
+	khttpd_set_response(socket, request, response);
 
 	return;
 
 enoent:
-	khttpd_set_not_found_response(receiver, request, FALSE);
+	khttpd_set_not_found_response(socket, request, FALSE);
 	khttpd_free(buffer);
 }
 
 static void
-khttpd_sdt_history_leaf_received_header(struct khttpd_receiver *receiver,
+khttpd_sdt_history_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
@@ -336,7 +336,7 @@ khttpd_sdt_history_leaf_received_header(struct khttpd_receiver *receiver,
 
 	case KHTTPD_METHOD_GET:
 	case KHTTPD_METHOD_HEAD:
-		khttpd_sdt_history_leaf_get_or_head(receiver, request);
+		khttpd_sdt_history_leaf_get_or_head(socket, request);
 		break;
 
 	case KHTTPD_METHOD_OPTIONS:
@@ -344,17 +344,17 @@ khttpd_sdt_history_leaf_received_header(struct khttpd_receiver *receiver,
 		 * XXX khttpd_set_not_found_response must be called if the
 		 * specified page doesn't exist.
 		 */
-		khttpd_set_options_response(receiver, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET");
 		break;
 
 	default:
-		khttpd_set_not_implemented_response(receiver, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
 static void
-khttpd_sdt_history_index_get_or_head(struct khttpd_receiver *receiver,
+khttpd_sdt_history_index_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 	struct mbuf *payload;
@@ -396,11 +396,11 @@ khttpd_sdt_history_index_get_or_head(struct khttpd_receiver *receiver,
 	khttpd_response_set_body_mbuf(response, payload);
 	khttpd_response_add_field(response, "Content-Type", "%s", 
 	    "application/json");
-	khttpd_set_response(receiver, request, response);
+	khttpd_set_response(socket, request, response);
 }
 
 static void
-khttpd_sdt_history_index_received_header(struct khttpd_receiver *receiver,
+khttpd_sdt_history_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
@@ -410,32 +410,32 @@ khttpd_sdt_history_index_received_header(struct khttpd_receiver *receiver,
 
 	case KHTTPD_METHOD_GET:
 	case KHTTPD_METHOD_HEAD:
-		khttpd_sdt_history_index_get_or_head(receiver, request);
+		khttpd_sdt_history_index_get_or_head(socket, request);
 		break;
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_set_options_response(receiver, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET, POST");
 		break;
 
 	default:
-		khttpd_set_not_implemented_response(receiver, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
 static void
-khttpd_sdt_history_received_header(struct khttpd_receiver *receiver, 
+khttpd_sdt_history_received_header(struct khttpd_socket *socket, 
     struct khttpd_request *request)
 {
 	const char *suffix;
 
-	TRACE("enter %d", khttpd_socket_fd(khttpd_receiver_socket(receiver)));
+	TRACE("enter %d", khttpd_socket_fd(socket));
 
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
-		khttpd_sdt_history_index_received_header(receiver, request);
+		khttpd_sdt_history_index_received_header(socket, request);
 	else
-		khttpd_sdt_history_leaf_received_header(receiver, request);
+		khttpd_sdt_history_leaf_received_header(socket, request);
 }
 
 static void
@@ -473,7 +473,7 @@ khttpd_sdt_probe_json_encode(struct mbuf *output,
 }
 
 static void
-khttpd_sdt_probe_index_get_or_head(struct khttpd_receiver *receiver,
+khttpd_sdt_probe_index_get_or_head(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 	struct mbuf *payload;
@@ -503,11 +503,11 @@ khttpd_sdt_probe_index_get_or_head(struct khttpd_receiver *receiver,
 	khttpd_response_set_body_mbuf(response, payload);
 	khttpd_response_add_field(response, "Content-Type", "%s", 
 	    "application/json");
-	khttpd_set_response(receiver, request, response);
+	khttpd_set_response(socket, request, response);
 }
 
 static void
-khttpd_sdt_probe_index_received_header(struct khttpd_receiver *receiver,
+khttpd_sdt_probe_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
@@ -517,42 +517,42 @@ khttpd_sdt_probe_index_received_header(struct khttpd_receiver *receiver,
 
 	case KHTTPD_METHOD_GET:
 	case KHTTPD_METHOD_HEAD:
-		khttpd_sdt_probe_index_get_or_head(receiver, request);
+		khttpd_sdt_probe_index_get_or_head(socket, request);
 		break;
 
 	case KHTTPD_METHOD_OPTIONS:
-		khttpd_set_options_response(receiver, request, NULL,
+		khttpd_set_options_response(socket, request, NULL,
 		    "OPTIONS, HEAD, GET");
 		break;
 
 	default:
-		khttpd_set_not_implemented_response(receiver, request, FALSE);
+		khttpd_set_not_implemented_response(socket, request, FALSE);
 	}
 }
 
 static void
-khttpd_sdt_probe_leaf_received_header(struct khttpd_receiver *receiver,
+khttpd_sdt_probe_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
 	TRACE("enter");
 
-	khttpd_set_not_found_response(receiver, request, FALSE);
+	khttpd_set_not_found_response(socket, request, FALSE);
 }
 
 static void
-khttpd_sdt_probe_received_header(struct khttpd_receiver *receiver, 
+khttpd_sdt_probe_received_header(struct khttpd_socket *socket, 
     struct khttpd_request *request)
 {
 	const char *suffix;
 
-	TRACE("enter %d", khttpd_socket_fd(khttpd_receiver_socket(receiver)));
+	TRACE("enter %d", khttpd_socket_fd(socket));
 
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
-		khttpd_sdt_probe_index_received_header(receiver, request);
+		khttpd_sdt_probe_index_received_header(socket, request);
 	else
-		khttpd_sdt_probe_leaf_received_header(receiver, request);
+		khttpd_sdt_probe_leaf_received_header(socket, request);
 }
 
 static void
