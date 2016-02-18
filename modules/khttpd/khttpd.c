@@ -717,8 +717,6 @@ khttpd_kevent(int kq, struct kevent *changes, int nchanges,
 	struct thread *td;
 	int error;
 
-	TRACE("enter");
-
 	struct khttpd_kevent_args args = {
 		.changelist = changes,
 		.eventlist  = eventlist
@@ -1090,6 +1088,7 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	    offsetof(struct khttpd_request, khttpd_request_zctor_end) -
 	    offsetof(struct khttpd_request, khttpd_request_zctor_begin));
 
+	/* socket->recv_request and xmit_request */
 	refcount_init(&request->ref_count, 2);
 
 	return (0);
@@ -1453,9 +1452,20 @@ static void
 khttpd_socket_close(struct khttpd_socket *socket)
 {
 	struct thread *td;
+	struct khttpd_request *request;
 
 	TRACE("enter");
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	if ((request = socket->recv_request) != NULL) {
+		khttpd_request_free(request);
+		socket->recv_request = NULL;
+	}
+
+	if ((request = socket->xmit_request) != NULL) {
+		khttpd_request_free(request);
+		socket->xmit_request = NULL;
+	}
 
 	td = curthread;
 
@@ -1469,7 +1479,10 @@ khttpd_socket_close(struct khttpd_socket *socket)
 		socket->fp = NULL;
 	}
 
+	mtx_lock(&khttpd_lock);
 	LIST_REMOVE(socket, link);
+	mtx_unlock(&khttpd_lock);
+
 	khttpd_socket_free(socket);
 }
 
@@ -2083,11 +2096,6 @@ khttpd_socket_handle_event(struct kevent *event)
 	if (error == EWOULDBLOCK) {
 		KASSERT(!socket->recv_eof, ("EOF & EWOULDBLOCK"));
 
-		if (socket->recv_request != NULL && socket->recv_drain) {
-			khttpd_request_free(socket->recv_request);
-			socket->recv_request = NULL;
-		}
-
 		EV_SET(&change, socket->fd,
 		    socket->xmit_scheduled ? EVFILT_WRITE : EVFILT_READ,
 		    EV_ENABLE, 0, 0, &socket->event_type);
@@ -2097,16 +2105,6 @@ khttpd_socket_handle_event(struct kevent *event)
 			return;
 
 		log(LOG_WARNING, "khttpd: kevent failed: %d", error);
-	}
-
-	if (socket->recv_request != NULL) {
-		khttpd_request_free(socket->recv_request);
-		socket->recv_request = NULL;
-	}
-
-	if (socket->xmit_request != NULL) {
-		khttpd_request_free(socket->xmit_request);
-		socket->xmit_request = NULL;
 	}
 
 	khttpd_socket_close(socket);
@@ -2149,13 +2147,16 @@ khttpd_finish_receiving_request(struct khttpd_socket *socket,
 {
 
 	TRACE("enter");
-	KASSERT(request == socket->recv_request,
-	    ("request=%p, socket->recv_request=%p", request,
-		socket->recv_request));
 
 	request->end_of_message(socket, request);
 	KASSERT(request->response != NULL, ("not responded"));
 	khttpd_socket_commit_response(socket, request);
+
+	KASSERT(request == socket->recv_request,
+	    ("request=%p, socket->recv_request=%p", request,
+		socket->recv_request));
+	khttpd_request_free(request);
+	socket->recv_request = NULL;
 
 	socket->receive = khttpd_receive_request_line;
 	khttpd_socket_set_receive_limit(socket, khttpd_message_size_limit);
@@ -2227,8 +2228,7 @@ khttpd_receive_chunk(struct khttpd_socket *socket)
 
 		if ((len << 4) < len) {
 			TRACE("error range");
-			khttpd_set_payload_too_large_response(socket,
-			    request);
+			khttpd_set_payload_too_large_response(socket, request);
 			return (0);
 		}
 
@@ -2286,7 +2286,8 @@ khttpd_receive_body(struct khttpd_socket *socket)
 	}
 
 	if (request->receiving_chunk_and_trailer) {
-		khttpd_socket_set_receive_limit(socket, khttpd_message_size_limit);
+		khttpd_socket_set_receive_limit(socket,
+		    khttpd_message_size_limit);
 		socket->receive = khttpd_receive_crlf_following_chunk_data;
 
 	} else
@@ -2868,6 +2869,9 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 
 	khttpd_access(socket->port->server, socket, request);
 
+	KASSERT(request == socket->xmit_request,
+	    ("socket->xmit_request=%p, request=%p", socket->xmit_request,
+		request));
 	socket->xmit_request = NULL;
 	khttpd_request_free(request);
 
@@ -3054,7 +3058,9 @@ khttpd_accept_client(struct kevent *event)
 		goto bad;
 	}
 
+	mtx_lock(&khttpd_lock);
 	LIST_INSERT_HEAD(&khttpd_sockets, socket, link);
+	mtx_unlock(&khttpd_lock);
 
 	return;
 
@@ -3580,8 +3586,10 @@ khttpd_worker_main(void *arg)
 		}
 		mtx_unlock(&khttpd_lock);
 
+		TRACE("kevent enter");
 		error = khttpd_kevent(khttpd_kqueue, NULL, 0, &event, 1,
 		    &nevent, NULL);
+		TRACE("kevent leave");
 		if (error != 0)
 			TRACE("error kevent_get %d", error);
 
@@ -3623,6 +3631,8 @@ khttpd_worker_main(void *arg)
 	if (--khttpd_worker_count == 0)
 		wakeup(&khttpd_worker_count);
 	mtx_unlock(&khttpd_lock);
+
+	TRACE("leave");
 
 	kthread_exit();
 }
@@ -3680,7 +3690,6 @@ khttpd_main(void *arg)
 	struct kevent event;
 	struct khttpd_command *command;
 	struct khttpd_server_port *port;
-	struct khttpd_request *request;
 	struct khttpd_server *server;
 	struct khttpd_socket *socket;
 	struct thread *td;
@@ -3771,7 +3780,7 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 	khttpd_log_set_fd(&khttpd_debug_log, td->td_retval[0]);
-	//khttpd_debug_mask = KHTTPD_DEBUG_ALL;
+	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
 
 	bzero(&sigact, sizeof(sigact));
 	sigact.sa_handler = SIG_IGN;
@@ -3896,21 +3905,8 @@ cont:
 		}
 	}
 
-	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL) {
-		request = socket->recv_request;
-		if (request != NULL) {
-			khttpd_request_free(request);
-			socket->recv_request = NULL;
-		}
-
-		request = socket->xmit_request;
-		if (request != NULL) {
-			khttpd_request_free(request);
-			socket->xmit_request = NULL;
-		}
-
+	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL)
 		khttpd_socket_close(socket);
-	}
 
 	while ((server = SLIST_FIRST(&khttpd_servers)) != NULL) {
 		while ((port = SLIST_FIRST(&server->ports)) != NULL) {
