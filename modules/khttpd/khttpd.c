@@ -188,7 +188,6 @@ struct khttpd_socket {
 	/* must be &event_type == &<this struct> */
 	struct khttpd_event_type	event_type;
 	LIST_ENTRY(khttpd_socket) link;
-	STAILQ_HEAD(, khttpd_request) xmit_queue;
 	off_t			recv_limit;
 	khttpd_receive_t	receive;
 	khttpd_transmit_t	transmit;
@@ -205,6 +204,7 @@ struct khttpd_socket {
 	struct khttpd_request	*recv_request;
 	struct mbuf		*recv_tail;
 	struct mbuf		*xmit_buf;
+	struct khttpd_request	*xmit_request;
 	u_int			recv_off;
 	u_int			recv_bol_off;
 	unsigned		recv_found_bol:1;
@@ -1090,7 +1090,7 @@ khttpd_request_ctor(void *mem, int size, void *arg, int flags)
 	    offsetof(struct khttpd_request, khttpd_request_zctor_end) -
 	    offsetof(struct khttpd_request, khttpd_request_zctor_begin));
 
-	refcount_init(&request->ref_count, 2);	/* recv_request & xmit_queue */
+	refcount_init(&request->ref_count, 2);
 
 	return (0);
 }
@@ -1374,7 +1374,6 @@ khttpd_socket_init(void *mem, int size, int flags)
 	struct khttpd_socket *socket;
 
 	socket = mem;
-	STAILQ_INIT(&socket->xmit_queue);
 	socket->event_type.handle_event = khttpd_socket_handle_event;
 	return (0);
 }
@@ -1412,8 +1411,10 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 	socket = mem;
 	td = curthread;
 
-	KASSERT(socket->recv_request == NULL, ("orphan recv_request"));
-	KASSERT(STAILQ_EMPTY(&socket->xmit_queue), ("orphan request"));
+	KASSERT(socket->recv_request == NULL,
+	    ("socket->recv_request=%p", socket->recv_request));
+	KASSERT(socket->xmit_request == NULL,
+	    ("socket->xmit_request=%p", socket->xmit_request));
 	KASSERT(socket->refcount == 0, ("refcount=%d", socket->refcount));
 
 	m_freem(socket->recv_leftovers);
@@ -1449,27 +1450,12 @@ khttpd_socket_fd(struct khttpd_socket *socket)
 }
 
 static void
-khttpd_socket_clear_queue(struct khttpd_socket *socket)
-{
-	struct khttpd_request *request;
-
-	TRACE("enter");
-
-	while ((request = STAILQ_FIRST(&socket->xmit_queue)) != NULL) {
-		STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
-		khttpd_request_free(request);
-	}
-}
-
-static void
 khttpd_socket_close(struct khttpd_socket *socket)
 {
 	struct thread *td;
 
 	TRACE("enter");
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
-	KASSERT(STAILQ_EMPTY(&socket->xmit_queue),
-	    ("%p->xmit_queue is not empty.", socket));
 
 	td = curthread;
 
@@ -1501,17 +1487,14 @@ khttpd_socket_commit_response(struct khttpd_socket *socket,
 
 	request->response_committed = TRUE;
 
-	if (STAILQ_FIRST(&socket->xmit_queue) == request) {
-		so = socket->fp->f_data;
-		nopush = 1;
-		error = so_setsockopt(so, IPPROTO_TCP, TCP_NOPUSH, &nopush,
-		    sizeof(nopush));
-		if (error != 0)
-			log(LOG_WARNING, "khttpd: setsockopt(TCP_NOPUSH): %d",
-			    error);
+	so = socket->fp->f_data;
+	nopush = 1;
+	error = so_setsockopt(so, IPPROTO_TCP, TCP_NOPUSH, &nopush,
+	    sizeof(nopush));
+	if (error != 0)
+		log(LOG_WARNING, "khttpd: setsockopt(TCP_NOPUSH): %d", error);
 
-		socket->xmit_scheduled = TRUE;
-	}
+	socket->xmit_scheduled = TRUE;
 }
 
 static void
@@ -2065,7 +2048,7 @@ khttpd_socket_handle_event(struct kevent *event)
 			}
 		}
 
-		request = STAILQ_FIRST(&socket->xmit_queue);
+		request = socket->xmit_request;
 		if (request == NULL ||
 		    (!request->response_committed &&
 			!request->continue_response)) {
@@ -2121,7 +2104,11 @@ khttpd_socket_handle_event(struct kevent *event)
 		socket->recv_request = NULL;
 	}
 
-	khttpd_socket_clear_queue(socket);
+	if (socket->xmit_request != NULL) {
+		khttpd_request_free(socket->xmit_request);
+		socket->xmit_request = NULL;
+	}
+
 	khttpd_socket_close(socket);
 }
 
@@ -2749,9 +2736,8 @@ khttpd_receive_request_line(struct khttpd_socket *socket)
 	 * Enlist a new request.
 	 */
 
-	socket->recv_request = request =
+	socket->xmit_request = socket->recv_request = request =
 	    uma_zalloc(khttpd_request_zone, M_WAITOK);
-	STAILQ_INSERT_TAIL(&socket->xmit_queue, request, link);
 
 	/* 
 	 * If the request line is longer than khttpd_message_size_limit or is
@@ -2882,18 +2868,13 @@ khttpd_transmit_end(struct khttpd_socket *socket,
 
 	khttpd_access(socket->port->server, socket, request);
 
-	request = STAILQ_FIRST(&socket->xmit_queue);
-	STAILQ_REMOVE_HEAD(&socket->xmit_queue, link);
+	socket->xmit_request = NULL;
 	khttpd_request_free(request);
 
-	if (close) {
-		khttpd_socket_clear_queue(socket);
-
-		if (!socket->recv_eof) {
-			shutdown_args.s = socket->fd;
-			shutdown_args.how = SHUT_WR;
-			sys_shutdown(curthread, &shutdown_args);
-		}
+	if (close && !socket->recv_eof) {
+		shutdown_args.s = socket->fd;
+		shutdown_args.how = SHUT_WR;
+		sys_shutdown(curthread, &shutdown_args);
 	}
 
 	return (0);
@@ -3916,12 +3897,16 @@ cont:
 	}
 
 	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL) {
-		khttpd_socket_clear_queue(socket);
-
 		request = socket->recv_request;
 		if (request != NULL) {
 			khttpd_request_free(request);
 			socket->recv_request = NULL;
+		}
+
+		request = socket->xmit_request;
+		if (request != NULL) {
+			khttpd_request_free(request);
+			socket->xmit_request = NULL;
 		}
 
 		khttpd_socket_close(socket);
