@@ -506,6 +506,7 @@ static int khttpd_worker_count;
 static int khttpd_worker_count_max;
 static boolean_t khttpd_worker_shutdown;
 static struct khttpd_log khttpd_debug_log;
+static boolean_t khttpd_worker_initializing;
 
 /* --------------------------------------------------- function definitions */
 
@@ -3562,12 +3563,17 @@ khttpd_worker_main(void *arg)
 	struct kevent event;
 	struct khttpd_worker *head, *next;
 	int error, nevent;
-	boolean_t need_new_thread;
+	boolean_t need_new_thread, initialized;
 
 	TRACE("enter");
 
+	initialized = FALSE;
 	for (;;) {
 		mtx_lock(&khttpd_lock);
+		if (!initialized) {
+			initialized = TRUE;
+			khttpd_worker_initializing = FALSE;
+		}
 		head = TAILQ_FIRST(&khttpd_waiting_workers);
 		if (head == NULL)
 			TAILQ_INSERT_HEAD(&khttpd_waiting_workers, &entry,
@@ -3597,13 +3603,16 @@ khttpd_worker_main(void *arg)
 
 		TAILQ_REMOVE(&khttpd_waiting_workers, &entry, link);
 		next = TAILQ_FIRST(&khttpd_waiting_workers);
-		need_new_thread = next == NULL && !khttpd_worker_shutdown &&
+		need_new_thread = next == NULL &&
+		    !khttpd_worker_initializing && !khttpd_worker_shutdown &&
 		    khttpd_worker_count < khttpd_worker_count_max;
 
 		if (next != NULL)
 			wakeup(next);
-		else if (need_new_thread)
+		else if (need_new_thread) {
+			khttpd_worker_initializing = TRUE;
 			++khttpd_worker_count;
+		}
 
 		if (khttpd_worker_shutdown)
 			break;
@@ -3780,7 +3789,7 @@ khttpd_main(void *arg)
 		goto cont;
 	}
 	khttpd_log_set_fd(&khttpd_debug_log, td->td_retval[0]);
-	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
+	//khttpd_debug_mask = KHTTPD_DEBUG_ALL;
 
 	bzero(&sigact, sizeof(sigact));
 	sigact.sa_handler = SIG_IGN;
