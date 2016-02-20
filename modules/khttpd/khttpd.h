@@ -117,10 +117,6 @@ struct khttpd_config_args {
 #define KHTTPD_IOC_CONFIG				\
 	_IOW(KHTTPD_IOC, 0, struct khttpd_config_args)
 
-#ifndef KHTTPD_SYS_PREFIX
-#define KHTTPD_SYS_PREFIX "/sys"
-#endif
-
 #ifdef _KERNEL
 
 enum {

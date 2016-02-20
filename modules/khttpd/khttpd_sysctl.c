@@ -43,6 +43,10 @@
 #define KHTTPD_SYSCTL_JSON_DEPTH_MAX	16
 #endif
 
+#ifndef KHTTPD_SYS_PREFIX
+#define KHTTPD_SYS_PREFIX "/sys"
+#endif
+
 #ifndef KHTTPD_SYSCTL_PREFIX
 #define KHTTPD_SYSCTL_PREFIX KHTTPD_SYS_PREFIX "/sysctl"
 #endif
