@@ -213,7 +213,7 @@ khttpd_file_transmit(struct khttpd_socket *socket,
 	}
 
 	error = fo_sendfile(fp, khttpd_socket_fd(socket), NULL, NULL,
-	    data->xmit_offset, data->xmit_residual, &sent, 0, 0, td);
+	    data->xmit_offset, data->xmit_residual, &sent, 0, td);
 	if (error != 0)
 		TRACE("error sendfile %d", error);
 

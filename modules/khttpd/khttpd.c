@@ -25,16 +25,17 @@
  * DAMAGE.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/ctype.h>
 #include <sys/hash.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
+#include <sys/kernel.h>
+#include <sys/systm.h>
 #include <sys/malloc.h>
 #include <sys/smp.h>
 #include <sys/mbuf.h>
 #include <sys/sbuf.h>
-#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/fcntl.h>
@@ -1357,11 +1358,10 @@ khttpd_response_set_body_bytes(struct khttpd_response *response,
 
 	response->payload_size = size;
 	response->body = m = m_get(M_WAITOK, MT_DATA);
-	m->m_ext.ext_cnt = &response->body_refcnt;
 	m_extadd(m, data, size, free_data == NULL ?
 	    khttpd_response_free_body_extbuf_null :
 	    khttpd_response_free_body_extbuf,
-	    free_data, data, 0, EXT_EXTREF, M_WAITOK);
+	    free_data, data, 0, EXT_EXTREF);
 }
 
 /*
