@@ -1,7 +1,0 @@
-{
-    "dependencies": {
-	"react": "",
-	"react-dom": "",
-	"babelify": "",
-	"babel-preset-react": "" }
-}
