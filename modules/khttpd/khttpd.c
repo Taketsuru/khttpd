@@ -63,6 +63,8 @@
 #include "khttpd.h"
 #include "khttpd_private.h"
 
+#define KHTTPD_MAX_PORTS_PER_SERVER	4
+
 /* ------------------------------------------------------- type definitions */
 
 enum {
@@ -4194,6 +4196,9 @@ khttpd_config(struct khttpd_server *server, struct khttpd_config_args *args)
 	td = curthread;
 	fdp = td->td_proc->p_fd;
 	nfds = args->nfds;
+
+	if (KHTTPD_MAX_PORTS_PER_SERVER < nfds)
+		return (EINVAL);
 
 	fds = khttpd_malloc(nfds * sizeof(int));
 	error = copyin(args->fds, fds, nfds * sizeof(int));
