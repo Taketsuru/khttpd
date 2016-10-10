@@ -107,15 +107,33 @@ enum {
 	KHTTPD_FIELD_END
 };
 
-struct khttpd_config_args {
+enum {
+	KHTTPD_LOG_UNKNOWN,
+
+	KHTTPD_LOG_DEBUG,
+	KHTTPD_LOG_ERROR,
+	KHTTPD_LOG_ACCESS,
+
+	KHTTPD_LOG_END
+};
+
+struct khttpd_listen_args {
 	int	*fds;
 	int	nfds;
 };
 
+struct khttpd_config_log_args {
+	int	log;
+	int	flags;
+	int	fd;
+};
+
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_CONFIG				\
-	_IOW(KHTTPD_IOC, 0, struct khttpd_config_args)
+#define KHTTPD_IOC_LISTEN \
+	_IOW(KHTTPD_IOC, 0, struct khttpd_listen_args)
+#define KHTTPD_IOC_CONFIG_LOG \
+	_IOW(KHTTPD_IOC, 1, struct khttpd_config_log_args)
 
 #ifdef _KERNEL
 

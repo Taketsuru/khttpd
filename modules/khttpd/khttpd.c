@@ -67,14 +67,6 @@
 
 /* ------------------------------------------------------- type definitions */
 
-enum {
-	KHTTPD_LOG_DEBUG,
-	KHTTPD_LOG_ERROR,
-	KHTTPD_LOG_ACCESS,
-
-	KHTTPD_LOG_END
-};
-
 /* possible values of khttpd_state */
 enum {
 	/* the server process has not finished its initialization yet */
@@ -319,10 +311,16 @@ struct khttpd_label {
 
 SLIST_HEAD(khttpd_label_list, khttpd_label);
 
-struct khttpd_config_proc_args {
+struct khttpd_listen_proc_args {
 	struct khttpd_server	*server;
 	struct filedescent	*fdes;
 	int			nfdes;
+};
+
+struct khttpd_config_log_proc_args {
+	struct khttpd_server *server;
+	struct filedescent fde;
+	int	log;
 };
 
 struct khttpd_worker {
@@ -438,12 +436,6 @@ static struct khttpd_label khttpd_fields[] = {
 	{ "If-Unmodified-Since" }
 #endif
 };
-
-static const char *khttpd_default_mime_type_rules =
-    "application/javascript js\n"
-    "text/html html htm\n"
-    "text/plain txt\n"
-    "text/css css\n";
 
 /*
  * This value must be larger than the length of the longest name in
@@ -3075,23 +3067,6 @@ bad:
  * server
  */
 
-static struct khttpd_server *
-khttpd_server_alloc(const char *name)
-{
-	struct khttpd_server *result;
-
-	result = khttpd_malloc(sizeof(struct khttpd_server));
-	result->name = strdup(name, M_KHTTPD);
-	result->dev = NULL;
-	result->route_root = uma_zalloc_arg(khttpd_route_zone,
-	    &khttpd_route_type_null, M_WAITOK);
-	SLIST_INIT(&result->ports);
-	khttpd_log_init(&result->access_log);
-	khttpd_log_init(&result->error_log);
-
-	return (result);
-}
-
 static void
 khttpd_server_free(struct khttpd_server *server)
 {
@@ -3110,6 +3085,46 @@ khttpd_server_free(struct khttpd_server *server)
 	free((void *)server->name, M_KHTTPD);
 
 	khttpd_free(server);
+}
+
+static struct khttpd_server *
+khttpd_server_alloc(const char *name)
+{
+	struct khttpd_server *result;
+	struct khttpd_route *root;
+	int error;
+
+	result = khttpd_malloc(sizeof(struct khttpd_server));
+	result->name = strdup(name, M_KHTTPD);
+	result->dev = NULL;
+	result->route_root = root = uma_zalloc_arg(khttpd_route_zone,
+	    &khttpd_route_type_null, M_WAITOK);
+
+	error = khttpd_route_add(root, "*", &khttpd_route_type_asterisc);
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to add route '*': %d", error);
+		khttpd_free(result);
+		return (NULL);
+	}
+
+	SLIST_INIT(&result->ports);
+	khttpd_log_init(&result->access_log);
+	khttpd_log_init(&result->error_log);
+
+	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &result->dev,
+	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd/%s",
+	    result->name);
+	if (error != 0) {
+		log(LOG_ERR, "khttpd: failed to create the device file: %d",
+		    error);
+		result->dev->si_drv1 = NULL;
+		khttpd_server_free(result);
+		return (NULL);
+	}
+
+	result->dev->si_drv1 = result;
+
+	return (result);
 }
 
 struct khttpd_server *
@@ -3839,17 +3854,12 @@ khttpd_main(void *arg)
 		goto cont;
 
 	server = khttpd_server_alloc("ctrl");
-	SLIST_INSERT_HEAD(&khttpd_servers, server, link);
-
-	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &server->dev,
-	    &khttpd_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, "khttpd/%s",
-	    server->name);
-	if (error != 0) {
-		log(LOG_ERR, "khttpd: failed to create the device file: %d",
-		    error);
+	if (server == NULL) {
+		log(LOG_WARNING, "khttpd: failed to create "
+		    "the control server");
 		goto cont;
 	}
-	server->dev->si_drv1 = server;
+	SLIST_INSERT_HEAD(&khttpd_servers, server, link);
 
 cont:
 	mtx_lock(&khttpd_lock);
@@ -4017,21 +4027,17 @@ khttpd_externalize_fd(struct filedesc *fdp, int fd, struct filedescent *ent)
 }
 
 static int
-khttpd_config_proc(void *argptr)
+khttpd_listen_proc(void *argptr)
 {
 	struct kevent event;
 	struct listen_args listen_args;
 	struct khttpd_server_port_list ports;	
-	struct khttpd_config_proc_args *args;
+	struct khttpd_listen_proc_args *args;
 	struct filedesc *fdp;
-	struct file *fp;
 	struct khttpd_server_port *port;
-	struct khttpd_route *root, *tmproot;
-	struct khttpd_mime_type_rule_set *rules;
 	struct khttpd_server *server;
 	struct thread *td;
-	int i, error, *fds, *nextfdp, nfds, nsocks, *sockfds;
-	int fd, docroot_fd, access_log_fd, error_log_fd;
+	int i, error, fd, *fds, nfds;
 
 	TRACE("enter");
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
@@ -4042,10 +4048,7 @@ khttpd_config_proc(void *argptr)
 	fdp = td->td_proc->p_fd;
 	server = args->server;
 
-	nfds = 0;
-	for (i = 0; i < args->nfdes; ++i)
-		if (args->fdes[i].fde_file != NULL)
-			++nfds;
+	nfds = args->nfdes;
 	fds = khttpd_malloc(nfds * sizeof(int));
 
 	FILEDESC_XLOCK(fdp);
@@ -4058,48 +4061,21 @@ khttpd_config_proc(void *argptr)
 		goto bad1;
 	}
 
-	nextfdp = fds;
-	sockfds = NULL;
-	nsocks = 0;
-	docroot_fd = access_log_fd = error_log_fd = -1;
-	for (i = 0; i < args->nfdes; ++i) {
-		fp = args->fdes[i].fde_file;
-		if (fp == NULL)
-			fd = -1;
-		else {
-			fd = *nextfdp++;
-			khttpd_externalize_fd(fdp, fd, &args->fdes[i]);
-		}
-
-		switch (i) {
-		case 0:	/* docroot */
-			docroot_fd = fd;
-			break;
-		case 1: /* access log */
-			access_log_fd = fd;
-			break;
-		case 2:	/* error log */
-			error_log_fd = fd;
-			break;
-		case 3:
-			sockfds = nextfdp - 1;
-			/* FALLTHROUGH */
-		default:
-			if (fp != NULL)
-				++nsocks;
-		}
-	}
+	for (i = 0; i < nfds; ++i)
+		khttpd_externalize_fd(fdp, fds[i], &args->fdes[i]);
 
 	FILEDESC_XUNLOCK(fdp);
 
-	for (i = 0; i < nsocks; ++i) {
-		port = malloc(sizeof(*port), M_KHTTPD, M_WAITOK);
+	for (i = 0; i < nfds; ++i) {
+		fd = fds[i];
+
+		port = khttpd_malloc(sizeof(*port));
 		port->event_type.handle_event = khttpd_accept_client;
-		port->fd = sockfds[i];
+		port->fd = fd;
 		port->server = server;
 		SLIST_INSERT_HEAD(&ports, port, link);
 
-		listen_args.s = port->fd;
+		listen_args.s = fd;
 		listen_args.backlog = khttpd_listen_backlog;
 		error = sys_listen(td, &listen_args);
 		if (error != 0) {
@@ -4119,62 +4095,18 @@ khttpd_config_proc(void *argptr)
 		}
 	}
 
-	root = uma_zalloc_arg(khttpd_route_zone, &khttpd_route_type_null,
-	    M_WAITOK);
-
-	error = khttpd_route_add(root, "*", &khttpd_route_type_asterisc);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: failed to add route '*': %d",
-		    error);
-		goto bad3;
-	}
-
-	error = khttpd_sysctl_route(root);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: failed to add route for sysctl: %d",
-		    error);
-		goto bad3;
-	}
-
-	if (docroot_fd != -1) {
-		rules = khttpd_parse_mime_type_rules
-		    (khttpd_default_mime_type_rules);
-		error = khttpd_file_mount("/", root, fds[0], rules);
-		if (error != 0) {
-			log(LOG_WARNING, "khttpd: failed to mount root docs: "
-			    "%d", error);
-			goto bad4;
-		}
-	}
-
-	khttpd_log_set_fd(&server->access_log, access_log_fd);
-	khttpd_log_set_fd(&server->error_log, error_log_fd);
-
 	SLIST_SWAP(&server->ports, &ports, khttpd_server_port);
-
-	tmproot = server->route_root;
-	server->route_root = root;
-	khttpd_route_free(tmproot);
 
 	khttpd_free(fds);
 
 	return (0);
 
-bad4:
-	khttpd_mime_type_rule_set_free(rules);
-
-bad3:
-	khttpd_route_free(root);
 bad2:
 	while ((port = SLIST_FIRST(&ports)) != NULL) {
 		SLIST_REMOVE_HEAD(&ports, link);
-		if (port->fd != -1)
-			kern_close(td, port->fd);
+		kern_close(td, port->fd);
 		free(port, M_KHTTPD);
 	}
-	kern_close(td, docroot_fd);
-	kern_close(td, error_log_fd);
-	kern_close(td, access_log_fd);
 bad1:
 	khttpd_free(fds);
 
@@ -4182,14 +4114,14 @@ bad1:
 }
 
 static int
-khttpd_config(struct khttpd_server *server, struct khttpd_config_args *args)
+khttpd_listen(struct khttpd_server *server,
+    struct khttpd_listen_args *args)
 {
 	struct filedesc *fdp;
-	struct khttpd_config_proc_args proc_args;
-	struct thread *td;
-	int *fds, nfds;
-	int i, error, flags;
+	struct khttpd_listen_proc_args proc_args;
 	cap_rights_t rights;
+	struct thread *td;
+	int i, error, *fds, nfds;
 
 	TRACE("enter");
 
@@ -4210,40 +4142,26 @@ khttpd_config(struct khttpd_server *server, struct khttpd_config_args *args)
 	bzero(proc_args.fdes, nfds * sizeof(struct filedescent));
 	proc_args.nfdes = nfds;
 
+	cap_rights_init(&rights, CAP_LISTEN);
+
 	FILEDESC_SLOCK(fdp);
 
 	for (i = 0; i < nfds; ++i) {
-		if (fds[i] == -1)
-			continue;
-
-		switch (i) {
-		case 0:
-			flags = FEXEC;
-			cap_rights_init(&rights, CAP_LOOKUP);
-			break;
-
-		case 1:
-		case 2:
-			flags = FWRITE;
-			cap_rights_init(&rights, CAP_WRITE);
-			break;
-
-		default:
-			flags = FREAD;
-			cap_rights_init(&rights, CAP_LISTEN);
-		}
-
 		error = khttpd_internalize_fd(fdp, fds[i], &proc_args.fdes[i],
-		    flags, &rights);
+		    FREAD, &rights);
 		if (error != 0) {
 			FILEDESC_SUNLOCK(fdp);
-			goto bad3;
+			while (0 <= --i) {
+				filecaps_free(&proc_args.fdes[i].fde_caps);
+				fdrop(proc_args.fdes[i].fde_file, td);
+			}
+			goto bad2;
 		}
 	}
 
 	FILEDESC_SUNLOCK(fdp);
 
-	error = khttpd_run_proc(khttpd_config_proc, &proc_args);
+	error = khttpd_run_proc(khttpd_listen_proc, &proc_args);
 	if (error != 0)
 		goto bad2;
 
@@ -4252,16 +4170,91 @@ khttpd_config(struct khttpd_server *server, struct khttpd_config_args *args)
 
 	return (0);
 
-bad3:
-	while (0 <= --i)
-		if (proc_args.fdes[i].fde_file != NULL) {
-			filecaps_free(&proc_args.fdes[i].fde_caps);
-			fdrop(proc_args.fdes[i].fde_file, td);
-		}
 bad2:
 	khttpd_free(proc_args.fdes);
 bad1:
 	khttpd_free(fds);
+
+	return (error);
+}
+
+static int
+khttpd_config_log_proc(void *argptr)
+{
+	struct khttpd_config_log_proc_args *args;
+	struct filedesc *fdp;
+	struct khttpd_server *server;
+	struct thread *td;
+	int error, fd;
+
+	TRACE("enter");
+	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
+
+	args = argptr;
+	td = curthread;
+	fdp = td->td_proc->p_fd;
+	server = args->server;
+
+	FILEDESC_XLOCK(fdp);
+	error = fdalloc(td, 0, &fd);
+	if (error != 0) {
+		FILEDESC_XUNLOCK(fdp);
+		log(LOG_WARNING,
+		    "khttpd: failed to allocate file descriptors: %d", error);
+		return (error);
+	}
+	khttpd_externalize_fd(fdp, fd, &args->fde);
+	FILEDESC_XUNLOCK(fdp);
+
+	switch (args->log) {
+
+	case KHTTPD_LOG_ERROR:
+		khttpd_log_set_fd(&server->error_log, fd);
+		break;
+
+	case KHTTPD_LOG_ACCESS:
+		khttpd_log_set_fd(&server->access_log, fd);
+		break;
+
+	default:
+		panic("unknown log type: %d", args->log);
+	}
+
+	return (error);
+}
+
+static int
+khttpd_config_log(struct khttpd_server *server,
+    struct khttpd_config_log_args *args)
+{
+	struct filedesc *fdp;
+	struct khttpd_config_log_proc_args proc_args;
+	cap_rights_t rights;
+	struct thread *td;
+	int error;
+
+	TRACE("enter");
+
+	td = curthread;
+	fdp = td->td_proc->p_fd;
+
+	if (args->log <= KHTTPD_LOG_DEBUG || KHTTPD_LOG_END <= args->log)
+		return (EINVAL);
+
+	if (args->flags != 0)
+		return (EINVAL);
+
+	proc_args.server = server;
+	proc_args.log = args->log;
+	cap_rights_init(&rights, CAP_LISTEN);
+	FILEDESC_SLOCK(fdp);
+	error = khttpd_internalize_fd(fdp, args->fd, &proc_args.fde, FWRITE,
+	    &rights);
+	FILEDESC_SUNLOCK(fdp);
+	if (error != 0)
+		return (error);
+
+	error = khttpd_run_proc(khttpd_config_log_proc, &proc_args);
 
 	return (error);
 }
@@ -4274,9 +4267,14 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	switch (cmd) {
 
-	case KHTTPD_IOC_CONFIG:
-		error = khttpd_config(dev->si_drv1,
-		    (struct khttpd_config_args *)data);
+	case KHTTPD_IOC_LISTEN:
+		error = khttpd_listen(dev->si_drv1,
+		    (struct khttpd_listen_args *)data);
+		break;
+
+	case KHTTPD_IOC_CONFIG_LOG:
+		error = khttpd_config_log(dev->si_drv1,
+		    (struct khttpd_config_log_args *)data);
 		break;
 
 	default:

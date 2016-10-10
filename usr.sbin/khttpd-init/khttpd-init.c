@@ -166,7 +166,8 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 int main(int argc, char **argv)
 {
 	struct sockaddr_un unix_addr;
-	struct khttpd_config_args args;
+	struct khttpd_listen_args listen_args;
+	struct khttpd_config_log_args config_log_args;
 	struct fdvec fdvec;
 	const char *passwd_file;
 	size_t len;
@@ -175,10 +176,6 @@ int main(int argc, char **argv)
 	bzero(&fdvec, sizeof(fdvec));
 
 	passwd_file = NULL;
-
-	add_element(&fdvec, -1);	/* root dir fd */
-	add_element(&fdvec, -1);	/* access log fd */
-	add_element(&fdvec, -1);	/* error log fd */
 
 	docrootfd = -1;
 	accessfd = -1;
@@ -307,16 +304,25 @@ int main(int argc, char **argv)
 			    KHTTPD_DEFAULT_ERROR_LOG);
 	}
 
-	i = 0;
-	fdvec.memory[i++] = docrootfd;
-	fdvec.memory[i++] = accessfd;
-	fdvec.memory[i++] = errorfd;
+	config_log_args.log = KHTTPD_LOG_ERROR;
+	config_log_args.flags = 0;
+	config_log_args.fd = errorfd;
+	if (ioctl(devfd, KHTTPD_IOC_CONFIG_LOG, &config_log_args) == -1)
+		err(EX_OSERR, "failed to ioctl(KHTTPD_IOC_CONFIG_LOG) "
+			"to configure error log");
 
-	args.fds = fdvec.memory;
-	args.nfds = fdvec.len;
+	config_log_args.log = KHTTPD_LOG_ACCESS;
+	config_log_args.flags = 0;
+	config_log_args.fd = accessfd;
+	if (ioctl(devfd, KHTTPD_IOC_CONFIG_LOG, &config_log_args) == -1)
+		err(EX_OSERR, "failed to ioctl(KHTTPD_IOC_CONFIG_LOG) "
+			"to configure access log");
 
-	if (ioctl(devfd, KHTTPD_IOC_CONFIG, &args) == -1)
-		err(EX_OSERR, "failed to ioctl().");
+	listen_args.fds = fdvec.memory;
+	listen_args.nfds = fdvec.len;
+
+	if (ioctl(devfd, KHTTPD_IOC_LISTEN, &listen_args) == -1)
+		err(EX_OSERR, "failed to ioctl(fd, KHTTPD_IOC_LISTEN)");
 
 	return (0);
 }
