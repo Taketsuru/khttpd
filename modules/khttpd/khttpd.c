@@ -508,13 +508,25 @@ static boolean_t khttpd_worker_initializing;
 void *khttpd_malloc(size_t size)
 {
 
-	return malloc(size, M_KHTTPD, M_WAITOK);
+	return (malloc(size, M_KHTTPD, M_WAITOK));
 }
 
 void khttpd_free(void *mem)
 {
 
 	free(mem, M_KHTTPD);
+}
+
+void *khttpd_realloc(void *mem, size_t size)
+{
+
+	return (realloc(mem, size, M_KHTTPD, M_WAITOK));
+}
+
+char *khttpd_strdup(const char *str)
+{
+
+	return (strdup(str, M_KHTTPD));
 }
 
 static void khttpd_log_init(struct khttpd_log *log)
@@ -584,6 +596,7 @@ khttpd_log_entry_alloc(int type, struct khttpd_log_entry **entry,
 static void
 khttpd_log_entry_dtor(struct khttpd_log_entry *entry)
 {
+
 	switch (entry->type) {
 
 	case KHTTPD_LOG_ACCESS:
@@ -3934,7 +3947,7 @@ cont:
 			SLIST_REMOVE_HEAD(&server->ports, link);
 			if (port->fd != -1)
 				kern_close(td, port->fd);
-			free(port, M_KHTTPD);
+			khttpd_free(port);
 		}
 
 		SLIST_REMOVE_HEAD(&khttpd_servers, link);
@@ -4105,7 +4118,7 @@ bad2:
 	while ((port = SLIST_FIRST(&ports)) != NULL) {
 		SLIST_REMOVE_HEAD(&ports, link);
 		kern_close(td, port->fd);
-		free(port, M_KHTTPD);
+		khttpd_free(port);
 	}
 bad1:
 	khttpd_free(fds);

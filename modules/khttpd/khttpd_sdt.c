@@ -186,9 +186,8 @@ khttpd_sdt_ko_file_add(struct linker_file *file)
 	    ("duplicate entry %s", file->filename));
 
 	hash = khttpd_sdt_ko_file_hash(file);
-	filep = malloc(sizeof(*filep), M_KHTTPD, M_WAITOK);
-	SLIST_INSERT_HEAD(&khttpd_sdt_ko_files[hash], filep,
-	    hash_link);
+	filep = khttpd_malloc(sizeof(*filep));
+	SLIST_INSERT_HEAD(&khttpd_sdt_ko_files[hash], filep, hash_link);
 	LIST_INIT(&filep->probes);
 	filep->file = file;
 
@@ -624,7 +623,7 @@ khttpd_sdt_provider_new(const char *name)
 	}
 
 	provider = khttpd_malloc(sizeof(*provider));
-	provider->name = strdup(name, M_KHTTPD);
+	provider->name = khttpd_strdup(name);
 	provider->sdt_refs = 1;
 
 	hash = hash32_str(name, 0) & (KHTTPD_SDT_PROVIDER_HASH_SIZE - 1);

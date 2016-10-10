@@ -37,8 +37,6 @@
 struct filedescent;
 struct khttpd_mime_type_rule_set;
 
-MALLOC_DECLARE(M_KHTTPD);
-
 #ifdef KHTTPD_DEBUG
 #define	DTR0(d)				CTR0(KTR_GEN, d)
 #define	DTR1(d, p1)			CTR1(KTR_GEN, d, p1)
@@ -88,6 +86,8 @@ extern struct proc *khttpd_proc;
 
 void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
+void *khttpd_realloc(void *mem, size_t size);
+char *khttpd_strdup(const char *str);
 
 void khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
     struct khttpd_request *request);

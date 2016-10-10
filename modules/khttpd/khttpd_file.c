@@ -242,7 +242,7 @@ khttpd_file_request_data_alloc(const char *path)
 	 * result in "."
 	 */
 	pathsize = MAX(2, strlen(path) + 1);
-	data = malloc(sizeof(*data) + pathsize, M_KHTTPD, M_WAITOK);
+	data = khttpd_malloc(sizeof(*data) + pathsize);
 	data->pathsize = pathsize;
 	data->fd = -1;
 
@@ -257,7 +257,7 @@ khttpd_file_request_data_free(struct khttpd_file_request_data *data)
 	td = curthread;
 	if (data->fd != -1)
 		kern_close(td, data->fd);
-	free(data, M_KHTTPD);
+	khttpd_free(data);
 }
 
 static void
@@ -341,7 +341,7 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 	target_len = strlen(khttpd_request_target(request));
 	index_len = strlen(khttpd_index_names[i]);
 
-	path = malloc(target_len + 1 +index_len + 1, M_KHTTPD, M_WAITOK);
+	path = khttpd_malloc(target_len + 1 +index_len + 1);
 	bcopy(khttpd_request_target(request), path, target_len);
 	len = target_len;
 	if (path[len - 1] != '/')
@@ -352,7 +352,7 @@ khttpd_file_redirect_to_index(struct khttpd_socket *socket,
 
 	khttpd_set_moved_permanently_response(socket, request, NULL, path);
 
-	free(path, M_KHTTPD);
+	khttpd_free(path);
 }
 
 static void
@@ -466,8 +466,8 @@ khttpd_file_route_dtor(struct khttpd_route *route)
 
 	khttpd_mime_type_rule_set_free(route_data->rule_set);
 	kern_close(curthread, route_data->dirfd);
-	free(route_data->path, M_KHTTPD);
-	free(route_data, M_KHTTPD);
+	khttpd_free(route_data->path);
+	khttpd_free(route_data);
 }
 
 int
@@ -503,9 +503,8 @@ khttpd_file_mount(const char *path, struct khttpd_route *root,
 		goto end;
 	}
 
-	route_data = malloc(sizeof(struct khttpd_file_route_data), M_KHTTPD,
-	    M_WAITOK);
-	route_data->path = strdup(path, M_KHTTPD);
+	route_data = khttpd_malloc(sizeof(struct khttpd_file_route_data));
+	route_data->path = khttpd_strdup(path);
 	route_data->rule_set = rules;
 	route_data->dirfd = rootfd;
 
@@ -524,9 +523,8 @@ khttpd_mime_type_rule_set_alloc(uint32_t hash_size, char *buf)
 
 	TRACE("enter");
 
-	rule_set = malloc(sizeof(*rule_set) +
-	    sizeof(struct khttpd_mime_type_rule_slist) * hash_size, M_KHTTPD, 
-	    M_WAITOK);
+	rule_set = khttpd_malloc(sizeof(*rule_set) +
+	    sizeof(struct khttpd_mime_type_rule_slist) * hash_size);
 	rule_set->buffer = buf;
 	rule_set->hash_mask = hash_size - 1;
 
@@ -556,8 +554,8 @@ khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
 			uma_zfree(khttpd_mime_type_rule_zone, rule);
 		}
 
-	free(rule_set->buffer, M_KHTTPD);
-	free(rule_set, M_KHTTPD);
+	khttpd_free(rule_set->buffer);
+	khttpd_free(rule_set);
 }
 
 static const char *

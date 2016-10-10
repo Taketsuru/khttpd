@@ -127,9 +127,8 @@ khttpd_json_free(struct khttpd_json *value)
 			if (stacksize <= depth) {
 				stacksize =
 				    stacksize < 8 ? 8 : stacksize << 1;
-				stack = realloc(stack,
-				    stacksize * sizeof(struct khttpd_json *),
-				    M_KHTTPD, M_WAITOK);
+				stack = khttpd_realloc(stack,
+				    stacksize * sizeof(struct khttpd_json *));
 			}
 
 			stack[depth++] = ptr;
@@ -139,7 +138,7 @@ khttpd_json_free(struct khttpd_json *value)
 no_children:
 		if (ptr->type != KHTTPD_JSON_INTEGER &&
 		    ptr->storage != ptr->data)
-			free(ptr->storage, M_KHTTPD);
+			khttpd_free(ptr->storage);
 		uma_zfree(khttpd_json_zone, ptr);
 		if (depth == 0)
 			break;
@@ -147,7 +146,7 @@ no_children:
 		ptr->size -= sizeof(struct khttpd_json *);
 	}
 
-	free(stack, M_KHTTPD);
+	khttpd_free(stack);
 }
 
 static void
@@ -176,7 +175,7 @@ khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 		ssize = sizeof(value->data) << 1;
 	value->storage_size = ssize;
 
-	value->storage = realloc(storage, ssize, M_KHTTPD, M_WAITOK);
+	value->storage = khttpd_realloc(storage, ssize);
 	if (storage == NULL)
 		bcopy(value->data, value->storage, size);
 }
@@ -370,7 +369,7 @@ khttpd_json_object_new(int size_hint)
 		result->storage = result->data;
 	} else {
 		result->storage_size = len;
-		result->storage = malloc(len, M_KHTTPD, M_WAITOK);
+		result->storage = khttpd_malloc(len);
 	}
 
 	return result;

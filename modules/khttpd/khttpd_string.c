@@ -121,7 +121,7 @@ khttpd_dup_first_line(const char *str)
 	if (str < end && end[-1] == '\r')
 		--end;
 
-	buf = malloc(end - str + 1, M_KHTTPD, M_WAITOK);
+	buf = khttpd_malloc(end - str + 1);
 	bcopy(str, buf, end - str);
 	buf[end - str] = '\0';
 

@@ -43,7 +43,7 @@ static void
 khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
 {
 
-	free(mtod(buf, char *) - sizeof(u_int), M_KHTTPD);
+	khttpd_free(mtod(buf, char *) - sizeof(u_int));
 }
 
 void
@@ -67,7 +67,7 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 		buf = buf->m_next;
 	} else {
 		buf = buf->m_next = m_get(M_WAITOK, MT_DATA);
-		extbuf = malloc(sizeof(u_int) + req + 1, M_KHTTPD, M_WAITOK);
+		extbuf = khttpd_malloc(sizeof(u_int) + req + 1);
 		buf->m_ext.ext_cnt = (u_int *)extbuf;
 		MEXTADD(buf, extbuf + sizeof(u_int), req + 1,
 		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
@@ -445,7 +445,7 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
 
 	size = 0;
 	bufsize = 128;
-	buf = malloc(bufsize, M_KHTTPD, M_WAITOK);
+	buf = khttpd_malloc(bufsize);
 
 	while ((ch = khttpd_mbuf_getc(iter)) != -1) {
 		code = 0;
@@ -465,7 +465,7 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
 			else if (ch == '=')
 				++equals;
 			else {
-				free(buf, M_KHTTPD);
+				khttpd_free(buf);
 				return (EINVAL);
 			}
 			ch = khttpd_mbuf_getc(iter);
@@ -475,7 +475,7 @@ khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
 		if (bufsize < size + 3 - equals) {
 			bufsize = bufsize < 65536 ? bufsize << 1
 			    : bufsize + 65536;
-			buf = realloc(buf, bufsize, M_KHTTPD, M_WAITOK);
+			buf = khttpd_realloc(buf, bufsize);
 		}
 
 		for (i = 2; equals <= i; --i)

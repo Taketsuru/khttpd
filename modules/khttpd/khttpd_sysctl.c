@@ -276,7 +276,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 			TRACE("error name1 %d", error);
 			goto again;
 		}
-		strbuf = realloc(strbuf, strbuflen, M_KHTTPD, M_WAITOK);
+		strbuf = khttpd_realloc(strbuf, strbuflen);
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen, NULL,
 		    0, NULL, 0);
@@ -297,7 +297,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 			TRACE("error oidfmt1 %d", error);
 			goto again;
 		}
-		strbuf = realloc(strbuf, strbuflen, M_KHTTPD, M_WAITOK);
+		strbuf = khttpd_realloc(strbuf, strbuflen);
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen, NULL,
 		    0, NULL, 0);
@@ -340,8 +340,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		    next_oidlen / sizeof(int) + 2, NULL, 0, NULL, 0,
 		    &strbuflen, 0);
 		if (error == 0) {
-			strbuf = realloc(strbuf, strbuflen, M_KHTTPD,
-			    M_WAITOK);
+			strbuf = khttpd_realloc(strbuf, strbuflen);
 			error = kernel_sysctl(td, next_oid,
 			    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen,
 			    NULL, 0, NULL, 0);
