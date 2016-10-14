@@ -69,6 +69,7 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 		buf = buf->m_next = m_get(M_WAITOK, MT_DATA);
 		extbuf = khttpd_malloc(sizeof(u_int) + req + 1);
 		buf->m_ext.ext_cnt = (u_int *)extbuf;
+		*buf->m_ext.ext_cnt = 1;
 		MEXTADD(buf, extbuf + sizeof(u_int), req + 1,
 		    khttpd_mbuf_vprintf_free, NULL, NULL, 0, EXT_EXTREF);
 	}
