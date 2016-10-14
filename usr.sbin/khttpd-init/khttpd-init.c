@@ -131,7 +131,7 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 	char *host_name;
 	char *service_name;
 	struct addrinfo ai_hint, *ai_list, *ai_ptr;
-	int fd, gai_error;
+	int fd, gai_error, soval;
 
 	parse_name(family, name, &host_name, &service_name);
 
@@ -152,6 +152,12 @@ open_server_port(struct fdvec *fdvec, int family, const char *name)
 		if (fd == -1)
 			err(EX_OSERR, "failed to open a socket");
 
+		soval = 1;
+		if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &soval,
+			sizeof(soval)) == -1)
+			err(EX_OSERR,
+			    "failed to set setsockopt(SO_REUSEADDR).");
+
 		if (bind(fd, ai_ptr->ai_addr, ai_ptr->ai_addrlen) == -1)
 			err(EX_NOHOST, "failed to bind socket.");
 
@@ -171,7 +177,7 @@ int main(int argc, char **argv)
 	struct fdvec fdvec;
 	const char *passwd_file;
 	size_t len;
-	int accessfd, ch, docrootfd, devfd, errorfd, i, sockfd;
+	int accessfd, ch, docrootfd, devfd, errorfd, sockfd;
 
 	bzero(&fdvec, sizeof(fdvec));
 
