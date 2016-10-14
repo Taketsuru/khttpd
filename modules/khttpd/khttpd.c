@@ -30,6 +30,7 @@
 #include <sys/hash.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
+#include <sys/stack.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
@@ -509,28 +510,72 @@ static struct mbufq khttpd_msgbuf;
 
 /* --------------------------------------------------- function definitions */
 
+/*
+ * malloc/free/realloc wrapper functions
+ */
+
 void *khttpd_malloc(size_t size)
 {
+#ifdef KHTTPD_TRACE_MALLOC
+	struct stack st;
+#endif
+	void *mem;
 
-	return (malloc(size, M_KHTTPD, M_WAITOK));
+	mem = malloc(size, M_KHTTPD, M_WAITOK);
+
+#ifdef KHTTPD_TRACE_MALLOC
+	TR2("alloc %p %#lx", mem, size);
+	stack_save(&st);
+	CTRSTACK(KTR_GEN, &st, 8, 0);
+#endif
+	return (mem);
 }
 
 void khttpd_free(void *mem)
 {
 
 	free(mem, M_KHTTPD);
+
+#ifdef KHTTPD_TRACE_MALLOC
+	TR1("free %p", mem);
+#endif
 }
 
 void *khttpd_realloc(void *mem, size_t size)
 {
+#ifdef KHTTPD_TRACE_MALLOC
+	struct stack st;
+#endif
+	void *newmem;
 
-	return (realloc(mem, size, M_KHTTPD, M_WAITOK));
+	newmem = realloc(mem, size, M_KHTTPD, M_WAITOK);
+
+#ifdef KHTTPD_TRACE_MALLOC
+	TR1("free %p", mem);
+	TR2("alloc %p %#lx", newmem, size);
+	stack_save(&st);
+	CTRSTACK(KTR_GEN, &st, 8, 0);
+#endif
+
+	return (newmem);
 }
 
 char *khttpd_strdup(const char *str)
 {
+#ifdef KHTTPD_TRACE_MALLOC
+	struct stack st;
+#endif
+	char *newstr;
 
-	return (strdup(str, M_KHTTPD));
+	newstr = strdup(str, M_KHTTPD);
+
+#ifdef KHTTPD_TRACE_MALLOC
+	TR2("alloc %p %#lx", newstr, strlen(newstr) + 1);
+	stack_save(&st);
+	CTRSTACK(KTR_GEN, &st, 8, 0);
+#endif
+
+	return (newstr);
 }
 
 /*
