@@ -48,7 +48,6 @@
 #include <sys/socketvar.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
-#include <sys/systm.h>
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
 #include <sys/un.h>
@@ -3782,7 +3781,6 @@ static void
 khttpd_main(void *arg)
 {
 	struct khttpd_command_list worklist;
-	sigset_t sigmask;
 	struct sigaction sigact;
 	struct kevent event;
 	struct khttpd_command *command;
@@ -3886,26 +3884,11 @@ khttpd_main(void *arg)
 #endif
 
 	bzero(&sigact, sizeof(sigact));
-	sigact.sa_handler = SIG_IGN;
-	error = kern_sigaction(td, SIGUSR1, &sigact, NULL, 0);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: sigaction(SIGUSR1) failed: %d",
-		    error);
-		goto cont;
-	}
 
 	error = kern_sigaction(td, SIGPIPE, &sigact, NULL, 0);
 	if (error != 0) {
 		log(LOG_WARNING, "khttpd: sigaction(SIGPIPE) failed: %d",
 		    error);
-		goto cont;
-	}
-
-	SIGEMPTYSET(sigmask);
-	SIGADDSET(sigmask, SIGUSR1);
-	error = kern_sigprocmask(td, SIG_UNBLOCK, &sigmask, NULL, 0);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: sigprocmask() failed: %d", error);
 		goto cont;
 	}
 
