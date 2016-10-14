@@ -3738,6 +3738,10 @@ khttpd_main(void *arg)
 	TRACE("enter %p", arg);
 	KHTTPD_ASSERT_CURPROC_IS_KHTTPD();
 
+#ifdef KHTTPD_KTR_LOGGING
+	khttpd_ktr_logging_init();
+#endif
+
 	khttpd_main_thread = curthread;
 	khttpd_worker_count_max = mp_ncpus * 3;
 
@@ -3972,6 +3976,10 @@ cont:
 	uma_zdestroy(khttpd_request_zone);
 	uma_zdestroy(khttpd_response_zone);
 	uma_zdestroy(khttpd_route_zone);
+
+#ifdef KHTTPD_KTR_LOGGING
+	khttpd_ktr_logging_fini();
+#endif
 
 	kproc_exit(0);
 }

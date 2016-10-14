@@ -129,4 +129,7 @@ int khttpd_sdt_load(void);
 void khttpd_sdt_unload(void);
 int khttpd_sdt_quiesce(void);
 
+int khttpd_ktr_logging_init(void);
+void khttpd_ktr_logging_fini(void);
+
 #endif	/* _KERNEL */

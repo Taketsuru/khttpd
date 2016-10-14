@@ -24,11 +24,14 @@
 
 SRCS = khttpd.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
 SRCS += khttpd_sysctl.c khttpd_file.c khttpd_sdt.c
+SRCS += khttpd_ktr.c
 KMOD = khttpd
 
 .include <bsd.kmod.mk>
 
-CFLAGS += -g -DKHTTPD_DEBUG
+CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1
+CFLAGS += -DKHTTPD_TRACE_MALLOC -DKHTTPD_KTR_LOGGING
+CFLAGS += -DKHTTPD_KTR_FILE=\"/usr/home/taketsuru/work/khttpd/modules/khttpd/ktr.txt\"
 CWARNFLAGS += -Wno-cast-qual
 
 cscope:
