@@ -46,7 +46,7 @@ khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
 	khttpd_free(mtod(buf, char *) - sizeof(u_int));
 }
 
-void
+int
 khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 {
 	char *extbuf;
@@ -78,16 +78,21 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 end:
 	buf->m_len += req;
 	va_end(vlcopy);
+
+	return (req);
 }
 
-void
+int
 khttpd_mbuf_printf(struct mbuf *output, const char *fmt, ...)
 {
 	va_list vl;
+	int result;
 
 	va_start(vl, fmt);
-	khttpd_mbuf_vprintf(output, fmt, vl);
+	result = khttpd_mbuf_vprintf(output, fmt, vl);
 	va_end(vl);
+
+	return (result);
 }
 
 struct mbuf *

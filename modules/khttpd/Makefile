@@ -27,6 +27,16 @@ SRCS += khttpd_sysctl.c khttpd_file.c khttpd_sdt.c
 SRCS += khttpd_ktr.c
 KMOD = khttpd
 
+.if !defined(KERNBUILDDIR)
+
+beforedepend: ddb
+beforebuild: ddb
+ddb:
+	ln -fhs `(cd ${SYSDIR}/ddb && /bin/pwd)` ddb
+CLEANFILES += ddb
+
+.endif
+
 .include <bsd.kmod.mk>
 
 CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1

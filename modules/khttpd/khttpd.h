@@ -110,7 +110,6 @@ enum {
 enum {
 	KHTTPD_LOG_UNKNOWN,
 
-	KHTTPD_LOG_DEBUG,
 	KHTTPD_LOG_ERROR,
 	KHTTPD_LOG_ACCESS,
 
@@ -201,8 +200,8 @@ void khttpd_received_body_null(struct khttpd_socket *,
     struct khttpd_request *, struct mbuf *);
 void khttpd_request_dtor_null(struct khttpd_request *request, void *data);
 
-void khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
-void khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
+int khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
+int khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
 struct mbuf *khttpd_mbuf_append(struct mbuf *output, const char *begin,
     const char *end);
 struct mbuf *khttpd_mbuf_append_ch(struct mbuf *output, char ch);

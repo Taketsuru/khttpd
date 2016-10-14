@@ -63,7 +63,13 @@
 #include "khttpd.h"
 #include "khttpd_private.h"
 
+#ifndef KHTTPD_MAX_PORTS_PER_SERVER
 #define KHTTPD_MAX_PORTS_PER_SERVER	4
+#endif
+
+#ifndef KHTTPD_MSGBUF_LIMIT
+#define KHTTPD_MSGBUF_LIMIT	1024
+#endif
 
 /* ------------------------------------------------------- type definitions */
 
@@ -130,10 +136,6 @@ struct khttpd_log_entry {
 	struct bintime		timestamp;
 	struct khttpd_log	*target;
 	union {
-		struct {
-			lwpid_t		tid;
-			const char	*func;
-		} debug;
 		struct {
 			int	severity;
 		} error;
@@ -500,8 +502,10 @@ static int khttpd_kqueue;
 static int khttpd_worker_count;
 static int khttpd_worker_count_max;
 static boolean_t khttpd_worker_shutdown;
-static struct khttpd_log khttpd_debug_log;
 static boolean_t khttpd_worker_initializing;
+
+static struct sx khttpd_msgbuf_lock;
+static struct mbufq khttpd_msgbuf;
 
 /* --------------------------------------------------- function definitions */
 
@@ -527,6 +531,47 @@ char *khttpd_strdup(const char *str)
 {
 
 	return (strdup(str, M_KHTTPD));
+}
+
+/*
+ * message buffer
+ */
+
+static void khttpd_msgbuf_init(void)
+{
+
+	sx_init(&khttpd_msgbuf_lock, "khttpd-msgbuf");
+	mbufq_init(&khttpd_msgbuf, KHTTPD_MSGBUF_LIMIT);
+}
+
+static void khttpd_msgbuf_fini(void)
+{
+
+	sx_destroy(&khttpd_msgbuf_lock);
+	mbufq_drain(&khttpd_msgbuf);
+}
+
+void khttpd_msgbuf_put(const char *func, const char *fmt, ...)
+{
+	struct mbuf *m;
+	va_list vl;
+
+	va_start(vl, fmt);
+
+	sx_xlock(&khttpd_msgbuf_lock);
+
+	while (mbufq_full(&khttpd_msgbuf))
+		m_freem(mbufq_dequeue(&khttpd_msgbuf));
+
+	m = m_get(M_WAITOK, MT_DATA);
+	khttpd_mbuf_printf(m, "%lld %s ", get_cyclecount(), func);
+	khttpd_mbuf_vprintf(m, fmt, vl);
+	khttpd_mbuf_append_ch(m, '\n');
+	mbufq_enqueue(&khttpd_msgbuf, m);
+
+	sx_xunlock(&khttpd_msgbuf_lock);
+
+	va_end(vl);
 }
 
 static void khttpd_log_init(struct khttpd_log *log)
@@ -3292,29 +3337,6 @@ khttpd_error(struct khttpd_server *server, int severity, const char *fmt, ...)
 	khttpd_log_enqueue(m);
 }
 
-void
-khttpd_debug(const char *func, const char *fmt, ...)
-{
-	struct mbuf *m;
-	struct khttpd_log_entry *e;
-	va_list vl;
-
-	if (curthread == khttpd_logger_thread || khttpd_debug_log.fd == -1)
-		return;
-
-	m = khttpd_log_entry_alloc(KHTTPD_LOG_DEBUG, &e, &khttpd_debug_log);
-
-	e = mtod(m, struct khttpd_log_entry *);
-	e->debug.tid = curthread->td_tid;
-	e->debug.func = func;
-
-	va_start(vl, fmt);
-	khttpd_mbuf_vprintf(m, fmt, vl);
-	va_end(vl);
-
-	khttpd_log_enqueue(m);
-}
-
 static void
 khttpd_logger_put_request_line(struct mbuf *out,
     struct khttpd_request *request)
@@ -3437,15 +3459,6 @@ khttpd_logger_put(void)
 		dest = e->target;
 
 		switch (type) {
-
-		case KHTTPD_LOG_DEBUG:
-			khttpd_mbuf_printf(hd, "%ld.%06ld %d %s ", tv.tv_sec,
-			    tv.tv_usec, e->debug.tid, e->debug.func);
-			khttpd_log_entry_dtor(e);
-			m_adj(m, sizeof(struct khttpd_log_entry));
-			m_cat(hd, m);
-			khttpd_mbuf_append_ch(hd, '\n');
-			break;
 
 		case KHTTPD_LOG_ACCESS:
 			khttpd_logger_put_access_log(hd, &tv, e);
@@ -3741,6 +3754,7 @@ khttpd_main(void *arg)
 #ifdef KHTTPD_KTR_LOGGING
 	khttpd_ktr_logging_init();
 #endif
+	khttpd_msgbuf_init();
 
 	khttpd_main_thread = curthread;
 	khttpd_worker_count_max = mp_ncpus * 3;
@@ -3822,8 +3836,9 @@ khttpd_main(void *arg)
 		    error);
 		goto cont;
 	}
-	khttpd_log_set_fd(&khttpd_debug_log, td->td_retval[0]);
-	//khttpd_debug_mask = KHTTPD_DEBUG_ALL;
+#ifdef KHTTPD_DEBUG
+	khttpd_debug_mask = KHTTPD_DEBUG_ALL;
+#endif
 
 	bzero(&sigact, sizeof(sigact));
 	sigact.sa_handler = SIG_IGN;
@@ -3970,13 +3985,12 @@ cont:
 		khttpd_logger_wait("khttpd-log-exit");
 	mtx_unlock(&khttpd_lock);
 
-	khttpd_log_close(&khttpd_debug_log);
-
 	uma_zdestroy(khttpd_socket_zone);
 	uma_zdestroy(khttpd_request_zone);
 	uma_zdestroy(khttpd_response_zone);
 	uma_zdestroy(khttpd_route_zone);
 
+	khttpd_msgbuf_fini();
 #ifdef KHTTPD_KTR_LOGGING
 	khttpd_ktr_logging_fini();
 #endif
@@ -4259,7 +4273,7 @@ khttpd_config_log(struct khttpd_server *server,
 	td = curthread;
 	fdp = td->td_proc->p_fd;
 
-	if (args->log <= KHTTPD_LOG_DEBUG || KHTTPD_LOG_END <= args->log)
+	if (args->log <= KHTTPD_LOG_UNKNOWN || KHTTPD_LOG_END <= args->log)
 		return (EINVAL);
 
 	if (args->flags != 0)
@@ -4348,8 +4362,6 @@ khttpd_load(void)
 
 	mtx_init(&khttpd_lock, "khttpd", NULL, MTX_DEF);
 
-	khttpd_log_init(&khttpd_debug_log);
-
 	error = kproc_create(khttpd_main, NULL, &khttpd_proc, 0, 0, "khttpd");
 	if (error != 0) {
 		log(LOG_ERR, "khttpd: failed to fork khttpd: %d", error);
@@ -4412,5 +4424,19 @@ khttpd_loader(struct module *m, int what, void *arg)
 		return (EOPNOTSUPP);
 	}
 }
+
+#ifdef DDB
+
+#include <ddb/ddb.h>
+
+DB_SHOW_COMMAND(khttpd_msgbuf, db_show_khttpd_msgbuf)
+{
+	struct mbuf *m;
+
+	STAILQ_FOREACH(m, &khttpd_msgbuf.mq_head, m_stailqpkt)
+		db_printf("%.*s", m->m_len, mtod(m, char *));
+}
+
+#endif
 
 DEV_MODULE(khttpd, khttpd_loader, NULL);
