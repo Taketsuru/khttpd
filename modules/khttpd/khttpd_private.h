@@ -92,13 +92,6 @@ char *khttpd_strdup(const char *str);
 void khttpd_msgbuf_put(const char *func, const char *fmt, ...)
 	__attribute__ ((__format__ (__printf__, 2, 3)));
 
-void khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
-    struct khttpd_request *request);
-void khttpd_error(struct khttpd_server *server, int severity,
-    const char *fmt, ...) __attribute__ ((__format__ (__printf__, 3, 4)));
-void khttpd_logger_suspend(void);
-void khttpd_logger_resume(void);
-
 char *khttpd_find_ch(const char *begin, const char search);
 char *khttpd_find_ch_in(const char *begin, const char *end, char ch);
 char *khttpd_skip_whitespace(const char *ptr);

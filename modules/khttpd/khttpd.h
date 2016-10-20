@@ -110,8 +110,8 @@ enum {
 enum {
 	KHTTPD_LOG_UNKNOWN,
 
-	KHTTPD_LOG_ERROR,
 	KHTTPD_LOG_ACCESS,
+	KHTTPD_LOG_ERROR,
 
 	KHTTPD_LOG_END
 };
@@ -154,6 +154,7 @@ struct khttpd_json;
 struct khttpd_request;
 struct khttpd_response;
 struct khttpd_route;
+struct khttpd_server;
 struct khttpd_socket;
 struct khttpd_header;
 struct khttpd_header_field;
@@ -180,6 +181,11 @@ struct khttpd_route_type {
 	const char		*name;
 	khttpd_received_header_t received_header;
 };
+
+void khttpd_verror(struct khttpd_server *server, struct khttpd_socket *socket,
+    struct khttpd_request *request, const char *fmt, va_list ap);
+void khttpd_error(struct khttpd_server *server, struct khttpd_socket *socket,
+    struct khttpd_request *request, const char *fmt, ...);
 
 int khttpd_route_add(struct khttpd_route *root, const char *path,
     struct khttpd_route_type *route_type);

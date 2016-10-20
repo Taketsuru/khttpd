@@ -986,9 +986,9 @@ khttpd_json_mbuf_append_string(struct mbuf *output,
 {
 	struct mbuf *tail;
 
-	tail = khttpd_mbuf_append_ch(output, '\"');
+	tail = khttpd_mbuf_append_ch(output, '"');
 	tail = khttpd_json_mbuf_append_string_wo_quote(tail, begin, end);
-	tail = khttpd_mbuf_append_ch(tail, '\"');
+	tail = khttpd_mbuf_append_ch(tail, '"');
 	return (tail);
 }
 
