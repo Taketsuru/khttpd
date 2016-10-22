@@ -178,7 +178,6 @@ struct khttpd_mbuf_pos {
 };
 
 struct khttpd_route_type {
-	const char		*name;
 	khttpd_received_header_t received_header;
 };
 

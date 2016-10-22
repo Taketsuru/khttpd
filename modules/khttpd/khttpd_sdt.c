@@ -126,12 +126,10 @@ SPLAY_GENERATE(khttpd_sdt_probe_tree, khttpd_sdt_probe, tree_entry,
 /* --------------------------------------------------- variable definitions */
 
 static struct khttpd_route_type khttpd_route_type_sdt_probe = {
-	.name = "sdt-probe",
 	.received_header = khttpd_sdt_probe_received_header
 };
 
 static struct khttpd_route_type khttpd_route_type_sdt_history = {
-	.name = "sdt-history",
 	.received_header = khttpd_sdt_history_received_header
 };
 

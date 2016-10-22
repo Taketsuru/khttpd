@@ -439,12 +439,10 @@ static struct cdevsw khttpd_cdevsw = {
  */
 
 static struct khttpd_route_type khttpd_route_type_null = {
-	.name = "<no route>",
 	.received_header = khttpd_received_header_null,
 };
 
 static struct khttpd_route_type khttpd_route_type_asterisc = {
-	.name = "asterisc",
 	.received_header = khttpd_asterisc_received_header
 };
 

@@ -90,7 +90,6 @@ static void khttpd_file_received_header(struct khttpd_socket *socket,
 /* --------------------------------------------------- variable definitions */
 
 static struct khttpd_route_type khttpd_route_type_file = {
-	.name = "file",
 	.received_header = khttpd_file_received_header,
 };
 

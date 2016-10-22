@@ -78,7 +78,6 @@ static void khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 /* --------------------------------------------------- variable definitions */
 
 static struct khttpd_route_type khttpd_route_type_sysctl = {
-	.name = "sysctl",
 	.received_header = khttpd_sysctl_received_header,
 };
 
