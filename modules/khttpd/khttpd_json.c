@@ -36,6 +36,9 @@
 #include <sys/systm.h>
 #include <sys/sysproto.h>
 #include <sys/syscallsubr.h>
+#include <sys/un.h>
+
+#include <netinet/in.h>
 
 #include <vm/uma.h>
 
@@ -1044,6 +1047,126 @@ khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter)
 quit:
 	iter->ptr = ptr;
 	iter->off = off;
+}
+
+void
+khttpd_json_mbuf_print_sockaddr(struct mbuf *out, struct sockaddr *addr)
+{
+
+	khttpd_mbuf_append_ch(out, '{');
+
+	switch (addr->sa_family) {
+
+	case AF_INET:
+		khttpd_mbuf_printf(out,
+		    "\"family\": \"inet\", \"address\": \"");
+		khttpd_mbuf_print_sockaddr_in(out, (struct sockaddr_in *)addr);
+		khttpd_mbuf_append_ch(out, '"');
+		break;
+
+	case AF_INET6:
+		khttpd_mbuf_printf(out,
+		    "\"family\": \"inet6\", \"address\": \"");
+		khttpd_mbuf_print_sockaddr_in6(out,
+		    (struct sockaddr_in6 *)addr);
+		khttpd_mbuf_append_ch(out, '"');
+		break;
+
+	case AF_UNIX:
+		khttpd_mbuf_printf(out, "\"family\": \"unix\", \"address\": ");
+		khttpd_json_mbuf_append_string(out,
+		    ((struct sockaddr_un *)addr)->sun_path,
+		    ((struct sockaddr_un *)addr)->sun_path +
+		    strnlen(((struct sockaddr_un *)addr)->sun_path,
+			((struct sockaddr_un *)addr)->sun_len -
+			offsetof(struct sockaddr_un, sun_path)));
+		break;
+
+	default:
+		break;
+	}
+
+	khttpd_mbuf_append_ch(out, '}');
+}
+
+int
+khttpd_json_parse_sockaddr(struct khttpd_json *value, struct sockaddr *addr,
+    socklen_t len)
+{
+	struct sockaddr_un *un;
+	struct sockaddr_in *in;
+	struct sockaddr_in6 *in6;
+	struct khttpd_json *field;
+	const char *family, *address;
+	in_port_t *port_field;
+	size_t alen;
+	int64_t port;
+	int error;
+
+	if (value == NULL || khttpd_json_type(value) != KHTTPD_JSON_OBJECT)
+		return (EINVAL);
+
+	field = khttpd_json_object_get(value, "family");
+	if (field == NULL || khttpd_json_type(value) != KHTTPD_JSON_STRING)
+		return (EINVAL);
+	family = khttpd_json_string_data(field);
+
+	field = khttpd_json_object_get(value, "address");
+	if (field == NULL || khttpd_json_type(value) != KHTTPD_JSON_STRING)
+		return (EINVAL);
+	address = khttpd_json_string_data(field);
+
+	port_field = NULL;
+
+	if (strcmp(family, "unix") == 0) {
+		un = (struct sockaddr_un *)addr;
+		alen = offsetof(struct sockaddr_un, sun_path) + strlen(address)
+		    + 1;
+		if (len < alen)
+			return (ENOBUFS);
+		un->sun_len = len;
+		un->sun_family = AF_UNIX;
+		strlcpy(un->sun_path, address,
+		    len - offsetof(struct sockaddr_un, sun_path));
+
+	} else if (strcmp(family, "inet") == 0) {
+		in = (struct sockaddr_in *)addr;
+		port_field = &in->sin_port;
+		in->sin_len = len;
+		in->sin_family = AF_INET;
+		error = khttpd_parse_ip_addresss(&in->sin_addr.s_addr, address);
+		if (error != 0)
+			return (error);
+
+	} else if (strcmp(family, "inet6") == 0) {
+		in6 = (struct sockaddr_in6 *)addr;
+		port_field = &in6->sin6_port;
+		bzero(in6, sizeof(*in6));
+		in6->sin6_len = sizeof(*in6);
+		in6->sin6_family = AF_INET6;
+		error = khttpd_parse_ipv6_address(in6->sin6_addr.s6_addr,
+		    address);
+		if (error != 0)
+			return (error);
+
+	} else {
+		return (EINVAL);
+
+	}
+
+	if (port_field != NULL) {
+		field = khttpd_json_object_get(value, "port");
+		if (field == NULL ||
+		    khttpd_json_type(value) != KHTTPD_JSON_INTEGER ||
+		    khttpd_json_integer_value(field))
+			return (EINVAL);
+		port = khttpd_json_integer_value(field);
+		if (port < 0 || USHRT_MAX < port)
+			return (EINVAL);
+		*port_field = htons(port);
+	}
+
+	return (0);
 }
 
 int

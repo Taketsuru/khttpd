@@ -198,3 +198,113 @@ khttpd_find_list_item_end(const char *begin, const char **sep)
 
 	return (result);
 }
+
+int
+khttpd_parse_ip_addresss(uint32_t *out, const char *value)
+{
+	uint32_t result;
+	int i, values[4];
+
+	if (sscanf(value, "%d.%d.%d.%d", values, values + 1, values + 2,
+		values + 3) != 4)
+		return (EINVAL);
+
+
+	result = 0;
+	for (i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+		if (values[i] < 0 || 255 < values[i])
+			return (EINVAL);
+		result = (result << 8) | values[i];
+	}
+
+	*out = result;
+
+	return (0);
+}
+
+int
+khttpd_parse_ipv6_address(u_char *out, const char *value)
+{
+	uint16_t nums[8];
+	u_char *op;
+	const char *cp, *cp2, *numhead;
+	uint32_t ipv4_addr;
+	int i, dbl_colon, error, n, nnums, num;
+	char ch, termch;
+
+	dbl_colon = -1;
+	n = sizeof(nums) / sizeof(nums[0]);
+	cp = value;
+	i = 0;
+	for (;;) {
+		if (n <= i)
+			return (EINVAL);
+
+		numhead = cp;
+		while (ch = *cp, isxdigit(ch))
+			++cp;
+
+		if (numhead == cp)
+			return (EINVAL);
+
+		termch = ch;
+		switch (termch) {
+		case '\0':
+		case ':':
+			num = 0;
+			for (cp2 = numhead; cp2 != cp; ++cp2) {
+				ch = *cp2;
+				num <<= 4;
+
+				if (0x10000 <= num)
+					return (EINVAL);
+
+				num |= isdigit(ch) ? ch - '0'
+				    : tolower(ch) - 'a' + 10;
+			}
+
+			nums[i++] = num;
+
+			if (termch == '\0')
+				goto quit;
+
+			if (dbl_colon != -1 || i == n || cp[1] != ':')
+				++cp;
+			else {
+				dbl_colon = i;
+				cp += 2;
+			}
+			break;
+
+		case '.':
+			if (dbl_colon == -1 ? i != n - 2 : n - 2 < i)
+				return (EINVAL);
+
+			error = khttpd_parse_ip_addresss(&ipv4_addr, numhead);
+			if (error != 0)
+				return (error);
+
+			nums[i++] = (uint16_t)(ipv4_addr >> 16);
+			nums[i++] = (uint16_t)ipv4_addr;
+			goto quit;
+
+		default:
+			return (EINVAL);
+		}
+	}
+
+ quit:
+	op = out;
+	nnums = i;
+	for (i = 0; i < nnums; ++i) {
+		if (i == dbl_colon) {
+			bzero(op, (n - nnums) * sizeof(int16_t));
+			op += (n - nnums) * sizeof(int16_t);
+		}
+		num = nums[i];
+		*op++ = (u_char)(num >> 8);
+		*op++ = (u_char)num;
+	}
+
+	return (0);
+}

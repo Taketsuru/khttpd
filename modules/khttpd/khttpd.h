@@ -204,6 +204,11 @@ void khttpd_end_of_message_null(struct khttpd_socket *,
 void khttpd_received_body_null(struct khttpd_socket *,
     struct khttpd_request *, struct mbuf *);
 void khttpd_request_dtor_null(struct khttpd_request *request, void *data);
+void khttpd_request_with_body_buffer_dtor(struct khttpd_request *request,
+    void *mem);
+
+void khttpd_append_received_body(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct mbuf *m);
 
 int khttpd_mbuf_vprintf(struct mbuf *outbuf, const char *fmt, va_list ap);
 int khttpd_mbuf_printf(struct mbuf *outbuf, const char *fmt, ...);
@@ -224,9 +229,11 @@ void khttpd_mbuf_pos_copy(struct khttpd_mbuf_pos *src,
     struct khttpd_mbuf_pos *dst);
 int khttpd_mbuf_getc(struct khttpd_mbuf_pos *iter);
 void khttpd_mbuf_ungetc(struct khttpd_mbuf_pos *iter, int ch);
+
 char *khttpd_find_ch_in(const char *begin, const char *end, char ch1);
 char *khttpd_find_ch_in2(const char *begin, const char *end,
     char ch1, char ch2);
+int khttpd_parse_inet_address(uint32_t *out, const char *value);
 
 void khttpd_json_hold(struct khttpd_json *value);
 void khttpd_json_free(struct khttpd_json *value);
@@ -267,6 +274,10 @@ struct mbuf *khttpd_json_mbuf_append_string_in_mbuf(struct mbuf *output,
 struct mbuf *khttpd_json_mbuf_append_cstring(struct mbuf *output,
     const char *str);
 void khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter);
+void khttpd_json_mbuf_print_sockaddr(struct mbuf *out, struct sockaddr *addr);
+int khttpd_json_parse_sockaddr(struct khttpd_json *value, struct sockaddr *addr,
+    socklen_t len);
+
 int khttpd_mbuf_next_list_element(struct khttpd_mbuf_pos *pos,
     struct sbuf *output);
 boolean_t khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos,

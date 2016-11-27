@@ -104,6 +104,8 @@ boolean_t khttpd_is_token(const char *start, const char *end);
 uint32_t khttpd_hash32_buf_ci(const void *begin, const void *end, 
     uint32_t hash);
 uint32_t khttpd_hash32_str_ci(const void *str, uint32_t hash);
+int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
+int khttpd_parse_ipv6_address(u_char *out, const char *value);
 
 int khttpd_json_init(void);
 void khttpd_json_fini(void);

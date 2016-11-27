@@ -75,6 +75,18 @@
 #define KHTTPD_LOG_LIMIT	1024
 #endif
 
+#ifndef KHTTPD_CTRL_ROUTE_SERVERS
+#define KHTTPD_CTRL_ROUTE_SERVERS	"/1/servers"
+#endif
+
+#ifndef KHTTPD_CTRL_SERVERS_DATA_LIMIT
+#define KHTTPD_CTRL_SERVERS_DATA_LIMIT	32768
+#endif
+
+#ifndef KHTTPD_CTRL_SERVERS_JSON_DEPTH_MAX
+#define KHTTPD_CTRL_SERVERS_JSON_DEPTH_MAX 16
+#endif
+
 /* ------------------------------------------------------- type definitions */
 
 /* possible values of khttpd_state */
@@ -297,6 +309,12 @@ struct khttpd_worker {
 
 TAILQ_HEAD(khttpd_worker_queue, khttpd_worker);
 
+struct khttpd_ctrl_servers_request_data {
+	struct mbuf	*head;
+	struct mbuf	*tail;
+	size_t		limit;
+};
+
 /* -------------------------------------------------- prototype declrations */
 
 static int khttpd_route_compare(struct khttpd_route *x,
@@ -314,6 +332,9 @@ static int khttpd_receive_header_or_trailer(struct khttpd_socket *receiver);
 static int khttpd_receive_request_line(struct khttpd_socket *receiver);
 
 static void khttpd_asterisc_received_header(struct khttpd_socket *receiver,
+    struct khttpd_request *request);
+
+static void khttpd_ctrl_servers_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request);
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
@@ -446,6 +467,10 @@ static struct khttpd_route_type khttpd_route_type_asterisc = {
 	.received_header = khttpd_asterisc_received_header
 };
 
+static struct khttpd_route_type khttpd_route_type_servers = {
+	.received_header = khttpd_ctrl_servers_received_header,
+};
+
 static struct khttpd_socket_list khttpd_sockets =
     LIST_HEAD_INITIALIZER(khttpd_sockets);
 
@@ -466,6 +491,8 @@ static boolean_t khttpd_worker_initializing;
 
 static struct sx khttpd_msgbuf_lock;
 static struct mbufq khttpd_msgbuf;
+
+static struct khttpd_server *khttpd_ctrl_server;
 
 /* --------------------------------------------------- function definitions */
 
@@ -717,37 +744,6 @@ khttpd_log_request_line(struct mbuf *out, struct khttpd_request *request)
 }
 
 static void
-khttpd_log_peer_info(struct mbuf *out, struct khttpd_socket *socket)
-{
-
-	switch (socket->peer_addr.ss_family) {
-
-	case AF_INET:
-		khttpd_mbuf_printf(out,
-		    "\"family\": \"inet\", \"address\": \"");
-		khttpd_mbuf_print_sockaddr_in(out,
-		    (struct sockaddr_in *)&socket->peer_addr);
-		khttpd_mbuf_append_ch(out, '"');
-		break;
-
-	case AF_INET6:
-		khttpd_mbuf_printf(out,
-		    "\", \"family\": \"inet6\", \"address\": \"");
-		khttpd_mbuf_print_sockaddr_in6(out,
-		    (struct sockaddr_in6 *)&socket->peer_addr);
-		khttpd_mbuf_append_ch(out, '"');
-		break;
-
-	case AF_UNIX:
-		khttpd_mbuf_printf(out, "\", \"family\": \"unix\"");
-		break;
-
-	default:
-		break;
-	}
-}
-
-static void
 khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
@@ -763,8 +759,9 @@ khttpd_access(struct khttpd_server *server, struct khttpd_socket *socket,
 	khttpd_log_timestamp(ent);
 	khttpd_mbuf_printf(ent, ", ");
 	khttpd_log_request_line(ent, request);
-	khttpd_mbuf_printf(ent, ", ");
-	khttpd_log_peer_info(ent, socket);
+	khttpd_mbuf_printf(ent, ", \"peer\": ");
+	khttpd_json_mbuf_print_sockaddr(ent,
+	    (struct sockaddr *)&socket->peer_addr);
 
 	response = request->response;
 
@@ -800,7 +797,8 @@ khttpd_verror(struct khttpd_server *server, struct khttpd_socket *socket,
 
 	if (socket != NULL) {
 		khttpd_mbuf_printf(ent, ", ");
-		khttpd_log_peer_info(ent, socket);
+		khttpd_json_mbuf_print_sockaddr(ent,
+		    (struct sockaddr *)&socket->peer_addr);
 	}
 
 	if (request != NULL) {
@@ -1220,8 +1218,7 @@ khttpd_route_add(struct khttpd_route *root, const char *path,
 				    khttpd_route, children_link);
 
 			if (ptr == NULL ||
-			    strncmp
-				(ptr->label, lbegin, ptr->label_len) != 0 ||
+			    strncmp(ptr->label, lbegin, ptr->label_len) != 0 ||
 			    (lbegin + ptr->label_len < lend &&
 				lbegin[ptr->label_len] != '/')) {
 				if (ptr == NULL)
@@ -3465,6 +3462,306 @@ khttpd_server_route_root(struct khttpd_server *server)
 	return server->route_root;
 }
 
+/*
+ * ctrl/servers
+ */
+
+static void
+khttpd_print_server(struct mbuf *out, struct khttpd_server *server)
+{
+	struct sockaddr *sa;
+	struct thread *td;
+	struct khttpd_server_port *port;
+	socklen_t sl;
+	int error;
+
+	td = curthread;
+
+	khttpd_mbuf_append_ch(out, '{');
+
+	khttpd_mbuf_printf(out, "\"name\": ");
+	khttpd_json_mbuf_append_string(out, server->name,
+	    server->name + strlen(server->name));
+
+	khttpd_mbuf_printf(out, ", \"href\": \"/%s/%s/\"",
+	    KHTTPD_CTRL_ROUTE_SERVERS, server->name);
+
+	khttpd_mbuf_printf(out, ", \"ports\": [");
+
+	SLIST_FOREACH(port, &server->ports, link) {
+		error = kern_getsockname(td, port->fd, &sa, &sl);
+		if (error != 0) {
+			log(LOG_WARNING, "getsockname on fd %d failed "
+			    "(error: %d)", port->fd, error);
+			continue;
+		}
+
+		khttpd_mbuf_printf(out, "{\"address\": ");
+		khttpd_json_mbuf_print_sockaddr(out, sa);
+		khttpd_mbuf_append_ch(out, '}');
+	}
+
+	khttpd_mbuf_append_ch(out, ']');
+
+	khttpd_mbuf_printf(out, "}\n");
+}
+
+static void
+khttpd_ctrl_servers_get_or_head(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct mbuf *body;
+	struct khttpd_response *response;
+	struct khttpd_server *server;
+	int item_count;
+
+	body = m_gethdr(M_WAITOK, MT_DATA);
+	response = NULL;
+
+	khttpd_mbuf_append_ch(body, '{');
+
+	khttpd_mbuf_printf(body, "\"elements\": [");
+
+	item_count = 0;
+	SLIST_FOREACH(server, &khttpd_servers, link) {
+		if (0 < item_count)
+			khttpd_mbuf_printf(body, ", ");
+		khttpd_print_server(body, server);
+		++item_count;
+	}
+
+	khttpd_mbuf_printf(body, "]\n");
+
+	khttpd_mbuf_append_ch(body, '}');
+	m_fixhdr(body);
+
+	response = khttpd_response_alloc();
+	khttpd_response_set_status(response, 200);
+	khttpd_response_set_body_mbuf(response, body);
+	khttpd_response_add_field(response, "Content-Type", "%s",
+	    "application/json");
+	khttpd_set_response(socket, request, response);
+}
+
+static void
+khttpd_ctrl_servers_request_data_dtor(struct khttpd_request *request,
+    void *mem)
+{
+	struct khttpd_ctrl_servers_request_data *data;
+
+	data = mem;
+	m_freem(data->head);
+	khttpd_free(data);
+}
+
+static void
+khttpd_ctrl_servers_received_body(struct khttpd_socket *socket,
+    struct khttpd_request *request, struct mbuf *m)
+{
+	struct khttpd_ctrl_servers_request_data *data;
+	int len;
+
+	data = khttpd_request_data(request);
+
+	len = m_length(m, NULL);
+
+	if (data->limit < len) {
+		khttpd_set_payload_too_large_response(socket, request);
+		return;
+	}
+
+	data->limit -= len;
+	if (data->tail == NULL) {
+		data->head = m;
+		m_length(m, &data->tail);
+	} else {
+		m_cat(data->tail, m);
+		m_length(data->tail, &data->tail);
+	}
+}
+
+static boolean_t
+khttpd_is_valid_server_name(const char *name)
+{
+	const char *cp;
+	char ch;
+
+	for (cp = name; (ch = *cp) != '\0'; ++cp)
+		if (!(('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z') ||
+			('0' <= ch && ch <= '9') || ch == '_'))
+			return (FALSE);
+
+	return (TRUE);
+}
+
+static void
+khttpd_ctrl_servers_post_end(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct khttpd_mbuf_pos iter;
+	struct khttpd_server *server;
+	struct khttpd_response *response;
+	struct khttpd_ctrl_servers_request_data *data;
+	struct khttpd_json *value, *field;
+	const char *name;
+	int error;
+
+	data = khttpd_request_data(request);
+	if (data->head == NULL) {
+		khttpd_set_conflict_response(socket, request, FALSE);
+		return;
+	}
+
+	khttpd_mbuf_pos_init(&iter, data->head, 0);
+	value = NULL;
+	field = NULL;
+	error = khttpd_json_parse(&iter, &value,
+	    KHTTPD_CTRL_SERVERS_JSON_DEPTH_MAX);
+	if (error != 0)
+		goto quit;
+
+	if (khttpd_json_type(value) != KHTTPD_JSON_OBJECT) {
+		error = EINVAL;
+		goto quit;
+	}
+
+	field = khttpd_json_object_get(value, "name");
+	if (field == NULL || khttpd_json_type(field) != KHTTPD_JSON_STRING) {
+		error = EINVAL;
+		goto quit;
+	}
+	name = khttpd_json_string_data(field);
+	if (!khttpd_is_valid_server_name(name)) {
+		error = EINVAL;
+		goto quit;
+	}
+
+	field = khttpd_json_object_get(value, "ports");
+	if (field == NULL || khttpd_json_type(field) != KHTTPD_JSON_ARRAY) {
+		error = EINVAL;
+		goto quit;
+	}
+
+	mtx_lock(&khttpd_lock);
+	if (khttpd_server_find(name) != NULL) {
+		mtx_unlock(&khttpd_lock);
+		error = EBUSY;
+		goto quit;
+	}
+	mtx_unlock(&khttpd_lock);
+
+	server = khttpd_server_alloc(name);
+
+	// XXX
+
+	response = khttpd_response_alloc();
+	khttpd_response_set_status(response, 201);
+	khttpd_response_add_field(response, "Location", "%s/%s",
+	    KHTTPD_CTRL_ROUTE_SERVERS, name);
+	khttpd_set_response(socket, request, response);
+
+	return;
+
+quit:
+	khttpd_json_free(value);
+
+	switch (error) {
+	case EBUSY:
+	case EINVAL:
+	case ELOOP:
+	case ENOMSG:
+	case EOVERFLOW:
+		khttpd_set_conflict_response(socket, request, FALSE);
+		break;
+
+	default:
+		khttpd_set_internal_error_response(socket, request);
+	}
+}
+
+static void
+khttpd_ctrl_servers_post(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	struct thread *td;
+	struct khttpd_ctrl_servers_request_data *data;
+
+	TRACE("enter");
+
+	td = curthread;
+
+	data = khttpd_malloc(sizeof(*data));
+	data->head = data->tail = NULL;
+	data->limit = KHTTPD_CTRL_SERVERS_DATA_LIMIT;
+
+	khttpd_request_set_body_proc(request,
+	    khttpd_ctrl_servers_received_body,
+	    khttpd_ctrl_servers_post_end);
+	khttpd_request_set_data(request, data,
+	    khttpd_ctrl_servers_request_data_dtor);
+}
+
+static void
+khttpd_ctrl_servers_received_header(struct khttpd_socket *socket,
+    struct khttpd_request *request)
+{
+	const char *suffix;
+
+	TRACE("enter %s", khttpd_request_target(request));
+
+	suffix = khttpd_request_suffix(request);
+	if (suffix[0] == '\0' || strcmp(suffix, "/") != 0) {
+		khttpd_set_not_found_response(socket, request, FALSE);
+		return;
+	}
+
+	switch (khttpd_request_method(request)) {
+
+	case KHTTPD_METHOD_GET:
+	case KHTTPD_METHOD_HEAD:
+		khttpd_ctrl_servers_get_or_head(socket, request);
+		break;
+
+	case KHTTPD_METHOD_POST:
+		khttpd_ctrl_servers_post(socket, request);
+		break;
+
+	//case KHTTPD_METHOD_PUT:
+
+	default:
+		khttpd_set_not_implemented_response(socket, request, FALSE);
+	}
+}
+
+static int
+khttpd_ctrl_init(struct khttpd_server *server)
+{
+	int error;
+
+	KASSERT(khttpd_ctrl_server != NULL,
+	    ("khttpd_ctrl_server is not NULL: %p", khttpd_ctrl_server));
+
+	khttpd_ctrl_server = server;
+
+	error = khttpd_route_add(khttpd_server_route_root(server),
+	    KHTTPD_CTRL_ROUTE_SERVERS, &khttpd_route_type_servers);
+	if (error != 0) {
+		khttpd_error(server, NULL, NULL,
+		    "failed to add route '%s': %d", KHTTPD_CTRL_ROUTE_SERVERS,
+		    error);
+		return (error);
+	}
+
+	return (error);
+}
+
+static void
+khttpd_ctrl_fini(void)
+{
+
+	khttpd_ctrl_server = NULL;
+}
+
 /* --------------------------------------------------------------- asterisc */
 
 static void
@@ -3751,6 +4048,13 @@ khttpd_main(void *arg)
 	}
 	SLIST_INSERT_HEAD(&khttpd_servers, server, link);
 
+	error = khttpd_ctrl_init(server);
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: failed to initialize ctrl server "
+		    "(error: %d)", error);
+		goto cont;
+	}
+
 cont:
 	mtx_lock(&khttpd_lock);
 
@@ -3820,6 +4124,8 @@ cont:
 			wakeup(command);
 		}
 	}
+
+	khttpd_ctrl_fini();
 
 	while ((socket = LIST_FIRST(&khttpd_sockets)) != NULL)
 		khttpd_socket_close(socket);
