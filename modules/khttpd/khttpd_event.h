@@ -27,17 +27,25 @@
 
 #pragma once
 
+#ifdef _KERNEL
+
 #include <sys/types.h>
-#include <sys/ioccom.h>
 
-#define KHTTPD_VERSION	1100000
+struct khttpd_event;
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+typedef void (*khttpd_event_fn_t)(void *arg);
 
-#define KHTTPD_IOC 'h'
+struct khttpd_event *khttpd_event_new_read(khttpd_event_fn_t handler,
+    void *arg, int fd, boolean_t enable, struct khttpd_event *sibling);
+struct khttpd_event *khttpd_event_new_write(khttpd_event_fn_t handler,
+    void *arg, int fd, boolean_t enable, struct khttpd_event *sibling);
+struct khttpd_event *khttpd_event_new_user(khttpd_event_fn_t handler,
+    void *arg, boolean_t enable, struct khttpd_event *sibling);
+struct khttpd_event *khttpd_event_new_timer(khttpd_event_fn_t handler,
+    void *arg, intptr_t time, boolean_t enable, boolean_t oneshot,
+    struct khttpd_event *sibling);
+void khttpd_event_delete(struct khttpd_event *event);
+void khttpd_event_enable(struct khttpd_event *event);
+void khttpd_event_trigger(struct khttpd_event *event);
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#endif	/* _KERNEL */

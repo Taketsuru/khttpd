@@ -27,17 +27,47 @@
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
-#define KHTTPD_VERSION	1100000
+#include <sys/param.h>
+#include <sys/systm.h>
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+#include "khttpd_init.h"
 
-#define KHTTPD_IOC 'h'
+struct khttpd_costruct_info;
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+typedef size_t khttpd_costruct_key_t;
+typedef int (*khttpd_costruct_ctor_t)(void *, void *);
+typedef void (*khttpd_costruct_dtor_t)(void *, void *);
+
+void khttpd_costruct_info_new(struct khttpd_costruct_info **, size_t);
+void khttpd_costruct_info_destroy(struct khttpd_costruct_info *);
+khttpd_costruct_key_t khttpd_costruct_register(struct khttpd_costruct_info *,
+    size_t, khttpd_costruct_ctor_t, khttpd_costruct_dtor_t, void *);
+int khttpd_costruct_call_ctors(struct khttpd_costruct_info *, void *);
+void khttpd_costruct_call_dtors(struct khttpd_costruct_info *, void *);
+size_t khttpd_costruct_instance_size(struct khttpd_costruct_info *);
+
+inline void *
+khttpd_costruct_get(void *host, khttpd_costruct_key_t key)
+{
+
+	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT < khttpd_init_get_phase(),
+	    ("%s is called in init phase %d",
+		__func__, khttpd_init_get_phase()));
+
+	return ((char *)host + key);
+}
+
+inline void *
+khttpd_costruct_host_of(void *costruct, khttpd_costruct_key_t key)
+{
+
+	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT < khttpd_init_get_phase(),
+	    ("%s is called in init phase %d",
+		__func__, khttpd_init_get_phase()));
+
+	return ((char *)costruct - key);
+}

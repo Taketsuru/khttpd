@@ -25,19 +25,29 @@
  * DAMAGE.
  */
 
-#pragma once
+#include "khttpd_stream.h"
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+extern int
+khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid, 
+    struct mbuf **m_out);
 
-#define KHTTPD_VERSION	1100000
+extern void
+khttpd_stream_continue_receiving(struct khttpd_stream *stream);
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+extern void
+khttpd_stream_shutdown_receiver(struct khttpd_stream *stream);
 
-#define KHTTPD_IOC 'h'
+extern boolean_t
+khttpd_stream_send(struct khttpd_stream *stream, struct mbuf *m, int flags);
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+extern void
+khttpd_stream_notify_of_drain(struct khttpd_stream *stream);
+
+extern void
+khttpd_stream_destroy(struct khttpd_stream *stream);
+
+extern void
+khttpd_stream_data_is_available(struct khttpd_stream *stream);
+
+extern void
+khttpd_stream_clear_to_send(struct khttpd_stream *stream);

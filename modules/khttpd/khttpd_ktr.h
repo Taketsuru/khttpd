@@ -27,17 +27,47 @@
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#ifdef _KERNEL
 
-#define KHTTPD_VERSION	1100000
+#include <sys/param.h>
+#include <sys/ktr.h>
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+#define KHTTPD_TR_MACRO(_0, _1, _2, _3, _4, _5, _6, N, ...) TR ## N
+#define KHTTPD_TR_(__fmt, __macro, ...) __macro(__fmt, ##__VA_ARGS__)
+#ifdef KHTTPD_KTR_LOGGING
+#define KHTTPD_TR(__fmt, ...)					     \
+	do {							     \
+		khttpd_ktr_lock();				     \
+		KHTTPD_TR_(__fmt,				     \
+		    KHTTPD_TR_MACRO(_0, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0), \
+		    ##__VA_ARGS__);					\
+		khttpd_ktr_unlock();					\
+	} while (0)
+#else
+#define KHTTPD_TR(__fmt, ...)
+#endif
 
-#define KHTTPD_IOC 'h'
+#ifdef KHTTPD_TRACE_FN
+#define KHTTPD_ENTRY KHTTPD_TR
+#else
+#define KHTTPD_ENTRY(...)
+#endif
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#ifdef KHTTPD_TRACE_BRANCH
+#define KHTTPD_BRANCH KHTTPD_TR
+#else
+#define KHTTPD_BRANCH(...)
+#endif
+
+#ifdef KHTTPD_TRACE_NOTE
+#define KHTTPD_NOTE KHTTPD_TR
+#else
+#define KHTTPD_NOTE(...)
+#endif
+
+void khttpd_ktr_lock(void);
+void khttpd_ktr_unlock(void);
+const char *khttpd_ktr_printf(const char *fmt, ...) __printflike(1, 2);
+const char *khttpd_ktr_vprintf(const char *fmt, __va_list) __printflike(1, 0);
+
+#endif	/* _KERNEL */

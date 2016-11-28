@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2016 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,131 +25,117 @@
  * DAMAGE.
  */
 
+#include "khttpd_json.h"
+
 #include <sys/types.h>
 #include <sys/ctype.h>
-#include <sys/refcount.h>
 #include <sys/queue.h>
 #include <sys/malloc.h>
+#include <sys/sbuf.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
-#include <sys/sysproto.h>
-#include <sys/syscallsubr.h>
-#include <sys/un.h>
-
-#include <netinet/in.h>
-
 #include <vm/uma.h>
 
-#include "khttpd.h"
-#include "khttpd_private.h"
-
-#ifndef KHTTPD_JSON_EMBEDDED_DATA_SIZE
-#define KHTTPD_JSON_EMBEDDED_DATA_SIZE	(128 - 32)
+#ifdef KHTTPD_TRACE_MALLOC
+#include <sys/stack.h>
 #endif
 
-/* ------------------------------------------------------- type definitions */
+#include "khttpd_init.h"
+#include "khttpd_ktr.h"
+#include "khttpd_malloc.h"
+#include "khttpd_mbuf.h"
+#include "khttpd_string.h"
+
+#ifndef KHTTPD_TRACE_MALLOC_STACK_DEPTH
+#define KHTTPD_TRACE_MALLOC_STACK_DEPTH	8
+#endif
 
 struct khttpd_json {
-	int		type;
-	u_int		refcount;
-	size_t		size;
-	size_t		storage_size;
 	union {
 		int64_t		ivalue;
 		char		*storage;
 	};
-	char		data[KHTTPD_JSON_EMBEDDED_DATA_SIZE];
-};		
-
-/* --------------------------------------------------- variable definitions */
-
-static struct khttpd_json khttpd_json_null = {
-	.type = KHTTPD_JSON_NULL,
-	.refcount = 1
+	size_t		size;
+	size_t		storage_size;
+	char		type;
+	void		*data[];
 };
 
-static struct khttpd_json khttpd_json_true = {
-	.type = KHTTPD_JSON_BOOL,
-	.refcount = 1,
-	.ivalue = 1
-};
+#define KHTTPD_JSON_INSTANCE_SIZE 64
+#define KHTTPD_JSON_EMBEDDED_DATA_SIZE \
+	(KHTTPD_JSON_INSTANCE_SIZE - offsetof(struct khttpd_json, data))
 
-static struct khttpd_json khttpd_json_false = {
-	.type = KHTTPD_JSON_BOOL,
-	.refcount = 1,
-	.ivalue = 0
-};
-
-static const char khttpd_json_null_literal[] = "null";
+static int khttpd_json_parse_mbuf(struct khttpd_mbuf_pos *iter,
+    struct khttpd_json **value_out, int depth_limit);
 
 static uma_zone_t khttpd_json_zone;
 
-/* --------------------------------------------------- function definitions */
-
 void
-khttpd_json_hold(struct khttpd_json *value)
+khttpd_json_delete(struct khttpd_json *value)
 {
+	struct khttpd_json *initstack[8];
+	struct khttpd_json *ptr, **stack;
+	size_t stksiz, depth;
 
-	TRACE("enter %p", value);
-	refcount_acquire(&value->refcount);
-}
+	KHTTPD_ENTRY("khttpd_json_delete(%p)", value);
 
-void
-khttpd_json_free(struct khttpd_json *value)
-{
-	struct khttpd_json *ptr, *child, **stack;
-	size_t stacksize, depth;
-
-	TRACE("enter %p", value);
-
-	if (value == NULL || !refcount_release(&value->refcount))
+	if (value == NULL)
 		return;
 
 	depth = 0;
-	stacksize = 0;
-	stack = NULL;
+	stksiz = sizeof(initstack) / sizeof(initstack[0]);
+	stack = initstack;
 
 	ptr = value;
+cont:
 	for (;;) {
-		while (0 < ptr->size &&
-		    (ptr->type == KHTTPD_JSON_ARRAY ||
-			ptr->type == KHTTPD_JSON_OBJECT)) {
+		KHTTPD_BRANCH("ptr=%p, type=%d", ptr, ptr->type);
 
-			for (;;) {
-				child = ((struct khttpd_json **)
-				    (ptr->storage + ptr->size))[-1];
-				if (refcount_release(&child->refcount))
-					break;
-				ptr->size -= sizeof(struct khttpd_json *);
-				if (ptr->size == 0)
-					goto no_children;
+		switch (ptr->type) {
+		case KHTTPD_JSON_INTEGER:
+		case KHTTPD_JSON_BOOL:
+		case KHTTPD_JSON_NULL:
+			break;
+
+		case KHTTPD_JSON_ARRAY:
+		case KHTTPD_JSON_OBJECT:
+			if (ptr->size == 0) {
+				if (ptr->storage != (void *)ptr->data)
+					khttpd_free(ptr->storage);
+				break;
 			}
 
-			if (stacksize <= depth) {
-				stacksize =
-				    stacksize < 8 ? 8 : stacksize << 1;
-				stack = khttpd_realloc(stack,
-				    stacksize * sizeof(struct khttpd_json *));
+			if (stksiz <= depth) {
+				stksiz <<= 1;
+				stack = khttpd_realloc(stack == initstack ?
+				    NULL : stack,
+				    stksiz * sizeof(struct khttpd_json *));
 			}
 
 			stack[depth++] = ptr;
-			ptr = child;
+
+			ptr->size -= sizeof(struct khttpd_json *);
+			ptr = *(struct khttpd_json **)(ptr->storage +
+			    ptr->size);
+			goto cont;
+
+		case KHTTPD_JSON_STRING:
+			/* 'storage' is NULL if ptr->storage is not used. */
+			if (ptr->storage != (void *)ptr->data)
+				khttpd_free(ptr->storage);
 		}
 
-no_children:
-		if (ptr->type != KHTTPD_JSON_INTEGER &&
-		    ptr->storage != ptr->data)
-			khttpd_free(ptr->storage);
 		uma_zfree(khttpd_json_zone, ptr);
 		if (depth == 0)
 			break;
+
 		ptr = stack[--depth];
-		ptr->size -= sizeof(struct khttpd_json *);
 	}
 
-	khttpd_free(stack);
+	if (stack != initstack)
+		khttpd_free(stack);
 }
 
 static void
@@ -166,7 +152,7 @@ khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 	size = value->size;
 	ssize = value->storage_size;
 	if (ssize == 0) {
-		ssize = sizeof(value->data);
+		ssize = KHTTPD_JSON_EMBEDDED_DATA_SIZE;
 		storage = NULL;
 	} else
 		storage = value->storage;
@@ -175,7 +161,7 @@ khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 		return;
 
 	while (ssize < newsize)
-		ssize = sizeof(value->data) << 1;
+		ssize <<= 1;
 	value->storage_size = ssize;
 
 	value->storage = khttpd_realloc(storage, ssize);
@@ -187,7 +173,20 @@ int
 khttpd_json_type(struct khttpd_json *value)
 {
 
-	return value->type;
+	return (value->type);
+}
+
+struct khttpd_json *
+khttpd_json_null_new(void)
+{
+	struct khttpd_json *result;
+
+	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
+	result->type = KHTTPD_JSON_NULL;
+	result->size = result->storage_size = 0;
+	result->ivalue = 0;
+
+	return (result);
 }
 
 struct khttpd_json *
@@ -197,7 +196,19 @@ khttpd_json_integer_new(int64_t value)
 
 	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
 	result->type = KHTTPD_JSON_INTEGER;
-	refcount_init(&result->refcount, 1);
+	result->size = result->storage_size = 0;
+	result->ivalue = value;
+
+	return (result);
+}
+
+struct khttpd_json *
+khttpd_json_boolean_new(boolean_t value)
+{
+	struct khttpd_json *result;
+
+	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
+	result->type = KHTTPD_JSON_BOOL;
 	result->size = result->storage_size = 0;
 	result->ivalue = value;
 
@@ -207,6 +218,10 @@ khttpd_json_integer_new(int64_t value)
 int64_t
 khttpd_json_integer_value(struct khttpd_json *value)
 {
+
+	KASSERT(value->type == KHTTPD_JSON_INTEGER ||
+	    value->type == KHTTPD_JSON_BOOL,
+	    ("type %d is neither integer nor bool", value->type));
 
 	return (value->ivalue);
 }
@@ -218,10 +233,9 @@ khttpd_json_string_new(void)
 
 	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
 	result->type = KHTTPD_JSON_STRING;
-	refcount_init(&result->refcount, 1);
 	result->size = 0;
 	result->storage_size = 0;
-	result->storage = result->data;
+	result->storage = (void *)result->data;
 
 	return (result);
 }
@@ -244,26 +258,11 @@ khttpd_json_string_data(struct khttpd_json *value)
 	    ("invalid type %d", value->type));
 
 	if (value->size == value->storage_size == 0 ?
-	    sizeof(value->data) : value->storage_size)
+	    KHTTPD_JSON_EMBEDDED_DATA_SIZE : value->storage_size)
 		khttpd_json_resize(value, value->size + 1);
 	value->storage[value->size] = '\0';
 
 	return (value->storage);
-}
-
-void
-khttpd_json_string_append(struct khttpd_json *value, const char *begin,
-    const char *end)
-{
-	size_t size;
-
-	KASSERT(value->type == KHTTPD_JSON_STRING,
-	    ("invalid type %d", value->type));
-
-	size = value->size;
-	khttpd_json_resize(value, size + (end - begin));
-	bcopy(begin, value->storage + size, end - begin);
-	value->size = size + (end - begin);
 }
 
 void
@@ -273,8 +272,8 @@ khttpd_json_string_append_char(struct khttpd_json *value, int ch)
 	KASSERT(value->type == KHTTPD_JSON_STRING,
 	    ("invalid type %d", value->type));
 
-	if (value->size == value->storage_size == 0 ? sizeof(value->data)
-	    : value->storage_size)
+	if (value->size == value->storage_size == 0 ?
+	    KHTTPD_JSON_EMBEDDED_DATA_SIZE : value->storage_size)
 		khttpd_json_resize(value, value->size + 1);
 	value->storage[value->size++] = ch;
 }
@@ -312,15 +311,15 @@ khttpd_json_array_new(void)
 
 	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
 	result->type = KHTTPD_JSON_ARRAY;
-	refcount_init(&result->refcount, 1);
 	result->size = 0;
 	result->storage_size = 0;
-	result->storage = result->data;
+	result->storage = (void *)result->data;
 
 	return (result);
 }
 
-int khttpd_json_array_size(struct khttpd_json *value)
+int
+khttpd_json_array_size(struct khttpd_json *value)
 {
 
 	KASSERT(value->type == KHTTPD_JSON_ARRAY,
@@ -342,7 +341,6 @@ khttpd_json_array_add(struct khttpd_json *value, struct khttpd_json *elem)
 	khttpd_json_resize(value, newsize);
 	*(struct khttpd_json **)(value->storage + size) = elem;
 	value->size = newsize;
-	refcount_acquire(&elem->refcount);
 }
 
 struct khttpd_json *
@@ -364,12 +362,11 @@ khttpd_json_object_new(int size_hint)
 
 	result = uma_zalloc(khttpd_json_zone, M_WAITOK);
 	result->type = KHTTPD_JSON_OBJECT;
-	refcount_init(&result->refcount, 1);
 	result->size = 0;
 	len = size_hint * sizeof(struct khttpd_json *) * 2;
-	if (len <= sizeof(result->data)) {
+	if (len <= KHTTPD_JSON_EMBEDDED_DATA_SIZE) {
 		result->storage_size = 0;
-		result->storage = result->data;
+		result->storage = (void *)result->data;
 	} else {
 		result->storage_size = len;
 		result->storage = khttpd_malloc(len);
@@ -388,8 +385,6 @@ khttpd_json_object_add(struct khttpd_json *value, struct khttpd_json *name,
 	KASSERT(value->type == KHTTPD_JSON_OBJECT,
 	    ("invalid type %d", value->type));
 
-	khttpd_json_hold(name);
-	khttpd_json_hold(elem);
 	size = value->size;
 	newsize = size + sizeof(struct khttpd_json *) * 2;
 	khttpd_json_resize(value, newsize);
@@ -397,6 +392,16 @@ khttpd_json_object_add(struct khttpd_json *value, struct khttpd_json *name,
 	ptr[0] = name;
 	ptr[1] = elem;
 	value->size = newsize;
+}
+
+int
+khttpd_json_object_size(struct khttpd_json *value)
+{
+
+	KASSERT(value->type == KHTTPD_JSON_OBJECT,
+	    ("invalid type %d", value->type));
+
+	return (value->size / (sizeof(struct khttpd_json *) * 2));
 }
 
 struct khttpd_json *
@@ -441,16 +446,6 @@ khttpd_json_object_get_at(struct khttpd_json *value, int index,
 	return (ptr[1]);
 }
 
-int
-khttpd_json_object_size(struct khttpd_json *value)
-{
-
-	KASSERT(value->type == KHTTPD_JSON_OBJECT,
-	    ("invalid type %d", value->type));
-
-	return (value->size / (sizeof(struct khttpd_json *) * 2));
-}
-
 static boolean_t
 khttpd_json_parse_expect_char(struct khttpd_mbuf_pos *iter, char expected)
 {
@@ -463,6 +458,43 @@ khttpd_json_parse_expect_char(struct khttpd_mbuf_pos *iter, char expected)
 	return (FALSE);
 }
 
+static void
+khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter)
+{
+	struct mbuf *ptr;
+	const char *cp;
+	int ch, len, off;
+
+	KHTTPD_ENTRY("khttpd_json_mbuf_skip_ws({%p,%d,'%c'})", 
+	    iter->ptr, iter->off, iter->unget);
+
+	ch = iter->unget;
+	if (ch != -1 && ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r') {
+		KHTTPD_BRANCH("khttpd_json_mbuf_skip_ws ungetc "
+		    "%p,%#lx,'%c'", iter->ptr, iter->off, ch);
+		return;
+	}
+	iter->unget = -1;
+
+	for (ptr = iter->ptr, off = iter->off; ptr != NULL;
+	     ptr = ptr->m_next, off = 0) {
+		KHTTPD_TR("ptr=%p, len=%d", ptr, ptr->m_len);
+		len = ptr->m_len;
+		for (cp = mtod(ptr, char *) + off; off < len; ++cp, ++off) {
+			ch = *cp;
+			if (ch != ' ' && ch != '\t' &&
+			    ch != '\n' && ch != '\r') {
+				KHTTPD_BRANCH("khttpd_json_mbuf_skip_ws "
+				    "%p,%#lx,'%c'", ptr, off, ch);
+				goto quit;
+			}
+		}
+	}
+quit:
+	iter->ptr = ptr;
+	iter->off = off;
+}
+
 static int
 khttpd_json_parse_string(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out)
@@ -470,11 +502,14 @@ khttpd_json_parse_string(struct khttpd_mbuf_pos *iter,
 	struct khttpd_json *value;
 	int ch, code, error, i, surrogate;
 
-	TRACE("enter");
+	KHTTPD_ENTRY("khttpd_json_parse_string(%p,%d,%c)",
+	    iter->ptr, iter->off, iter->unget);
 
 	khttpd_json_mbuf_skip_ws(iter);
-	if (!khttpd_json_parse_expect_char(iter, '\"'))
+	if (!khttpd_json_parse_expect_char(iter, '\"')) {
+		TR2("%s %u", __func__, __LINE__);
 		return (EINVAL);
+	}
 
 	error = 0;
 	value = khttpd_json_string_new();
@@ -523,6 +558,8 @@ khttpd_json_parse_string(struct khttpd_mbuf_pos *iter,
 				for (i = 0; i < 4; ++i) {
 					ch = khttpd_mbuf_getc(iter);
 					if (!isxdigit(ch)) {
+						TR2("%s %u",
+						    __func__, __LINE__);
 						error = EINVAL;
 						goto quit;
 					}
@@ -571,7 +608,7 @@ quit:
 	if (error == 0)
 		*value_out = value;
 	else
-		khttpd_json_free(value);
+		khttpd_json_delete(value);
 
 	return (error);
 }
@@ -583,7 +620,8 @@ khttpd_json_parse_object(struct khttpd_mbuf_pos *iter,
 	struct khttpd_json *value, *name, *elem;
 	int error;
 
-	TRACE("enter");
+	KHTTPD_ENTRY("khttpd_json_parse_object({%p,%d,'%c'})",
+	    iter->ptr, iter->off, iter->unget);
 
 	khttpd_json_mbuf_skip_ws(iter);
 	if (!khttpd_json_parse_expect_char(iter, '{'))
@@ -598,76 +636,94 @@ khttpd_json_parse_object(struct khttpd_mbuf_pos *iter,
 		return (0);
 	}
 
+	name = NULL;
+
 	for (;;) {
 		error = khttpd_json_parse_string(iter, &name);
-		if (error != 0)
+		if (error != 0) {
+			TR2("%s %u", __func__, __LINE__);
 			break;
+		}
 
 		khttpd_json_mbuf_skip_ws(iter);
 		if (!khttpd_json_parse_expect_char(iter, ':')) {
+			TR2("%s %u", __func__, __LINE__);
+			TR3("%p,%d,%c", iter->ptr, iter->off, iter->unget);
 			error = EINVAL;
 			break;
 		}
 
-		error = khttpd_json_parse(iter, &elem, depth_limit - 1);
-		if (error != 0)
+		error = khttpd_json_parse_mbuf(iter, &elem, depth_limit - 1);
+		if (error != 0) {
+			TR2("%s %u", __func__, __LINE__);
+			TR3("%p,%d,%c", iter->ptr, iter->off, iter->unget);
 			break;
+		}
 
 		khttpd_json_object_add(value, name, elem);
-		khttpd_json_free(name);
-		khttpd_json_free(elem);
+		name = NULL;
 
 		khttpd_json_mbuf_skip_ws(iter);
-		if (khttpd_json_parse_expect_char(iter, '}'))
+		if (khttpd_json_parse_expect_char(iter, '}')) {
+			TR2("%s %u", __func__, __LINE__);
+			TR3("%p,%d,%c", iter->ptr, iter->off, iter->unget);
 			break;
+		}
 		if (!khttpd_json_parse_expect_char(iter, ',')) {
+			TR2("%s %u", __func__, __LINE__);
+			TR3("%p,%d,%c", iter->ptr, iter->off, iter->unget);
 			error = EINVAL;
 			break;
 		}
 	}
 
+	khttpd_json_delete(name);
+
 	if (error == 0)
 		*value_out = value;
 	else
-		khttpd_json_free(value);
+		khttpd_json_delete(value);
 
 	return (error);
 }
 
 static int
-khttpd_json_parse_array(struct khttpd_mbuf_pos *iter,
+khttpd_json_parse_array(struct khttpd_mbuf_pos *iter, 
     struct khttpd_json **value_out, int depth_limit)
 {
 	struct khttpd_json *value, *elem;
 	int error;
 
-	TRACE("enter");
+	KHTTPD_ENTRY("khttpd_json_parse_array({%p,%d,'%c'})",
+	    iter->ptr, iter->off, iter->unget);
 
 	khttpd_json_mbuf_skip_ws(iter);
-	if (!khttpd_json_parse_expect_char(iter, '['))
+	if (!khttpd_json_parse_expect_char(iter, '[')) {
+		TR2("%s %u", __func__, __LINE__);
 		return (EINVAL);
+	}
 
 	error = 0;
 	value = khttpd_json_array_new();
 
 	khttpd_json_mbuf_skip_ws(iter);
-	if (!khttpd_json_parse_expect_char(iter, ']')) {
+	if (khttpd_json_parse_expect_char(iter, ']')) {
 		*value_out = value;
 		return (0);
 	}
 
 	for (;;) {
-		error = khttpd_json_parse(iter, &elem, depth_limit - 1);
+		error = khttpd_json_parse_mbuf(iter, &elem, depth_limit - 1);
 		if (error != 0)
 			break;
 
 		khttpd_json_array_add(value, elem);
-		khttpd_json_free(elem);
 
 		khttpd_json_mbuf_skip_ws(iter);
 		if (khttpd_json_parse_expect_char(iter, ']'))
 			break;
 		if (!khttpd_json_parse_expect_char(iter, ',')) {
+			TR2("%s %u", __func__, __LINE__);
 			error = EINVAL;
 			break;
 		}
@@ -676,7 +732,7 @@ khttpd_json_parse_array(struct khttpd_mbuf_pos *iter,
 	if (error == 0)
 		*value_out = value;
 	else
-		khttpd_json_free(value);
+		khttpd_json_delete(value);
 
 	return (error);
 }
@@ -688,9 +744,13 @@ khttpd_json_parse_expect_seq(struct khttpd_mbuf_pos *iter,
 	const char *cp;
 	int ch;
 
+	KHTTPD_ENTRY("khttpd_json_parse_expect_seq({%p,%#lx,'%c'},%s)",
+	    iter->ptr, iter->off, iter->unget, symbol);
+
 	for (cp = symbol; (ch = *cp) != '\0'; ++cp)
 		if (!khttpd_json_parse_expect_char(iter, ch))
 			return (EINVAL);
+
 	return (0);
 }
 
@@ -699,8 +759,11 @@ khttpd_json_parse_integer(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out)
 {
 	int ch;
-	int64_t value;
+	uint64_t value;
 	boolean_t negative;
+
+	KHTTPD_ENTRY("khttpd_json_parse_integer({%p,%#lx,'%c'})",
+	    iter->ptr, iter->off, iter->unget);
 
 	negative = FALSE;
 
@@ -716,8 +779,10 @@ khttpd_json_parse_integer(struct khttpd_mbuf_pos *iter,
 		*value_out = 0;
 		return (0);
 	}
-	if (!isdigit(ch))
+	if (!isdigit(ch)) {
+		TR2("%s %u", __func__, __LINE__);
 		return (EINVAL);
+	}
 
 	value = ch - '0';
 	for (;;) {
@@ -733,19 +798,20 @@ khttpd_json_parse_integer(struct khttpd_mbuf_pos *iter,
 		value = value * 10 + (ch - '0');
 	}
 
-	*value_out = khttpd_json_integer_new(negative ? -value : value);
+	*value_out = khttpd_json_integer_new(negative ? 0 - value : value);
 
 	return (0);
 }
 
-int
-khttpd_json_parse(struct khttpd_mbuf_pos *iter,
+static int
+khttpd_json_parse_mbuf(struct khttpd_mbuf_pos *iter,
     struct khttpd_json **value_out, int depth_limit)
 {
 	struct khttpd_json *value;
 	int ch, error;
 
-	TRACE("enter");
+	KHTTPD_ENTRY("khttpd_json_parse_mbuf({%p,%#lx,'%c'},, %d)",
+	    iter->ptr, iter->off, iter->unget, depth_limit);
 
 	if (depth_limit <= 0)
 		return (ELOOP);
@@ -756,6 +822,10 @@ khttpd_json_parse(struct khttpd_mbuf_pos *iter,
 	khttpd_json_mbuf_skip_ws(iter);
 	ch = khttpd_mbuf_getc(iter);
 	switch (ch) {
+
+	case -1:
+		error = ENOMSG;
+		break;
 
 	case '{':
 		khttpd_mbuf_ungetc(iter, ch);
@@ -779,410 +849,143 @@ khttpd_json_parse(struct khttpd_mbuf_pos *iter,
 
 	case 't':
 		error = khttpd_json_parse_expect_seq(iter, "rue");
-		if (error == 0) {
-			value = &khttpd_json_true;
-			khttpd_json_hold(value);
-		}
+		if (error == 0)
+			value = khttpd_json_boolean_new(TRUE);
 		break;
 
 	case 'f':
 		error = khttpd_json_parse_expect_seq(iter, "alse");
-		if (error == 0) {
-			value = &khttpd_json_false;
-			khttpd_json_hold(value);
-		}
+		if (error == 0)
+			value = khttpd_json_boolean_new(FALSE);
 		break;
 
 	case 'n':
 		error = khttpd_json_parse_expect_seq(iter, "ull");
-		if (error == 0) {
-			value = &khttpd_json_null;
-			khttpd_json_hold(value);
-		}
+		if (error == 0)
+			value = khttpd_json_null_new();
 		break;
 
 	default:
 		if (isdigit(ch)) {
 			khttpd_mbuf_ungetc(iter, ch);
 			error = khttpd_json_parse_integer(iter, &value);
-		} else if (ch == -1)
-			error = ENOMSG;
-		else if (!isdigit(ch))
-			error = EINVAL;
+		} else
+			error = ch == -1 ? ENOMSG : EINVAL;
 	}
 
 	if (error == 0)
 		*value_out = value;
 	else
-		khttpd_json_free(value);
+		khttpd_json_delete(value);
 
 	return (error);
 }
 
-struct mbuf *
-khttpd_json_mbuf_append_string_wo_quote(struct mbuf *output, const char *begin,
-    const char *end)
+boolean_t
+khttpd_json_parse_with_diagnosis(struct khttpd_json **result,
+    struct khttpd_json_parse_diag *output, struct mbuf *input, int depth_limit)
 {
-	struct mbuf *tail;
-	const char *srcp;
-	char *dstp, *dend;
-	int32_t code;
-	int flc, i, len;
-	uint16_t code1, code2;
-	unsigned char ch;
+	struct khttpd_json *dummy;
+	struct khttpd_mbuf_pos origin, iter;
+	int error;
+	boolean_t ok;
 
-	srcp = begin;
-	tail = output;
-	dstp = mtod(tail, char *) + tail->m_len;
-	dend = M_START(tail) + M_SIZE(tail);
+	KHTTPD_ENTRY("khttpd_json_parse_with_diagnosis(,%p,%p,%d)",
+	    output, input, depth_limit);
 
-	while (srcp < end) {
-		ch = (unsigned char)*srcp;
-		switch (ch) {
+	ok = FALSE;
+	bzero(output, sizeof(*output));
 
-		case '\b':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = 'b';
-			++srcp;
-			break;
+	khttpd_mbuf_pos_init(&iter, input, 0);
+	error = khttpd_json_parse_mbuf(&iter, result, depth_limit);
+	switch (error) {
 
-		case '\f':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = 'f';
-			++srcp;
-			break;
-
-		case '\n':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = 'n';
-			++srcp;
-			break;
-
-		case '\r':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = 'r';
-			++srcp;
-			break;
-
-		case '\t':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = 't';
-			++srcp;
-			break;
-
-		case '\"':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = '\"';
-			++srcp;
-			break;
-
-		case '\\':
-			if (dend - dstp < 2)
-				goto expand;
-			*dstp++ = '\\';
-			*dstp++ = '\\';
-			++srcp;
-			break;
-
-		default:
-			if (ch < 0x80) {
-				code = ch;
-				len = 1;
-
-			} else {
-				flc = fls(~ch & 0xff);
-				code = ch & (0xff >> (CHAR_BIT + 1 - flc));
-				len = CHAR_BIT - flc;
-
-				/*
-				 * Write as is if we found a multibyte
-				 * sequence starts with 10xxxxxx, a premature
-				 * end of string, or a sequence longer than 4
-				 * bytes.
-				 */
-				if (len == 1 || end - srcp < len || 4 < len)
-					code = ch;
-
-				for (i = 1; i < len; ++i)
-					code = (code << 6) |
-					    (srcp[i] & 0x3f);
-
-				/*
-				 * Write as is if the code point is not
-				 * representable with utf-16, or in the range
-				 * reserved for surrogate pairs.
-				 */
-				if (0x110000 <= code ||
-				    (0xd800 <= code && code < 0xe000))
-					code = ch;
-			}
-
-			if (0x20 <= code && code < 0x80) {
-				if (dend - dstp < 1)
-					goto expand;
-				*dstp++ = code;
-
-			} else if (code < 0x10000) {
-				if (dend - dstp < 7)
-					goto expand;
-				snprintf(dstp, 7, "\\u%04x", code);
-				dstp += 6;
-
-			} else {
-				if (dend - dstp < 13)
-					goto expand;
-				code1 = ((code - 0x10000) >> 10) + 0xd800;
-				code2 = ((code - 0x10000) & 0x3ff) + 0xdc00;
-				snprintf(dstp, 13, "\\u%04x\\u%04x", code1,
-				    code2);
-				dstp += 12;
-			}
-
-			srcp += len;
+	case 0:
+		error = khttpd_json_parse_mbuf(&iter, &dummy, depth_limit);
+		if (error == ENOMSG)
+			ok = TRUE;
+		else {
+			output->type = "khttpd_json::trailing_garbage";
+			output->title = "trailing garbage";
 		}
-		continue;
-
-expand:
-		tail->m_len = dstp - mtod(tail, char *);
-		tail = tail->m_next = m_get(M_WAITOK, MT_DATA);
-		dstp = mtod(tail, char *);
-		dend = M_START(tail) + M_SIZE(tail);
-	}
-
-	tail->m_len = dstp - mtod(tail, char *);
-
-	return (tail);
-}
-
-struct mbuf *
-khttpd_json_mbuf_append_string_in_mbuf_wo_quote(struct mbuf *output,
-    struct mbuf *source)
-{
-	struct mbuf *tail;
-	struct mbuf *srcp;
-	const char *begin, *end;
-	
-	tail = output;
-	for (srcp = source; srcp != NULL; srcp = srcp->m_next) {
-		begin = mtod(srcp, char *);
-		end = begin + srcp->m_len;
-		tail = khttpd_json_mbuf_append_string_wo_quote(tail, begin, end);
-	}
-	return (tail);
-}
-
-struct mbuf *
-khttpd_json_mbuf_append_string(struct mbuf *output,
-    const char *begin, const char *end)
-{
-	struct mbuf *tail;
-
-	tail = khttpd_mbuf_append_ch(output, '"');
-	tail = khttpd_json_mbuf_append_string_wo_quote(tail, begin, end);
-	tail = khttpd_mbuf_append_ch(tail, '"');
-	return (tail);
-}
-
-struct mbuf *
-khttpd_json_mbuf_append_string_in_mbuf(struct mbuf *output,
-    struct mbuf *src)
-{
-	struct mbuf *tail;
-
-	tail = khttpd_mbuf_append_ch(output, '\"');
-	tail = khttpd_json_mbuf_append_string_in_mbuf_wo_quote(tail, src);
-	tail = khttpd_mbuf_append_ch(tail, '\"');
-	return (tail);
-}
-
-struct mbuf *
-khttpd_json_mbuf_append_cstring(struct mbuf *output, const char *str)
-{
-
-	return str != NULL
-	    ? khttpd_json_mbuf_append_string(output, str, str + strlen(str))
-	    : khttpd_mbuf_append(output, khttpd_json_null_literal,
-		khttpd_json_null_literal + sizeof(khttpd_json_null_literal) -
-		1);
-}
-
-void
-khttpd_json_mbuf_skip_ws(struct khttpd_mbuf_pos *iter)
-{
-	struct mbuf *ptr;
-	const char *cp;
-	int ch, len, off;
-
-	TRACE("enter");
-
-	if (iter->unget != -1) {
-		ch = iter->unget;
-		if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
-			return;
-		iter->unget = -1;
-	}
-
-	for (ptr = iter->ptr, off = iter->off; ptr != NULL;
-	     ptr = ptr->m_next, off = 0) {
-		len = ptr->m_len;
-		for (cp = mtod(ptr, char *) + off; off < len; ++cp, ++off) {
-			ch = *cp;
-			if (ch != ' ' && ch != '\t' &&
-			    ch != '\n' && ch != '\r')
-				goto quit;
-		}
-	}
-quit:
-	iter->ptr = ptr;
-	iter->off = off;
-}
-
-void
-khttpd_json_mbuf_print_sockaddr(struct mbuf *out, struct sockaddr *addr)
-{
-
-	khttpd_mbuf_append_ch(out, '{');
-
-	switch (addr->sa_family) {
-
-	case AF_INET:
-		khttpd_mbuf_printf(out,
-		    "\"family\": \"inet\", \"address\": \"");
-		khttpd_mbuf_print_sockaddr_in(out, (struct sockaddr_in *)addr);
-		khttpd_mbuf_append_ch(out, '"');
 		break;
 
-	case AF_INET6:
-		khttpd_mbuf_printf(out,
-		    "\"family\": \"inet6\", \"address\": \"");
-		khttpd_mbuf_print_sockaddr_in6(out,
-		    (struct sockaddr_in6 *)addr);
-		khttpd_mbuf_append_ch(out, '"');
+	case EINVAL:
+		output->type = "khttpd_json::syntax error";
+		output->title = "syntax error";
 		break;
 
-	case AF_UNIX:
-		khttpd_mbuf_printf(out, "\"family\": \"unix\", \"address\": ");
-		khttpd_json_mbuf_append_string(out,
-		    ((struct sockaddr_un *)addr)->sun_path,
-		    ((struct sockaddr_un *)addr)->sun_path +
-		    strnlen(((struct sockaddr_un *)addr)->sun_path,
-			((struct sockaddr_un *)addr)->sun_len -
-			offsetof(struct sockaddr_un, sun_path)));
+	case EOVERFLOW:
+		output->type = "khttpd_json::integer_overflow";
+		output->title = "integer overflow";
+		break;
+
+	case ELOOP:
+		output->type = "khttpd_json::nesting_too_deep";
+		output->title = "nesting too deep";
+		break;
+
+	case ENOMSG:
+		output->type = "khttpd_json::empty";
+		output->title = "empty";
 		break;
 
 	default:
 		break;
 	}
 
-	khttpd_mbuf_append_ch(out, '}');
+	if (!ok) {
+		khttpd_mbuf_pos_init(&origin, input, 0);
+		khttpd_mbuf_get_line_and_column(&origin, &iter, &output->line,
+		    &output->column);
+	}
+
+	return (ok);
 }
 
-int
-khttpd_json_parse_sockaddr(struct khttpd_json *value, struct sockaddr *addr,
-    socklen_t len)
+#ifdef KHTTPD_TRACE_MALLOC
+
+static int
+khttpd_json_ctor(void *mem, int size, void *arg, int flags)
 {
-	struct sockaddr_un *un;
-	struct sockaddr_in *in;
-	struct sockaddr_in6 *in6;
-	struct khttpd_json *field;
-	const char *family, *address;
-	in_port_t *port_field;
-	size_t alen;
-	int64_t port;
-	int error;
+	struct stack st;
 
-	if (value == NULL || khttpd_json_type(value) != KHTTPD_JSON_OBJECT)
-		return (EINVAL);
-
-	field = khttpd_json_object_get(value, "family");
-	if (field == NULL || khttpd_json_type(value) != KHTTPD_JSON_STRING)
-		return (EINVAL);
-	family = khttpd_json_string_data(field);
-
-	field = khttpd_json_object_get(value, "address");
-	if (field == NULL || khttpd_json_type(value) != KHTTPD_JSON_STRING)
-		return (EINVAL);
-	address = khttpd_json_string_data(field);
-
-	port_field = NULL;
-
-	if (strcmp(family, "unix") == 0) {
-		un = (struct sockaddr_un *)addr;
-		alen = offsetof(struct sockaddr_un, sun_path) + strlen(address)
-		    + 1;
-		if (len < alen)
-			return (ENOBUFS);
-		un->sun_len = len;
-		un->sun_family = AF_UNIX;
-		strlcpy(un->sun_path, address,
-		    len - offsetof(struct sockaddr_un, sun_path));
-
-	} else if (strcmp(family, "inet") == 0) {
-		in = (struct sockaddr_in *)addr;
-		port_field = &in->sin_port;
-		in->sin_len = len;
-		in->sin_family = AF_INET;
-		error = khttpd_parse_ip_addresss(&in->sin_addr.s_addr, address);
-		if (error != 0)
-			return (error);
-
-	} else if (strcmp(family, "inet6") == 0) {
-		in6 = (struct sockaddr_in6 *)addr;
-		port_field = &in6->sin6_port;
-		bzero(in6, sizeof(*in6));
-		in6->sin6_len = sizeof(*in6);
-		in6->sin6_family = AF_INET6;
-		error = khttpd_parse_ipv6_address(in6->sin6_addr.s6_addr,
-		    address);
-		if (error != 0)
-			return (error);
-
-	} else {
-		return (EINVAL);
-
-	}
-
-	if (port_field != NULL) {
-		field = khttpd_json_object_get(value, "port");
-		if (field == NULL ||
-		    khttpd_json_type(value) != KHTTPD_JSON_INTEGER ||
-		    khttpd_json_integer_value(field))
-			return (EINVAL);
-		port = khttpd_json_integer_value(field);
-		if (port < 0 || USHRT_MAX < port)
-			return (EINVAL);
-		*port_field = htons(port);
-	}
+	KHTTPD_TR("alloc %p %#lx", mem, size);
+	stack_save(&st);
+	CTRSTACK(KTR_GEN, &st, KHTTPD_TRACE_MALLOC_STACK_DEPTH, 0);
 
 	return (0);
 }
 
-int
+static void
+khttpd_json_dtor(void *mem, int size, void *arg)
+{
+
+	KHTTPD_TR("free %p", mem);
+}
+
+#endif
+
+static int
 khttpd_json_init(void)
 {
 
-	khttpd_json_zone = uma_zcreate("khttp-json",
-	    sizeof(struct khttpd_json),
-	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
+	khttpd_json_zone = uma_zcreate("khttp-json", KHTTPD_JSON_INSTANCE_SIZE,
+#ifdef KHTTPD_TRACE_MALLOC
+	    khttpd_json_ctor, khttpd_json_dtor,
+#else
+	    NULL, NULL,
+#endif
+	    NULL, NULL, UMA_ALIGN_PTR, 0);
 
 	return (0);
 }
 
-void
+static void
 khttpd_json_fini(void)
 {
 
 	uma_zdestroy(khttpd_json_zone);
 }
+
+KHTTPD_INIT(, khttpd_json_init, khttpd_json_fini, KHTTPD_INIT_PHASE_LOCAL);

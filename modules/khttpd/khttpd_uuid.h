@@ -28,16 +28,14 @@
 #pragma once
 
 #include <sys/types.h>
-#include <sys/ioccom.h>
 
-#define KHTTPD_VERSION	1100000
+#define KHTTPD_UUID_SIZE		16
+#define KHTTPD_UUID_STR_REP_SIZE	(8 + 5 + 5 + 5 + 13)
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+#ifdef _KERNEL
 
-#define KHTTPD_IOC 'h'
+void khttpd_uuid_new(void *uuid_out);
+void khttpd_uuid_to_string(const void *uuid, char *out);
+int khttpd_uuid_parse(const char *str, void *uuid);
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#endif	/* ifdef _KERNEL */

@@ -43,7 +43,7 @@ while {[gets $ktrfile line] >= 0} {
 	continue
     }
 
-    if {![regexp -line -- {([[:digit:]]+) (0x[[:xdigit:]]+) ([[:digit:]]+) (.*)$} \
+    if {![regexp -line -- {([[:digit:]]+) ([[:digit:]]+) ([[:digit:]]+) (.*)$} \
 	      $line match timestamp thread cpu desc]} {
 	puts "malformed: $line"
 	continue
@@ -61,7 +61,7 @@ while {[gets $ktrfile line] >= 0} {
     dict unset lastAlloc $thread
 
     if {![regexp -line -- {^([^ ]+) .*$} $desc match word]} {
-	puts "no word: $line"
+	# puts "no word: $line"
 	continue
     }
 
@@ -81,6 +81,11 @@ while {[gets $ktrfile line] >= 0} {
 		puts "malformed free: $line"
 		continue
 	    }
+
+	    if {$mem == 0} {
+		continue
+	    }
+
 	    if {![dict exists $heap $mem]} {
 		puts "missing alloc: $line"
 		continue

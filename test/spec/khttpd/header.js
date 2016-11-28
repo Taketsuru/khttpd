@@ -14,7 +14,8 @@ describe('khttpd', function () {
         });
 
         it('closes if the client closes', function (done) {
-            session.chan.write('OPTIONS * HTTP/1.1\r\n\r\n');
+            session.chan.write('OPTIONS * HTTP/1.1\r\n' +
+			       'Host: ' + target.name + '\r\n\r\n');
             session.chan.end();
             session.chan.once('end', done);
         });
@@ -36,7 +37,8 @@ describe('khttpd', function () {
 
             it('half-closes after sending a response', function (done) {
                 session.chan.write('OPTIONS * HTTP/1.1\r\n' +
-                                'Connection: close\r\n\r\n' + garbage);
+				   'Host: ' + target.name + '\r\n' +
+                                   'Connection: close\r\n\r\n' + garbage);
                 session.chan.once('end', done);
             });
 
@@ -72,7 +74,9 @@ describe('khttpd', function () {
 
         it('half-closes after sending a response to the request',
            function (done) {
-               session.chan.write('OPTIONS * HTTP/1.1\r\nX-Header: test');
+               session.chan.write('OPTIONS * HTTP/1.1\r\n' +
+				  'Host: ' + target.name + '\r\n' +
+				  'X-Header: test');
                session.chan.once('close', done);
                session.chan.end();
            });

@@ -27,17 +27,28 @@
 
 #pragma once
 
+#ifdef _KERNEL
+
 #include <sys/types.h>
-#include <sys/ioccom.h>
+#include <netinet/in.h>
 
-#define KHTTPD_VERSION	1100000
+struct sbuf;
+struct khttpd_json;
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+char *khttpd_find_ch(const char *begin, char search);
+char *khttpd_find_ch_in(const char *begin, const char *end, char ch);
+char *khttpd_find_2ch_in(const char *begin, const char *end,
+    char ch1, char ch2);
+char *khttpd_skip_ws(const char *ptr);
+char *khttpd_rtrim_ws(const char *begin, const char *end);
+char *khttpd_find_ws(const char *ptr, const char *end);
+uint32_t khttpd_hash32_buf_ci(const void *begin, const void *end,
+    uint32_t hash);
+uint32_t khttpd_hash32_str_ci(const void *str, uint32_t hash);
+int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
+int khttpd_parse_ipv6_address(u_char *out, const char *value);
+void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
+boolean_t khttpd_is_json_media_type(const char *input);
+boolean_t khttpd_is_valid_host_name(const char *host);
 
-#define KHTTPD_IOC 'h'
-
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#endif	/* ifdef _KERNEL */

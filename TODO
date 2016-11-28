@@ -1,0 +1,12 @@
+- struct khttpd_exchange_ops::{get,put,end} should be renamed.  'end' is not
+  the end of the exchange, but the request.  This is difficult to know from the
+  name.  Also the meaning of 'get' and 'put' are easily misunderstood as
+  opposit.
+
+- Creating a location whose name is identical to an existing location should
+  shadow the existing location.  This is to prevent a slow releasing of a
+  location from affecting the re-initialization of the server.
+
+- make khttpd_test multi-module aware.
+
+- More scalable object lifecycle management than reference counting.

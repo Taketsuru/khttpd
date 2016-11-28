@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2016 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,21 +25,19 @@
  * DAMAGE.
  */
 
-#include <sys/types.h>
+#include "khttpd_string.h"
+
+#include <sys/param.h>
 #include <sys/ctype.h>
 #include <sys/hash.h>
 #include <sys/sbuf.h>
-#include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
-#include "khttpd.h"
-#include "khttpd_private.h"
-
-/* --------------------------------------------------- function definitions */
+#include "khttpd_malloc.h"
 
 char *
-khttpd_find_ch(const char *begin, const char search)
+khttpd_find_ch(const char *begin, char search)
 {
 	const char *ptr;
 	char ch;
@@ -64,7 +62,7 @@ khttpd_find_ch_in(const char *begin, const char *end, char ch)
 }
 
 char *
-khttpd_find_ch_in2(const char *begin, const char *end, char ch1, char ch2)
+khttpd_find_2ch_in(const char *begin, const char *end, char ch1, char ch2)
 {
 	const char *ptr;
 
@@ -76,83 +74,36 @@ khttpd_find_ch_in2(const char *begin, const char *end, char ch1, char ch2)
 }
 
 char *
-khttpd_skip_whitespace(const char *ptr)
+khttpd_skip_ws(const char *ptr)
 {
 	const char *cp;
 
 	for (cp = ptr; *cp == ' ' || *cp == '\t'; ++cp)
-		;		/* nothing */
+		; /* nothing */
 
 	return ((char *)cp);
 }
 
 char *
-khttpd_rskip_whitespace(const char *ptr)
+khttpd_rtrim_ws(const char *begin, const char *end)
 {
 	const char *cp;
 
-	for (cp = ptr; cp[-1] == ' ' || cp[-1] == '\t'; --cp)
-		;		/* nothing */
+	for (cp = end; begin < cp && (cp[-1] == ' ' || cp[-1] == '\t'); --cp)
+		; /* nothing */
 
 	return ((char *)cp);
 }
 
 char *
-khttpd_find_whitespace(const char *ptr, const char *end)
+khttpd_find_ws(const char *ptr, const char *end)
 {
 	const char *cp;
 
 	for (cp = ptr; cp < end && (*cp != ' ' && *cp != '\t'); ++cp)
-		;		/* nothing */
+		; /* nothing */
 
 	return ((char *)cp);
-}
-
-char *
-khttpd_dup_first_line(const char *str)
-{
-	char *buf;
-	const char *end;
-
-	end = khttpd_find_ch(str, '\n');
-	if (end == NULL)
-		return (NULL);
-
-	if (str < end && end[-1] == '\r')
-		--end;
-
-	buf = khttpd_malloc(end - str + 1);
-	bcopy(str, buf, end - str);
-	buf[end - str] = '\0';
-
-	return (buf);
-}
-
-boolean_t
-khttpd_is_token(const char *start, const char *end)
-{
-	static const char is_tchar[] = {
-		/*	    4		8	    c */
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x00 */
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /* 0x10 */
-		0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, /* 0x20 */
-		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, /* 0x30 */
-		0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, /* 0x40 */
-		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, /* 0x50 */
-		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, /* 0x60 */
-		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, /* 0x70 */
-	};
-
-	const char *cp;
-	unsigned char ch;
-
-	for (cp = start; cp < end; ++cp) {
-		ch = (unsigned char)*cp;
-		if (sizeof(is_tchar) <= ch || is_tchar[ch] == 0)
-			return (FALSE);
-	}
-
-	return (TRUE);
 }
 
 uint32_t
@@ -179,24 +130,6 @@ khttpd_hash32_str_ci(const void *str, uint32_t hash)
 		hash = HASHSTEP(hash, tolower(ch));
 
 	return (hash);
-}
-
-char *
-khttpd_find_list_item_end(const char *begin, const char **sep)
-{
-	const char *ptr;
-	char *result;
-	char ch;
-
-	result = (char *)begin;
-	for (ptr = begin; (ch = *ptr) != ',' && ch != '\n' && ch != '\r';
-	     ++ptr)
-		if (ch != ' ' && ch != '\t')
-			result = (char *)(ptr + 1);
-
-	*sep = ptr;
-
-	return (result);
 }
 
 int
@@ -259,8 +192,8 @@ khttpd_parse_ipv6_address(u_char *out, const char *value)
 				if (0x10000 <= num)
 					return (EINVAL);
 
-				num |= isdigit(ch) ? ch - '0'
-				    : tolower(ch) - 'a' + 10;
+				num |= isdigit(ch) ? ch - '0' :
+				    tolower(ch) - 'a' + 10;
 			}
 
 			nums[i++] = num;
@@ -307,4 +240,73 @@ khttpd_parse_ipv6_address(u_char *out, const char *value)
 	}
 
 	return (0);
+}
+
+void
+khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr)
+{
+	const uint8_t *ap;
+	uint16_t v, lv;
+	int i, ns, current_run_pos, longest_run_pos;
+	int current_run_len, longest_run_len;
+
+	longest_run_pos = -1;
+	longest_run_len = 0;
+	current_run_len = 0;
+	ap = addr;
+	ns = 8;
+	lv = 0;
+	for (i = 0; i < ns; ++i, lv = v) {
+		v = (unsigned)*ap++ << 8;
+		v |= (unsigned)*ap++;
+
+		if (v != 0) {
+			current_run_len = 0;
+			continue;
+		}
+
+		if (i == 0 || lv != 0) {
+			current_run_len = 1;
+			current_run_pos = i;
+			continue;
+		}
+
+		if (++current_run_len <= longest_run_len)
+			continue;
+
+		longest_run_pos = current_run_pos;
+		longest_run_len = current_run_len;
+	}
+
+	if (longest_run_len <= 1)
+		longest_run_pos = -1;
+
+	ap = addr;
+	for (i = 0; i < ns; ) { 
+		if (i == longest_run_pos) {
+			sbuf_printf(out, ":");
+			i += longest_run_len;
+			if (i == ns)
+				sbuf_printf(out, ":");
+			continue;
+		}
+
+		v = (unsigned)addr[i * sizeof(uint16_t)] << 8;
+		v |= (unsigned)addr[i * sizeof(uint16_t) + 1];
+		sbuf_printf(out, i == 0 ? "%x" : ":%x", v);
+		++i;
+	}
+}
+
+boolean_t
+khttpd_is_json_media_type(const char *input)
+{
+	const char *begin, *cp;
+
+	begin = khttpd_skip_ws(input);
+	cp = strchr(begin, ';');
+	if (cp == NULL)
+		return (strcmp(begin, "application/json") == 0);
+	cp = khttpd_rtrim_ws(begin, cp);
+	return (strncmp(begin, "application/json", cp - begin) == 0);
 }

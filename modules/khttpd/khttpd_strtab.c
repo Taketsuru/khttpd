@@ -15,7 +15,7 @@
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
  * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
  * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
@@ -25,19 +25,52 @@
  * DAMAGE.
  */
 
-#pragma once
+#include "khttpd_strtab.h"
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#include <sys/param.h>
+#include <sys/ctype.h>
+#include <sys/hash.h>
+#include <sys/queue.h>
+#include <sys/kernel.h>
+#include <sys/systm.h>
 
-#define KHTTPD_VERSION	1100000
+#include "khttpd_string.h"
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+void
+khttpd_strtab_init(struct khttpd_strtab_entry_slist *table, int table_size,
+    struct khttpd_strtab_entry *symbols, int n)
+{
+	uint32_t h;
+	int i;
 
-#define KHTTPD_IOC 'h'
+	KASSERT((table_size & -table_size) == table_size,
+	    ("table_size=%d", table_size));
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+	for (i = 0; i < table_size; ++i)
+		SLIST_INIT(&table[i]);
+
+	for (i = 0; i < n; ++i) {
+		h = khttpd_hash32_str_ci(symbols[i].name, 0) &
+		    (table_size - 1);
+		SLIST_INSERT_HEAD(&table[h], &symbols[i], link);
+	}
+}
+
+struct khttpd_strtab_entry *
+khttpd_strtab_find(struct khttpd_strtab_entry_slist *table, int table_size,
+    const char *begin, const char *end, boolean_t ci)
+{
+	struct khttpd_strtab_entry *ptr;
+	uint32_t h;
+
+	KASSERT((table_size & -table_size) == table_size,
+	    ("table_size=%d", table_size));
+
+	h = khttpd_hash32_buf_ci(begin, end, 0) & (table_size - 1);
+	SLIST_FOREACH(ptr, &table[h], link)
+		if ((ci ? strncasecmp : strncmp)
+		    (begin, ptr->name, end - begin) == 0)
+			return (ptr);
+
+	return (NULL);
+}

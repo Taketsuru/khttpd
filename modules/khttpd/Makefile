@@ -1,4 +1,4 @@
-# Copyright (c) 2016, Taketsuru <taketsuru11@gmail.com>
+# Copyright (c) 2017, Taketsuru <taketsuru11@gmail.com>
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -11,37 +11,52 @@
 #   this list of conditions and the following disclaimer in the documentation
 #   and/or other materials provided with the distribution.
 # 
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+# IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+# PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+# TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+# LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+# NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-SRCS = khttpd.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
-SRCS += khttpd_sysctl.c khttpd_file.c khttpd_sdt.c
-SRCS += khttpd_ktr.c
+SRCS = khttpd_ktr.c khttpd_malloc.c khttpd_test.c khttpd_init.c khttpd_main.c
+SRCS +=	khttpd_costruct.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
+SRCS += khttpd_uuid.c khttpd_strtab.c khttpd_method.c khttpd_rewriter.c
+SRCS += khttpd_webapi.c
+SRCS += khttpd_job.c khttpd_log.c khttpd_event.c
+SRCS += khttpd_stream.c khttpd_port.c khttpd_server.c khttpd_vhost.c
+SRCS += khttpd_http.c
+SRCS += khttpd_ctrl.c
+SRCS += khttpd_file.c
+#SRCS += khttpd_sysctl.c
+#SRCS += khttpd_sdt.c
+SRCS += 
 KMOD = khttpd
 
 .if !defined(KERNBUILDDIR)
 
-beforedepend: ddb
-beforebuild: ddb
+beforedepend: ddb crypto
+beforebuild: ddb crypto
 ddb:
 	ln -fhs `(cd ${SYSDIR}/ddb && /bin/pwd)` ddb
-CLEANFILES += ddb
+crypto:
+	ln -fhs `(cd ${SYSDIR}/crypto && /bin/pwd)` crypto
+CLEANFILES += ddb crypto
 
 .endif
 
 .include <bsd.kmod.mk>
 
 CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1
-CFLAGS += -DKHTTPD_TRACE_MALLOC -DKHTTPD_KTR_LOGGING
-CFLAGS += -DKHTTPD_KTR_FILE=\"/usr/home/taketsuru/work/khttpd/modules/khttpd/ktr.txt\"
+CFLAGS += -DKHTTPD_KTR_LOGGING \
+	-DKHTTPD_KTR_FILE=\"$(.CURDIR)/../../test/ktr.txt\"
+CFLAGS += -DKHTTPD_TRACE_MALLOC -DKHTTPD_TRACE_MALLOC_STACK_DEPTH=12
+CFLAGS += -DKHTTPD_TRACE_FN -DKHTTPD_TRACE_BRANCH -DKHTTPD_TRACE_NOTE
+CFLAGS += -DKHTTPD_TEST_REPORT_PATH=\"$(.CURDIR)/../../report.xml\"
 CWARNFLAGS += -Wno-cast-qual
 
 cscope:

@@ -27,17 +27,44 @@
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#ifdef _KERNEL
 
-#define KHTTPD_VERSION	1100000
+#include <sys/param.h>
+#include <sys/lock.h>
+#include <sys/sx.h>
+#include <sys/socket.h>
+#include <machine/stdarg.h>
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+#include "khttpd_event.h"
+#include "khttpd_refcount.h"
 
-#define KHTTPD_IOC 'h'
+struct mbuf;
+struct khttpd_port;
+struct khttpd_socket;
+struct khttpd_stream;
+struct khttpd_stream_down_ops;
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+extern struct khttpd_stream_down_ops khttpd_socket_ops;
+extern struct khttpd_costruct_info *khttpd_port_costruct_info;
+
+KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_port, khttpd_port);
+
+int khttpd_port_new(struct khttpd_port **port_out);
+int khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
+    khttpd_event_fn_t accept_handler, const char **detail_out);
+void khttpd_port_stop(struct khttpd_port *port);
+
+struct khttpd_socket *khttpd_socket_new(void);
+int khttpd_socket_start(struct khttpd_socket *socket,
+    struct khttpd_stream *stream, struct khttpd_port *port,
+    const char **detail_out);
+const struct sockaddr *khttpd_socket_peer_address
+    (struct khttpd_socket *socket);
+
+/*
+ * XXX This is a tentative hack.  This function assumes the down side of the
+ * stream is a socket.
+ */
+int khttpd_stream_get_fd(struct khttpd_stream *stream);
+
+#endif	/* _KERNEL */

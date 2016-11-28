@@ -27,17 +27,13 @@
 
 #pragma once
 
+#ifdef _KERNEL
+
 #include <sys/types.h>
-#include <sys/ioccom.h>
 
-#define KHTTPD_VERSION	1100000
+void *khttpd_malloc(size_t size);
+void khttpd_free(void *mem);
+void *khttpd_realloc(void *mem, size_t size);
+char *khttpd_strdup(const char *str);
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
-
-#define KHTTPD_IOC 'h'
-
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#endif	/* ifdef _KERNEL */

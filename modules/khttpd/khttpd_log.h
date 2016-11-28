@@ -27,17 +27,29 @@
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#ifdef _KERNEL
 
-#define KHTTPD_VERSION	1100000
+#include <sys/param.h>
+#include <machine/stdarg.h>
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+struct mbuf;
+struct khttpd_log;
+struct khttpd_mbuf_json;
 
-#define KHTTPD_IOC 'h'
+struct khttpd_log *khttpd_log_new(void);
+void khttpd_log_delete(struct khttpd_log *log);
+void khttpd_log_set_fd(struct khttpd_log *log, int fd);
+void khttpd_log_close(struct khttpd_log *log);
+void khttpd_log_put(struct khttpd_log *log, struct mbuf *m);
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+const char *khttpd_log_get_severity_label(int severity);
+
+void khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry);
+void khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry,
+	int severity);
+void khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry,
+    int severity, const char *description_fmt, ...);
+void khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry,
+    int severity, const char *description_fmt, va_list args);
+
+#endif	/* _KERNEL */

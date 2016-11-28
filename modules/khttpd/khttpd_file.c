@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2016 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,11 +25,14 @@
  * DAMAGE.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/hash.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
+#include <sys/sbuf.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/stat.h>
@@ -37,75 +40,74 @@
 #include <sys/file.h>
 #include <sys/filedesc.h>
 #include <sys/syscallsubr.h>
+#include <sys/syslog.h>
 
 #include <machine/stdarg.h>
 
 #include <vm/uma.h>
 
-#include "khttpd.h"
-#include "khttpd_private.h"
+#include "khttpd_ctrl.h"
+#include "khttpd_http.h"
+#include "khttpd_init.h"
+#include "khttpd_malloc.h"
+#include "khttpd_mbuf.h"
+#include "khttpd_port.h"
+#include "khttpd_rewriter.h"
+#include "khttpd_refcount.h"
+#include "khttpd_server.h"
+#include "khttpd_status_code.h"
+#include "khttpd_string.h"
+#include "khttpd_webapi.h"
 
-/* ------------------------------------------------------- type definitions */
-
-struct khttpd_mime_type_rule_set;
-
-struct khttpd_file_route_data {
-	struct khttpd_mime_type_rule_set *rule_set;
-	char		*path;
-	int		dirfd;
+struct khttpd_file_location_data {
+	struct khttpd_rewriter *charset_rewriter;
+	struct khttpd_rewriter *mime_type_rewriter;
+	char		*docroot;
+	int		docroot_fd;
+	KHTTPD_REFCOUNT1_MEMBERS;
 };
 
-struct khttpd_file_request_data {
+struct khttpd_file_get_exchange_data {
 	off_t	xmit_offset;
 	off_t	xmit_residual;
-	size_t	pathsize;
 	int	fd;
 	char	path[];
 };
 
-struct khttpd_mime_type_rule {
-	SLIST_ENTRY(khttpd_mime_type_rule) link;
-	const char	*suffix;
-	const char	*type;
+static void khttpd_file_get_exchange_dtor(struct khttpd_exchange *, void *);
+static int khttpd_file_get_exchange_get(struct khttpd_exchange *, void *,
+    struct khttpd_stream *, size_t *);
+static void khttpd_file_get(struct khttpd_exchange *);
+static void khttpd_file_location_dtor(struct khttpd_location *);
+static void khttpd_file_location_data_dtor(struct khttpd_file_location_data *);
+
+static struct khttpd_location_ops khttpd_file_ops = {
+	.dtor = khttpd_file_location_dtor,
+	.method[KHTTPD_METHOD_GET] = khttpd_file_get,
 };
 
-SLIST_HEAD(khttpd_mime_type_rule_slist, khttpd_mime_type_rule);
-
-struct khttpd_mime_type_rule_set {
-	char		*buffer;
-	uint32_t	hash_mask;
-	struct khttpd_mime_type_rule_slist hash_table[];
+static struct khttpd_exchange_ops khttpd_file_get_exchange_ops = {
+	.dtor = khttpd_file_get_exchange_dtor,
+	.send = khttpd_file_get_exchange_get,
 };
 
-/* -------------------------------------------------- prototype declrations */
+static struct mtx khttpd_file_lock;
 
-static struct khttpd_mime_type_rule_set *khttpd_mime_type_rule_set_alloc
-    (uint32_t hash_size, char *buf);
-static const char *khttpd_mime_type_rule_set_find
-    (struct khttpd_mime_type_rule_set *rule_set, const char *path);
+MTX_SYSINIT(khttpd_file_lock, &khttpd_file_lock, "khttpd-file", MTX_DEF);
 
-static void khttpd_file_received_header(struct khttpd_socket *socket,
-    struct khttpd_request *request);
-
-/* --------------------------------------------------- variable definitions */
-
-static struct khttpd_route_type khttpd_route_type_file = {
-	.received_header = khttpd_file_received_header,
-};
-
-static const char *khttpd_index_names[] = {
-	"index.html"
-};
-
-static uma_zone_t khttpd_mime_type_rule_zone;
-
-/* --------------------------------------------------- function definitions */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+KHTTPD_REFCOUNT1_GENERATE_STATIC(khttpd_file_location_data, 
+    khttpd_file_location_data, khttpd_file_location_data_dtor, khttpd_free);
+#pragma clang diagnostic pop
 
 static int
 khttpd_file_normalize_path(const char *path, char *buf, size_t bufsize)
 {
 	const char *src, *segend;
 	char *dst, *dstend;
+
+	KHTTPD_ENTRY("%s(%p,%p,%zu)", __func__, path, buf, bufsize);
 
 	src = path;
 	dst = buf;
@@ -188,105 +190,25 @@ again:
 }
 
 static int
-khttpd_file_transmit(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct khttpd_response *response,
-    struct mbuf **out)
-{
-	cap_rights_t rights;
-	struct khttpd_file_request_data *data;
-	struct file *fp;
-	struct thread *td;
-	off_t sent;
-	int error;
-
-	td = curthread;
-	data = khttpd_request_data(request);
-
-	TRACE("enter %d %s", khttpd_socket_fd(socket), data->path);
-
-	error = fget_read(td, data->fd, cap_rights_init(&rights, CAP_PREAD),
-	    &fp);
-	if (error != 0) {
-		TRACE("error fget_read %d", error);
-		return (error);
-	}
-
-	error = fo_sendfile(fp, khttpd_socket_fd(socket), NULL, NULL,
-	    data->xmit_offset, data->xmit_residual, &sent, 0, td);
-	if (error != 0)
-		TRACE("error sendfile %d", error);
-
-	fdrop(fp, td);
-
-	if (error == 0 || error == EWOULDBLOCK) {
-		TRACE("sent=%ld, residual=%zd, offset=%zd",
-		    sent, data->xmit_residual, data->xmit_offset);
-		if ((data->xmit_residual -= sent) == 0)
-			khttpd_transmit_finished(socket);
-		else
-			data->xmit_offset += sent;
-	}
-
-	return (error);
-}
-
-static struct khttpd_file_request_data *
-khttpd_file_request_data_alloc(const char *path)
-{
-	struct khttpd_file_request_data *data;
-	size_t pathsize;
-
-	/* 
-	 * This MAX() is necessary because normalizing an empty path can
-	 * result in "."
-	 */
-	pathsize = MAX(2, strlen(path) + 1);
-	data = khttpd_malloc(sizeof(*data) + pathsize);
-	data->pathsize = pathsize;
-	data->fd = -1;
-
-	return (data);
-}
-
-static void
-khttpd_file_request_data_free(struct khttpd_file_request_data *data)
-{
-	struct thread *td;
-
-	td = curthread;
-	if (data->fd != -1)
-		kern_close(td, data->fd);
-	khttpd_free(data);
-}
-
-static void
-khttpd_file_request_dtor(struct khttpd_request *request, void *data)
-{
-
-	khttpd_file_request_data_free(data);
-}
-
-static int
 khttpd_file_open(int dirfd, const char *path, int *fd_out,
     struct stat *statbuf)
 {
 	struct thread *td;
 	int error, fd;
 
+	KHTTPD_ENTRY("%s(%d,%p)", __func__, dirfd, path);
+
 	td = curthread;
 
 	error = kern_openat(td, dirfd, (char *)path, UIO_SYSSPACE, O_RDONLY,
 	    0);
-	if (error != 0) {
-		TRACE("error open %d", error);
+	if (error != 0)
 		return (error);
-	}
 
 	fd = td->td_retval[0];
 
 	error = kern_fstat(td, fd, statbuf);
 	if (error != 0) {
-		TRACE("error fstat %d", error);
 		kern_close(td, fd);
 		return (error);
 	}
@@ -307,358 +229,387 @@ khttpd_file_open(int dirfd, const char *path, int *fd_out,
 }
 
 static void
-khttpd_file_redirect_to_index(struct khttpd_socket *socket,
-    struct khttpd_request *request, int fd)
+khttpd_file_get_exchange_dtor(struct khttpd_exchange *exchange, void *arg)
 {
-	struct stat statbuf;
+	struct khttpd_file_get_exchange_data *data;
+
+	KHTTPD_ENTRY("khttpd_file_get_exchange_dtor(%p,%p)", exchange, arg);
+
+	data = arg;
+	if (data->fd != -1)
+		kern_close(curthread, data->fd);
+	khttpd_free(data);
+}
+
+static int
+khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
+    struct khttpd_stream *stream, size_t *sent_out)
+{
+	struct khttpd_file_get_exchange_data *data;
+	cap_rights_t rights;
+	struct file *fp;
 	struct thread *td;
-	char *path;
-	size_t len, target_len, index_len;
-	int error, i, n, tmpfd;
+	off_t sent;
+	int error;
 
-	TRACE("enter %d %s %d", khttpd_socket_fd(socket),
-	    ((struct khttpd_file_request_data *)khttpd_request_data(request))
-	    ->path, fd);
+	KHTTPD_ENTRY("khttpd_file_get_exchange_get(%p,%p,%p)",
+	    exchange, arg, stream);
 
+	data = arg;
 	td = curthread;
 
-	n = sizeof(khttpd_index_names) / sizeof(khttpd_index_names[0]);
-	for (i = 0; i < n; ++i) {
-		tmpfd = -1;
-		error = khttpd_file_open(fd, khttpd_index_names[i], &tmpfd,
-		    &statbuf);
-		kern_close(td, tmpfd);
-		if (error == 0)
-			break;
-	}
+	error = fget_read(td, data->fd, cap_rights_init(&rights, CAP_PREAD),
+	    &fp);
+	if (error != 0)
+		return (error);
 
-	if (i == n) {
-		khttpd_set_not_found_response(socket, request, FALSE);
-		return;
-	}
+	error = fo_sendfile(fp, khttpd_stream_get_fd(stream), NULL, NULL,
+	    data->xmit_offset, data->xmit_residual, &sent, 0, td);
 
-	target_len = strlen(khttpd_request_target(request));
-	index_len = strlen(khttpd_index_names[i]);
+	fdrop(fp, td);
 
-	path = khttpd_malloc(target_len + 1 +index_len + 1);
-	bcopy(khttpd_request_target(request), path, target_len);
-	len = target_len;
-	if (path[len - 1] != '/')
-		path[len++] = '/';
-	bcopy(khttpd_index_names[i], path + len, index_len);
-	len += index_len;
-	path[len] = '\0';
+	if (error != 0 && error != EWOULDBLOCK)
+		return (error);
 
-	khttpd_set_moved_permanently_response(socket, request, NULL, path);
+	data->xmit_residual -= sent;
+	data->xmit_offset += sent;
+	*sent_out = sent;
 
-	khttpd_free(path);
+	return (0);
 }
 
 static void
-khttpd_file_get_or_head(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_file_get(struct khttpd_exchange *exchange)
 {
+	char buf[64];
+	struct sbuf sbuf;
 	struct stat statbuf;
-	struct khttpd_file_request_data *data;
-	struct khttpd_file_route_data *route_data;
-	struct khttpd_response *response;
-	struct khttpd_route *route;
+	struct khttpd_file_get_exchange_data *data;
+	struct khttpd_file_location_data *location_data;
+	struct khttpd_location *location;
 	struct thread *td;
-	const char *type, *path, *suffix;
-	int dirfd, error, fd;
+	const char *suffix;
+	size_t pathsize;
+	int error;
+	int status;
 
-	TRACE("enter %d %s", khttpd_socket_fd(socket),
-	    khttpd_request_suffix(request));
+	KHTTPD_ENTRY("khttpd_file_get(%p), target=\"%s\"", exchange,
+	    khttpd_ktr_printf("%s", khttpd_exchange_get_target(exchange)));
 
 	td = curthread;
-	route = khttpd_request_route(request);
-	route_data = khttpd_route_data(route);
-	suffix = khttpd_request_suffix(request);
-	data = khttpd_file_request_data_alloc(suffix);
+	location = khttpd_exchange_location(exchange);
+	mtx_lock(&khttpd_file_lock);
+	location_data = khttpd_file_location_data_acquire
+	    (khttpd_location_data(location));
+	mtx_unlock(&khttpd_file_lock);
+
+	suffix = khttpd_exchange_suffix(exchange);
+
+	/* 
+	 * This MAX() is necessary because normalizing an empty path can result
+	 * in "."
+	 */
+	pathsize = MAX(2, strlen(suffix) + 1);
+	data = khttpd_malloc(sizeof(*data) + pathsize);
+	data->fd = -1;
+	data->xmit_offset = 0;
+	data->xmit_residual = 0;
+	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
 
 	error = khttpd_file_normalize_path(suffix[0] == '/' ? suffix + 1 :
-	    suffix, data->path, data->pathsize);
+	    suffix, data->path, pathsize);
 	if (error != 0) {
-		TRACE("error normalize %d", error);
-		khttpd_file_request_data_free(data);
-		khttpd_set_not_found_response(socket, request, FALSE);
-		return;
+		status = KHTTPD_STATUS_NOT_FOUND;
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    NULL);
+		goto error;
 	}
 
-	khttpd_request_set_data(request, data, khttpd_file_request_dtor);
-
-	dirfd = route_data->dirfd;
-	path = data->path;
-	TRACE("path %s", path);
-
-	error = khttpd_file_open(dirfd, path, &fd, &statbuf);
-	if (error != 0)
-		TRACE("error open %d", error);
+	error = khttpd_file_open(location_data->docroot_fd, data->path,
+	    &data->fd, &statbuf);
 	switch (error) {
 
 	case 0:
 		break;
 
+	default:
+		khttpd_exchange_error(exchange, LOG_ERR, "khttpd: "
+		    "unexpected error code from khttpd_file_open. "
+		    "(error: %d)", error);
+		/* FALL THROUGH */
+
+	case EISDIR: /* auto index generation is not implemented yet */
+
 	case ENAMETOOLONG:
 	case ENOENT:
-		khttpd_set_not_found_response(socket, request, FALSE);
-		return;
-
 	case EACCES:
 	case EPERM:
-		khttpd_set_conflict_response(socket, request, FALSE);
-		return;
+		status = KHTTPD_STATUS_NOT_FOUND;
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    NULL);
+		goto error;
 
-	case EISDIR:
-		khttpd_file_redirect_to_index(socket, request, fd);
-		return;
-
-	default:
-		khttpd_set_internal_error_response(socket, request);
-		return;
 	}
 
-	data->fd = fd;
-	data->xmit_offset = 0;
 	data->xmit_residual = statbuf.st_size;
 
-	response = khttpd_response_alloc();
-	khttpd_response_set_status(response, 200);
+	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 
-	khttpd_response_set_body_proc(response, khttpd_file_transmit,
-	    statbuf.st_size);
+	if (location_data->mime_type_rewriter != NULL)
+		khttpd_rewriter_rewrite(location_data->mime_type_rewriter,
+		    &sbuf, data->path);
 
-	type = khttpd_mime_type_rule_set_find(route_data->rule_set,
-	    data->path);
-	khttpd_response_add_field(response, "Content-Type", "%s", type);
-
-	khttpd_set_response(socket, request, response);
-}
-
-static void
-khttpd_file_received_header(struct khttpd_socket *socket,
-    struct khttpd_request *request)
-{
-
-	TRACE("enter %s", khttpd_request_target(request));
-
-	switch (khttpd_request_method(request)) {
-
-	case KHTTPD_METHOD_GET:
-	case KHTTPD_METHOD_HEAD:
-		khttpd_file_get_or_head(socket, request);
-		break;
-
-	default:
-		khttpd_set_not_implemented_response(socket, request, FALSE);
+	if (location_data->charset_rewriter != NULL) {
+		sbuf_cat(&sbuf, sbuf_len(&sbuf) == 0 ? "charset=" :
+		    "; charset=");
+		khttpd_rewriter_rewrite(location_data->charset_rewriter,
+		    &sbuf, data->path);
 	}
+
+	sbuf_finish(&sbuf);
+
+	if (0 < sbuf_len(&sbuf))
+		khttpd_exchange_add_response_field(exchange, "Content-Type",
+		    "%s", sbuf_data(&sbuf));
+
+	sbuf_delete(&sbuf);
+
+	khttpd_exchange_set_response_content_length(exchange, statbuf.st_size);
+	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
+	return;
+
+ error:
+	khttpd_file_location_data_release(location_data);
+	khttpd_exchange_respond(exchange, status);
 }
 
-static void
-khttpd_file_route_dtor(struct khttpd_route *route)
+static int
+khttpd_file_location_data_new
+   (struct khttpd_file_location_data **location_data_out,
+    struct khttpd_mbuf_json *output,
+    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_file_route_data *route_data;
-
-	route_data = khttpd_route_data(route);
-
-	TRACE("enter %s", route_data->path);
-
-	khttpd_mime_type_rule_set_free(route_data->rule_set);
-	kern_close(curthread, route_data->dirfd);
-	khttpd_free(route_data->path);
-	khttpd_free(route_data);
-}
-
-int
-khttpd_file_mount(const char *path, struct khttpd_route *root,
-    int rootfd, struct khttpd_mime_type_rule_set *rules)
-{
-	struct stat statbuf;
-	struct khttpd_route *route;
-	struct khttpd_file_route_data *route_data;
+	struct khttpd_webapi_property prop_spec;
+	struct khttpd_file_location_data *location_data;
 	struct thread *td;
-	int error;
+	const char *docroot_str;
+	void *charset_rewriter, *mime_type_rewriter;
+	int docroot_fd, error, status;
 
-	TRACE("enter %s", path);
-
-	KASSERT(curproc == khttpd_proc,
-	    ("the current process is not the server process"));
+	KHTTPD_ENTRY("khttpd_file_location_data_new()");
 
 	td = curthread;
+	charset_rewriter = NULL;
+	mime_type_rewriter = NULL;
+	location_data = NULL;
+	docroot_fd = -1;
 
-	error = khttpd_route_add(root, path, &khttpd_route_type_file);
-	if (error != 0)
-		goto end;
+	status = khttpd_obj_type_get_obj_from_property(&khttpd_ctrl_rewriters,
+	    &charset_rewriter, "charsetRules", output,
+	    input_prop_spec, input, TRUE);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		goto quit;
 
-	error = kern_fstat(td, rootfd, &statbuf);
+	status = khttpd_obj_type_get_obj_from_property(&khttpd_ctrl_rewriters,
+	    &mime_type_rewriter, "mimeTypeRules", output,
+	    input_prop_spec, input, TRUE);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		goto quit;
+
+	status = khttpd_webapi_get_string_property(&docroot_str,
+	    "documentRoot", input_prop_spec, input, output, FALSE);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		goto quit;
+
+	prop_spec.link = input_prop_spec;
+	prop_spec.name = "documentRoot";
+
+	if (docroot_str != NULL && docroot_str[0] != '/') {
+		khttpd_webapi_set_invalid_value_problem(output);
+		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_webapi_set_problem_detail(output,
+		    "relative path name is not acceptable.");
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto quit;
+	}
+
+	error = kern_openat(td, AT_FDCWD, (char *)docroot_str, UIO_SYSSPACE,
+	    O_RDONLY | O_DIRECTORY, 0);
 	if (error != 0) {
-		TRACE("error stat %d", error);
-		goto end;
+		khttpd_webapi_set_invalid_value_problem(output);
+		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_webapi_set_problem_detail(output,
+		    "failed to open the document root directory.");
+		khttpd_webapi_set_problem_errno(output, error);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto quit;
+	}
+	docroot_fd = td->td_retval[0];
+
+	location_data = 
+	    khttpd_malloc(sizeof(struct khttpd_file_location_data));
+	location_data->charset_rewriter =
+	    khttpd_rewriter_acquire(charset_rewriter);
+	location_data->mime_type_rewriter =
+	    khttpd_rewriter_acquire(mime_type_rewriter);
+	location_data->docroot = khttpd_strdup(docroot_str);
+	location_data->docroot_fd = docroot_fd;
+	KHTTPD_REFCOUNT1_INIT(khttpd_file_location_data, location_data);
+
+	*location_data_out = location_data;
+
+	return (KHTTPD_STATUS_OK);
+
+quit:
+	if (docroot_fd != -1)
+		kern_close(td, docroot_fd);
+	khttpd_free(location_data);
+
+	return (status);
+}
+
+static void
+khttpd_file_location_data_dtor(struct khttpd_file_location_data *data)
+{
+
+	KHTTPD_ENTRY("khttpd_file_location_data_dtor(%p)", data);
+
+	khttpd_rewriter_release(data->charset_rewriter);
+	khttpd_rewriter_release(data->mime_type_rewriter);
+	khttpd_free(data->docroot);
+	if (data->docroot_fd != -1)
+		kern_close(curthread, data->docroot_fd);
+}
+
+static void
+khttpd_file_location_dtor(struct khttpd_location *location)
+{
+
+	KHTTPD_ENTRY("khttpd_file_location_dtor(%p)", location);
+	khttpd_file_location_data_release(khttpd_location_data(location));
+}
+
+static void
+khttpd_file_location_get(struct khttpd_location *location,
+    struct khttpd_mbuf_json *output)
+{
+	char buf[64];
+	struct sbuf sbuf;
+	struct khttpd_file_location_data *location_data;
+
+	KHTTPD_ENTRY("khttpd_file_location_get(%p)", location);
+
+	mtx_lock(&khttpd_file_lock);
+	KHTTPD_ENTRY("khttpd_file_location_dtor(%p)", location);
+	location_data = khttpd_file_location_data_acquire
+	    (khttpd_location_data(location));
+	mtx_unlock(&khttpd_file_lock);
+
+	khttpd_mbuf_json_object_begin(output);
+
+	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
+
+	if (location_data->charset_rewriter != NULL) {
+		khttpd_obj_type_get_id(&khttpd_ctrl_rewriters,
+		    location_data->charset_rewriter, &sbuf);
+		sbuf_finish(&sbuf);
+		khttpd_mbuf_json_property_format(output, "charsetRules", TRUE,
+		    "%s", sbuf_data(&sbuf));
 	}
 
-	if ((statbuf.st_mode & S_IFDIR) == 0) {
-		TRACE("error nodir");
-		error = ENOTDIR;
-		goto end;
+	if (location_data->mime_type_rewriter != NULL) {
+		sbuf_clear(&sbuf);
+		khttpd_obj_type_get_id(&khttpd_ctrl_rewriters,
+		    location_data->mime_type_rewriter, &sbuf);
+		sbuf_finish(&sbuf);
+		khttpd_mbuf_json_property_format(output, "mimeTypeRules", TRUE,
+		    "%s", sbuf_data(&sbuf));
 	}
 
-	route_data = khttpd_malloc(sizeof(struct khttpd_file_route_data));
-	route_data->path = khttpd_strdup(path);
-	route_data->rule_set = rules;
-	route_data->dirfd = rootfd;
+	khttpd_mbuf_json_property_format(output, "documentRoot", TRUE,
+	    "%s", location_data->docroot);
 
-	route = khttpd_route_find(root, route_data->path, NULL);
-	khttpd_route_set_data(route, route_data, khttpd_file_route_dtor);
+	khttpd_mbuf_json_object_end(output);
 
-end:
-	return (error);
+	sbuf_delete(&sbuf);
+	khttpd_file_location_data_release(location_data);
 }
 
-static struct khttpd_mime_type_rule_set *
-khttpd_mime_type_rule_set_alloc(uint32_t hash_size, char *buf)
+static int 
+khttpd_file_location_put(struct khttpd_location *location, 
+    struct khttpd_mbuf_json *output,
+    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_mime_type_rule_set *rule_set;
-	uint32_t i;
+	struct khttpd_file_location_data *location_data;
+	int status;
 
-	TRACE("enter");
+	KHTTPD_ENTRY("khttpd_file_location_put(%p)", location);
 
-	rule_set = khttpd_malloc(sizeof(*rule_set) +
-	    sizeof(struct khttpd_mime_type_rule_slist) * hash_size);
-	rule_set->buffer = buf;
-	rule_set->hash_mask = hash_size - 1;
+	status = khttpd_file_location_data_new(&location_data, output,
+	    input_prop_spec, input);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		return (status);
 
-	for (i = 0; i < hash_size; ++i)
-		SLIST_INIT(&rule_set->hash_table[i]);
+	mtx_lock(&khttpd_file_lock);
+	location_data = khttpd_location_set_data(location, location_data);
+	mtx_unlock(&khttpd_file_lock);
+	khttpd_file_location_data_release(location_data);
 
-	return (rule_set);
+	return (KHTTPD_STATUS_OK);
 }
 
-void
-khttpd_mime_type_rule_set_free(struct khttpd_mime_type_rule_set *rule_set)
+static int
+khttpd_file_location_create(struct khttpd_location **location_out,
+    struct khttpd_server *server, const char *path, 
+    struct khttpd_mbuf_json *output,
+    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_mime_type_rule *rule;
-	uint32_t hash_size;
-	int i;
+	struct khttpd_file_location_data *location_data;
+	int error, status;
 
-	TRACE("enter %p", rule_set);
+	KHTTPD_ENTRY("khttpd_file_location_create(%p)", server);
 
-	if (rule_set == NULL)
-		return;
+	status = khttpd_file_location_data_new(&location_data, output,
+	    input_prop_spec, input);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		return (status);
 
-	hash_size = rule_set->hash_mask + 1;
-	for (i = 0; i < hash_size; ++i)
-		while ((rule = SLIST_FIRST(&rule_set->hash_table[i])) !=
-		    NULL) {
-			SLIST_REMOVE_HEAD(&rule_set->hash_table[i], link);
-			uma_zfree(khttpd_mime_type_rule_zone, rule);
-		}
-
-	khttpd_free(rule_set->buffer);
-	khttpd_free(rule_set);
-}
-
-static const char *
-khttpd_mime_type_rule_set_find(struct khttpd_mime_type_rule_set *rule_set,
-    const char *path)
-{
-	struct khttpd_mime_type_rule *rule;
-	const char *cp;
-	uint32_t hash;
-
-	TRACE("enter %s", path);
-
-	for (cp = path + strlen(path); path < cp && cp[-1] != '.'; --cp)
-		;		/* nothing */
-
-	if (path == cp)
-		return ("application/octet-stream");
-
-	hash = khttpd_hash32_str_ci(cp, 0) & rule_set->hash_mask;
-	SLIST_FOREACH(rule, &rule_set->hash_table[hash], link)
-		if (strcasecmp(cp, rule->suffix) == 0)
-			return (rule->type);
-
-	return ("application/octet-stream");
-}
-
-struct khttpd_mime_type_rule_set *
-khttpd_parse_mime_type_rules(const char *description)
-{
-	struct khttpd_mime_type_rule_slist rules;
-	struct khttpd_mime_type_rule_set *rule_set;
-	struct khttpd_mime_type_rule *rule, *rp;
-	char *buf, *cp, *end, *last_end, *next, *suffix, *type;
-	size_t bufsize;
-	uint32_t rule_count, hash, hash_size;
-	char dummy;
-
-	SLIST_INIT(&rules);
-
-	bufsize = strlen(description) + 1;
-	buf = khttpd_malloc(bufsize);
-	bcopy(description, buf, bufsize);
-
-	last_end = &dummy;
-	end = buf + bufsize - 1;
-	rule_count = 0;
-	for (cp = buf; cp < end; cp = next + 1) {
-		next = khttpd_find_ch_in(cp, end, '\n');
-		next = next == NULL ? end : next;
-
-		type = cp = khttpd_skip_whitespace(cp);
-		*last_end = '\0';
-		last_end = cp = khttpd_find_whitespace(cp, next);
-
-		while (cp < next) {
-			suffix = cp = khttpd_skip_whitespace(cp);
-			if (*cp == '\n')
-				break;
-			*last_end = '\0';
-			last_end = cp = khttpd_find_whitespace(cp, next);
-
-			++rule_count;
-			rule = uma_zalloc(khttpd_mime_type_rule_zone,
-			    M_WAITOK);
-			rule->type = type;
-			rule->suffix = suffix;
-			SLIST_INSERT_HEAD(&rules, rule, link);
-		}
-	}
-	*last_end = '\0';
-
-	hash_size = rule_count == 0 ? 1 : 1U << (fls(rule_count) - 1);
-
-	rule_set = khttpd_mime_type_rule_set_alloc(hash_size, buf);
-	buf = NULL;
-
-	while ((rule = SLIST_FIRST(&rules)) != NULL) {
-		SLIST_REMOVE_HEAD(&rules, link);
-		hash = khttpd_hash32_str_ci(rule->suffix, 0) & (hash_size - 1);
-
-		SLIST_FOREACH(rp, &rule_set->hash_table[hash], link)
-			if (strcasecmp(rp->suffix, rule->suffix) == 0) {
-				khttpd_mime_type_rule_set_free(rule_set);
-				return (NULL);
-			}
-
-		SLIST_INSERT_HEAD(&rule_set->hash_table[hash], rule, link);
+	*location_out = khttpd_location_new(&error, server, path,
+	    &khttpd_file_ops, location_data);
+	if (error != 0) {
+		khttpd_file_location_data_release(location_data);
+		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
+		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_webapi_set_problem_detail(output,
+		    "failed to construct a location");
+		khttpd_webapi_set_problem_errno(output, error);
+		return (status);
 	}
 
-	return (rule_set);
+	return (KHTTPD_STATUS_CREATED);
 }
 
-int khttpd_file_init(void)
+static int
+khttpd_file_register_location_type(void)
 {
 
-	khttpd_mime_type_rule_zone = uma_zcreate("khttp-mime-type-rule",
-	    sizeof(struct khttpd_mime_type_rule), NULL, NULL, NULL, NULL,
-	    UMA_ALIGN_PTR, 0);
+	KHTTPD_ENTRY("khttpd_file_register_location_type()");
+
+	khttpd_location_type_register("khttpd_file",
+	    khttpd_file_location_create, NULL,
+	    khttpd_file_location_get, khttpd_file_location_put);
 
 	return (0);
 }
 
-void khttpd_file_fini(void)
+static void
+khttpd_file_deregister_location_type(void)
 {
 
-	uma_zdestroy(khttpd_mime_type_rule_zone);
+	KHTTPD_ENTRY("khttpd_file_deregister_location_type()");
+	khttpd_location_type_deregister("khttpd_file");
 }
+
+KHTTPD_INIT(khttpd::file, khttpd_file_register_location_type,
+    khttpd_file_deregister_location_type,
+    KHTTPD_INIT_PHASE_REGISTER_LOCATION_TYPES);

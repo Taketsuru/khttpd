@@ -29,8 +29,8 @@ if (target.run('kldload modules/khttpd/khttpd.ko').status !== 0) {
     process.exit();
 }
 
-if (target.run('usr.sbin/khttpd-init/khttpd-init -4 192.168.56.3:8080 ' +
-               '-l access.log -e error.log').status !== 0) {
-    console.log('khttpd-init failed');
+if (target.run('usr.sbin/khttpdctl/khttpdctl ' +
+	       'load test/khttpd.conf').status !== 0) {
+    console.log('khttpdctl failed');
     process.exit();
 }

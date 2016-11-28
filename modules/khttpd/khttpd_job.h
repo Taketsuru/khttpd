@@ -27,17 +27,15 @@
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#ifdef _KERNEL
 
-#define KHTTPD_VERSION	1100000
+struct khttpd_job;
 
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
-};
+typedef void (*khttpd_job_fn_t)(void *arg);
 
-#define KHTTPD_IOC 'h'
+struct khttpd_job *khttpd_job_new(khttpd_job_fn_t handler, void *arg,
+    struct khttpd_job *sibling);
+void khttpd_job_schedule(struct khttpd_job *job);
+void khttpd_job_delete(struct khttpd_job *job);
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 1, struct khttpd_ioctl_start_args)
+#endif	/* _KERNEL */

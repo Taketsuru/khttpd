@@ -37,7 +37,11 @@
 #include <sys/sysctl.h>
 
 #include "khttpd.h"
-#include "khttpd_private.h"
+#include "khttpd_json.h"
+#include "khttpd_malloc.h"
+#include "khttpd_mbuf.h"
+#include "khttpd_router.h"
+#include "khttpd_string.h"
 
 #ifndef KHTTPD_SYSCTL_JSON_DEPTH_MAX
 #define KHTTPD_SYSCTL_JSON_DEPTH_MAX	16
@@ -68,17 +72,19 @@ struct khttpd_sysctl_put_leaf_request {
 
 /* -------------------------------------------------- prototype declrations */
 
-static void khttpd_sysctl_received_header(struct khttpd_socket *socket, 
-    struct khttpd_request *request);
-static void khttpd_sysctl_put_leaf_received_body(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct mbuf *m);
-static void khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
-    struct khttpd_request *request);
+static void khttpd_sysctl_get(struct khttpd_request *request);
+static void khttpd_sysctl_put(struct khttpd_request *request);
+static void khttpd_sysctl_options(struct khttpd_request *request);
+static void khttpd_sysctl_put_leaf_received_body
+    (struct khttpd_request *request, struct mbuf *m);
+static void khttpd_sysctl_put_leaf_end(struct khttpd_request *request);
 
 /* --------------------------------------------------- variable definitions */
 
-static struct khttpd_route_type khttpd_route_type_sysctl = {
-	.received_header = khttpd_sysctl_received_header,
+static struct khttpd_route_ops khttpd_route_ops_sysctl = {
+	.method[KHTTPD_METHOD_GET] = khttpd_sysctl_get,
+	.method[KHTTPD_METHOD_PUT] = khttpd_sysctl_put,
+	.method[KHTTPD_METHOD_OPTIONS] = khttpd_sysctl_options
 };
 
 static const char *khttpd_sysctl_types[] = {
@@ -136,23 +142,18 @@ khttpd_sysctl_value_in_json(struct mbuf *output, int *oid, int oidlen,
 	valbuf = NULL;
 
 	if (type == CTLTYPE_NODE) {
-		TRACE("error node");
 		error = ENOENT;
 		goto out;
 	}
 
 	error = kernel_sysctl(td, oid, oidlen, NULL, 0, NULL, 0, &vallen, 0);
-	if (error != 0) {
-		TRACE("error get1 %d %d", error, oidlen);
+	if (error != 0)
 		goto out;
-	}
 	valbuf = khttpd_malloc(vallen);
 	error = kernel_sysctl(td, oid, oidlen, valbuf, &vallen, NULL, 0,
 	    NULL, 0);
-	if (error != 0) {
-		TRACE("error get2 %d", error);
+	if (error != 0)
 		goto out;
-	}
 
 	switch (type) {
 
@@ -163,8 +164,7 @@ khttpd_sysctl_value_in_json(struct mbuf *output, int *oid, int oidlen,
 	case CTLTYPE_STRING:
 		if (0 < vallen && valbuf[vallen - 1] == '\0')
 			--vallen;
-		khttpd_json_mbuf_append_string(output, valbuf,
-		    valbuf + vallen);
+		khttpd_mbuf_put_json_string(output, valbuf, valbuf + vallen);
 		break;
 
 	case CTLTYPE_S64:
@@ -202,8 +202,7 @@ out:
 }
 
 static void
-khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_get_index(struct khttpd_request *request)
 {
 	int cur_oid[CTL_MAXNAME], next_oid[CTL_MAXNAME + 2];
 	char *strbuf;
@@ -215,8 +214,6 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 	int error, i, flag_count, item_count, pos, type;
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) == sizeof(kind));
-
-	TRACE("enter");
 
 	td = curthread;
 	strbuf = NULL;
@@ -248,10 +245,8 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		error = kernel_sysctl(td, next_oid,
 		    cur_oidlen / sizeof(int) + 2,
 		    next_oid + 2, &next_oidlen, NULL, 0, &next_oidlen, 0);
-		if (error != 0) {
-			TRACE("next %d", error);
+		if (error != 0)
 			break;
-		}
 
 		itembuf = m_get(M_WAITOK, MT_DATA);
 
@@ -271,18 +266,14 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, NULL, 0, NULL, 0,
 		    &strbuflen, 0);
-		if (error != 0) {
-			TRACE("error name1 %d", error);
+		if (error != 0)
 			goto again;
-		}
 		strbuf = khttpd_realloc(strbuf, strbuflen);
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen, NULL,
 		    0, NULL, 0);
-		if (error != 0) {
-			TRACE("error name2 %d", error);
+		if (error != 0)
 			goto again;
-		}
 
 		/* Print ,"name":"kern.ostype", */
 		khttpd_mbuf_printf(itembuf, ",\n\"name\":\"%s\"", strbuf);
@@ -292,18 +283,14 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, NULL, 0, NULL, 0,
 		    &strbuflen, 0);
-		if (error != 0) {
-			TRACE("error oidfmt1 %d", error);
+		if (error != 0)
 			goto again;
-		}
 		strbuf = khttpd_realloc(strbuf, strbuflen);
 		error = kernel_sysctl(td, next_oid,
 		    next_oidlen / sizeof(int) + 2, strbuf, &strbuflen, NULL,
 		    0, NULL, 0);
-		if (error != 0) {
-			TRACE("error oidfmt2 %d", error);
+		if (error != 0)
 			goto again;
-		}
 
 		kind = *(u_int *)strbuf;
 
@@ -347,7 +334,7 @@ khttpd_sysctl_get_or_head_index(struct khttpd_socket *socket,
 				/* Print ,"description":"hogehoge" */
 				khttpd_mbuf_printf(itembuf,
 				    ",\n\"description\":");
-				khttpd_json_mbuf_append_string(itembuf,
+				khttpd_mbuf_put_json_string(itembuf,
 				    strbuf, strbuf + strbuflen - 1);
 			}
 		}
@@ -388,15 +375,15 @@ again:
 	khttpd_response_set_body_mbuf(response, body);
 	khttpd_response_add_field(response, "Content-Type", "%s",
 	    "application/json");
-	khttpd_set_response(socket, request, response);
+	khttpd_request_set_response(request, response);
 
 	m_freem(itembuf);
 	khttpd_free(strbuf);
 }
 
 static struct mbuf *
-khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
-    struct khttpd_request *request, int *oid, int oidlen, int *error_out)
+khttpd_sysctl_entry_to_json(struct khttpd_request *request, int *oid,
+    int oidlen, int *error_out)
 {
 	int tmpoid[CTL_MAXNAME + 2];
 	struct thread *td;
@@ -408,8 +395,6 @@ khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) == sizeof(kind));
 
-	TRACE("enter");
-
 	td = curthread;
 	result = m_get(M_WAITOK, MT_DATA);
 	valbuf = NULL;
@@ -419,27 +404,22 @@ khttpd_sysctl_entry_to_json(struct khttpd_socket *socket,
 	bcopy(oid, tmpoid + 2, oidlen * sizeof(oid[0]));
 	error = kernel_sysctl(td, tmpoid, oidlen + 2, NULL, 0, NULL, 0,
 	    &vallen, 0);
-	if (error != 0) {
-		TRACE("error oidfmt1 %d", error);
+	if (error != 0)
 		goto out;
-	}
 
 	valbuf = khttpd_malloc(vallen);
 	error = kernel_sysctl(td, tmpoid, oidlen + 2,
 	    valbuf, &vallen, NULL, 0, NULL, 0);
-	if (error != 0) {
-		TRACE("error oidfmt2 %d", error);
+	if (error != 0)
 		goto out;
-	}
 	bcopy(valbuf, &kind, sizeof(kind));
 	type = kind & CTLTYPE;
 	khttpd_free(valbuf);
 	valbuf = NULL;
 
-	if (type == CTLTYPE_NODE) {
-		TRACE("error node");
+	if (type == CTLTYPE_NODE)
 		error = ENOENT;
-	} else
+	else
 		error = khttpd_sysctl_value_in_json(result, oid, oidlen,
 		    kind);
 
@@ -464,25 +444,19 @@ khttpd_sysctl_parse_oid(const char *name, int *oid)
 	u_int value;
 	char ch;
 
-	TRACE("enter %s", name);
-
 	cp = name;
 	i = 0;
 	for (i = 0; i < CTL_MAXNAME; ++i) {
-		if (*cp == '\0') {
-			TRACE("terminated by '.'");
+		if (*cp == '\0')
 			return (-1);
-		}
 
 		value = 0;
 		for (;;) {
 			ch = *cp++;
 			if (!isxdigit(ch))
 				break;
-			if (value << 4 < value) {
-				TRACE("overflow");
+			if (value << 4 < value)
 				return (-1);
-			}
 			value <<= 4;
 			if (isdigit(ch))
 				value |= ch - '0';
@@ -492,10 +466,8 @@ khttpd_sysctl_parse_oid(const char *name, int *oid)
 				value |= ch - 'A' + 10;
 		}
 
-		if (ch != '.' && ch != '\0') {
-			TRACE("invalid ch %#02x", ch);
+		if (ch != '.' && ch != '\0')
 			return (-1);
-		}
 
 		oid[i] = value;
 
@@ -503,14 +475,11 @@ khttpd_sysctl_parse_oid(const char *name, int *oid)
 			return (i + 1);
 	}
 
-	TRACE("too long");
-
 	return (-1);
 }
 
 static void
-khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_get_leaf(struct khttpd_request *request)
 {
 	int oid[CTL_MAXNAME];
 	struct mbuf *body;
@@ -519,25 +488,19 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 	size_t oidlen;
 	int error;
 
-	TRACE("enter %s", khttpd_request_suffix(request));
-
 	name = khttpd_request_suffix(request) + 1;
 	oidlen = khttpd_sysctl_parse_oid(name, oid);
 	if (oidlen == -1) {
-		TRACE("error parse_oid");
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(request, FALSE);
 		return;
 	}
 
-	body = khttpd_sysctl_entry_to_json(socket, request, oid, oidlen,
-	    &error);
+	body = khttpd_sysctl_entry_to_json(request, oid, oidlen, &error);
 	if (body == NULL) {
-		TRACE("error entry_to_json %d", error);
 		if (error == ENOENT)
-			khttpd_set_not_found_response(socket, request,
-			    FALSE);
+			khttpd_set_not_found_response(request, FALSE);
 		else
-			khttpd_set_internal_error_response(socket, request);
+			khttpd_set_internal_error_response(request);
 		return;
 	}
 
@@ -546,23 +509,19 @@ khttpd_sysctl_get_or_head_leaf(struct khttpd_socket *socket,
 	khttpd_response_set_body_mbuf(response, body);
 	khttpd_response_add_field(response, "Content-Type", "%s",
 	    "application/json");
-	khttpd_set_response(socket, request, response);
+	khttpd_request_set_response(request, response);
 }
 
 static void
-khttpd_sysctl_get_or_head(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_get(struct khttpd_request *request)
 {
 	const char *suffix;
 
-	TRACE("enter %d %s", khttpd_socket_fd(socket),
-	    khttpd_request_suffix(request));
-
 	suffix = khttpd_request_suffix(request);
 	if (suffix[0] == '\0' || strcmp(suffix, "/") == 0)
-		khttpd_sysctl_get_or_head_index(socket, request);
+		khttpd_sysctl_get_index(request);
 	else
-		khttpd_sysctl_get_or_head_leaf(socket, request);
+		khttpd_sysctl_get_leaf(request);
 }
 
 static void
@@ -571,21 +530,18 @@ khttpd_sysctl_put_leaf_request_dtor(struct khttpd_request *request,
 {
 	struct khttpd_sysctl_put_leaf_request *auxdata;
 
-	TRACE("enter");
-
 	auxdata = data;
 	m_freem(auxdata->head);
 	khttpd_free(auxdata);
 }
 
 static void
-khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_put_leaf_end(struct khttpd_request *request)
 {
 	struct khttpd_mbuf_pos iter;
 	struct khttpd_sysctl_put_leaf_request *auxdata;
 	struct khttpd_response	*response;
-	struct khttpd_json *value;
+	struct khttpd_json *value, *noval;
 	struct thread *td;
 	const char *name;
 	char *valbuf;
@@ -594,8 +550,6 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 	long lval;
 	u_int kind;
 	int error, ival;
-
-	TRACE("enter %s", khttpd_request_suffix(request));
 
 	auxdata = khttpd_request_data(request);
 
@@ -608,10 +562,8 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 	if ((kind & CTLTYPE) == CTLTYPE_OPAQUE) {
 		error = khttpd_mbuf_base64_decode(&iter, (void **)&valbuf,
 		    &vallen);
-		if (error != 0) {
-			TRACE("error decode %d", error);
+		if (error != 0)
 			goto out;
-		}
 		error = kernel_sysctl(td, auxdata->oid, auxdata->oidlen,
 		    NULL, 0, valbuf, vallen, NULL, 0);
 		khttpd_free(valbuf);
@@ -620,14 +572,11 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	error = khttpd_json_parse(&iter, &value, 
 	    KHTTPD_SYSCTL_JSON_DEPTH_MAX);
-	if (error != 0) {
-		TRACE("error parse %d", error);
+	if (error != 0)
 		goto out;
-	}
 
-	khttpd_json_mbuf_skip_ws(&iter);
-	if (iter.ptr != NULL) {
-		TRACE("error trailing-garbage");
+	error = khttpd_json_parse(&iter, &noval, 1);
+	if (error != 0 || noval != NULL) {
 		error = EINVAL;
 		goto out;
 	}
@@ -636,13 +585,11 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_INT:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error int1");
 			error = EINVAL;
 			break;
 		}
 		jival = khttpd_json_integer_value(value);
 		if (jival < INT_MIN || INT_MAX < jival) {
-			TRACE("error int2");
 			error = EINVAL;
 			break;
 		}
@@ -653,11 +600,9 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_STRING:
 		if (khttpd_json_type(value) != KHTTPD_JSON_STRING) {
-			TRACE("error string");
 			error = EINVAL;
 			break;
 		}
-		khttpd_json_string_append_char(value, '\0');
 		error = kernel_sysctl(td, auxdata->oid, auxdata->oidlen,
 		    NULL, 0, (void *)khttpd_json_string_data(value),
 		    khttpd_json_string_size(value), NULL, 0);
@@ -665,7 +610,6 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_S64:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error s64");
 			error = EINVAL;
 			break;
 		}
@@ -676,13 +620,11 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_UINT:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error uint1");
 			error = EINVAL;
 			break;
 		}
 		jival = khttpd_json_integer_value(value);
 		if (jival < 0 || UINT_MAX < jival) {
-			TRACE("error uint2");
 			error = EINVAL;
 			break;
 		}
@@ -693,13 +635,11 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_LONG:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error long1");
 			error = EINVAL;
 			break;
 		}
 		jival = khttpd_json_integer_value(value);
 		if (jival < LONG_MIN || LONG_MAX < jival) {
-			TRACE("error long2");
 			error = EINVAL;
 			break;
 		}
@@ -710,13 +650,11 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_ULONG:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error ulong1");
 			error = EINVAL;
 			break;
 		}
 		jival = khttpd_json_integer_value(value);
 		if (jival < 0 || ULONG_MAX < jival) {
-			TRACE("error ulong2");
 			error = EINVAL;
 			break;
 		}
@@ -727,7 +665,6 @@ khttpd_sysctl_put_leaf_end(struct khttpd_socket *socket,
 
 	case CTLTYPE_U64:
 		if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-			TRACE("error u64");
 			error = EINVAL;
 			break;
 		}
@@ -746,30 +683,30 @@ out:
 	case 0:
 		response = khttpd_response_alloc();
 		khttpd_response_set_status(response, 204);
-		khttpd_set_response(socket, request, response);
+		khttpd_request_set_response(request, response);
 		break;
 
 	case EINVAL:
 	case ELOOP:
 	case ENOMSG:
 	case EOVERFLOW:
-		khttpd_set_conflict_response(socket, request, FALSE);
+		khttpd_set_conflict_response(request, FALSE);
 		break;
 
 	case ENOENT:
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(request, FALSE);
 		break;
 
 	default:
-		khttpd_set_internal_error_response(socket, request);
+		khttpd_set_internal_error_response(request);
 	}
 
 	khttpd_json_free(value);
 }
 
 static void
-khttpd_sysctl_put_leaf_received_body(struct khttpd_socket *socket,
-    struct khttpd_request *request, struct mbuf *m)
+khttpd_sysctl_put_leaf_received_body(struct khttpd_request *request,
+    struct mbuf *m)
 {
 	struct khttpd_sysctl_put_leaf_request *auxdata;
 	int len;
@@ -779,7 +716,7 @@ khttpd_sysctl_put_leaf_received_body(struct khttpd_socket *socket,
 	len = m_length(m, NULL);
 
 	if (auxdata->limit < len) {
-		khttpd_set_payload_too_large_response(socket, request);
+		khttpd_set_payload_too_large_response(request);
 		return;
 	}
 
@@ -789,8 +726,7 @@ khttpd_sysctl_put_leaf_received_body(struct khttpd_socket *socket,
 }
 
 static void
-khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_put_leaf(struct khttpd_request *request)
 {
 	int oid[CTL_MAXNAME + 2];
 	struct khttpd_sysctl_put_leaf_request *auxdata;
@@ -803,15 +739,13 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) ==
 	    sizeof(auxdata->kind));
 
-	TRACE("enter");
-
 #if 0
 	/* 
 	 * Content-Length is required.  The PUT method for sysctl leafs
 	 * doesn't support chunked encoding.
 	 */
 	if (!request->has_content_length) {
-		khttpd_set_length_required_response(socket, request);
+		khttpd_set_length_required_response(request);
 		return;
 	}
 #endif
@@ -823,7 +757,6 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	suffix = khttpd_request_suffix(request);
 	auxdata->oidlen = khttpd_sysctl_parse_oid(suffix + 1, auxdata->oid);
 	if (auxdata->oidlen == -1) {
-		TRACE("error parse_oid");
 		error = ENOENT;
 		goto out;
 	}
@@ -834,18 +767,14 @@ khttpd_sysctl_put_leaf(struct khttpd_socket *socket,
 	    auxdata->oidlen * sizeof(auxdata->oid[0]));
 	error = kernel_sysctl(td, oid, auxdata->oidlen + 2,
 	    NULL, 0, NULL, 0, &vallen, 0);
-	if (error == ENOENT) {
-		TRACE("error oidfmt1 %d", error);
+	if (error == ENOENT)
 		goto out;
-	}
 
 	valbuf = khttpd_malloc(vallen);
 	error = kernel_sysctl(td, oid, auxdata->oidlen + 2,
 	    valbuf, &vallen, NULL, 0, NULL, 0);
-	if (error != 0) {
-		TRACE("error oidfmt2 %d", error);
+	if (error != 0)
 		goto out;
-	}
 	bcopy(valbuf, &auxdata->kind, sizeof(auxdata->kind));
 
 	if ((auxdata->kind & CTLFLAG_WR) == 0) {
@@ -872,38 +801,34 @@ out:
 		break;
 
 	case ENOENT:
-		khttpd_set_not_found_response(socket, request, FALSE);
+		khttpd_set_not_found_response(request, FALSE);
 		break;
 
 	case EPERM:
-		khttpd_set_method_not_allowed_response(socket, request,
-		    FALSE, "OPTIONS, HEAD, GET");
+		khttpd_set_method_not_allowed_response(request, FALSE,
+		    "OPTIONS, HEAD, GET");
 		break;
 
 	default:
-		khttpd_set_internal_error_response(socket, request);
+		khttpd_set_internal_error_response(request);
 	}
 }
 
 static void
-khttpd_sysctl_put(struct khttpd_socket *socket,
-    struct khttpd_request *request)
+khttpd_sysctl_put(struct khttpd_request *request)
 {
 	const char *suffix;
 
-	TRACE("enter");
-
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
-		khttpd_set_method_not_allowed_response(socket, request,
-		    FALSE, "OPTIONS, HEAD, GET");
+		khttpd_set_method_not_allowed_response(request, FALSE,
+		    "OPTIONS, HEAD, GET");
 	else
-		khttpd_sysctl_put_leaf(socket, request);
+		khttpd_sysctl_put_leaf(request);
 }
 
 static void
-khttpd_sysctl_options(struct khttpd_socket *socket, 
-    struct khttpd_request *request)
+khttpd_sysctl_options(struct khttpd_request *request)
 {
 	int oid[CTL_MAXNAME];
 	struct thread *td;
@@ -913,8 +838,6 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 	u_int kind;
 	int error;
 	boolean_t writeable;
-
-	TRACE("enter");
 
 	td = curthread;
 	writeable = FALSE;
@@ -928,8 +851,7 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 		/* the target is "/sys/sysctl/<oid>" */
 		oidlen = khttpd_sysctl_parse_oid(suffix + 1, oid + 2);
 		if (oidlen == -1) {
-			khttpd_set_not_found_response(socket, request,
-			    FALSE);
+			khttpd_set_not_found_response(request, FALSE);
 			return;
 		}
 
@@ -938,8 +860,7 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 		error = kernel_sysctl(td, oid, oidlen + 2,
 		    NULL, 0, NULL, 0, &buflen, 0);
 		if (error == ENOENT) {
-			khttpd_set_not_found_response(socket, request,
-			    FALSE);
+			khttpd_set_not_found_response(request, FALSE);
 			return;
 		}
 
@@ -949,48 +870,21 @@ khttpd_sysctl_options(struct khttpd_socket *socket,
 		bcopy(buf, &kind, sizeof(kind));
 		khttpd_free(buf);
 		if (error != 0) {
-			TRACE("error oidfmt %d", error);
-			khttpd_set_internal_error_response(socket, request);
+			khttpd_set_internal_error_response(request);
 			return;
 		}
 
 		writeable = (kind & CTLFLAG_WR) != 0;
 	}
 
-	khttpd_set_options_response(socket, request, NULL,
+	khttpd_set_options_response(request, NULL, 
 	    writeable ? "OPTIONS, HEAD, GET, PUT" : "OPTIONS, HEAD, GET");
 }
 
-static void
-khttpd_sysctl_received_header(struct khttpd_socket *socket,
-    struct khttpd_request *request)
-{
-
-	TRACE("enter %d", khttpd_socket_fd(socket));
-
-	switch (khttpd_request_method(request)) {
-
-	case KHTTPD_METHOD_GET:
-	case KHTTPD_METHOD_HEAD:
-		khttpd_sysctl_get_or_head(socket, request);
-		break;
-
-	case KHTTPD_METHOD_PUT:
-		khttpd_sysctl_put(socket, request);
-		break;
-
-	case KHTTPD_METHOD_OPTIONS:
-		khttpd_sysctl_options(socket, request);
-		break;
-
-	default:
-		khttpd_set_not_implemented_response(socket, request, FALSE);
-	}
-}
-
 int
-khttpd_sysctl_route(struct khttpd_route *root)
+khttpd_sysctl_route(struct khttpd_server *server)
 {
-	return (khttpd_route_add(root, KHTTPD_SYSCTL_PREFIX,
-		&khttpd_route_type_sysctl));
+
+	return (khttpd_router_add(khttpd_server_router(server),
+		KHTTPD_SYSCTL_PREFIX, &khttpd_route_ops_sysctl));
 }

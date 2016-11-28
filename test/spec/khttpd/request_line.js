@@ -14,7 +14,7 @@ describe('khttpd', function () {
         });
 
         it('closes if the client closes', function (done) {
-            session.chan.once('end', done);
+            session.chan.once('close', done);
             session.chan.end();
         });
 
@@ -38,7 +38,7 @@ describe('khttpd', function () {
             for (i = 0; i + 2 <= n; i += 2) {
                 crlfs += '\r\n';
             }
-            session.chan.once('end', done);
+            session.chan.once('close', done);
             session.chan.write(crlfs);
             session.chan.end();
         });
@@ -60,22 +60,23 @@ describe('khttpd', function () {
            function (done) {
                var i, n, message, crlfs;
 
-               message = 'OPTIONS * HTTP/1.1\r\nConnection: close\r\n\r\n';
+               message = 'OPTIONS * HTTP/1.1\r\n' +
+		   'Host: ' + target.name + '\r\n' +
+		   'Connection: close\r\n\r\n';
                crlfs = '';
                n = httpTest.messageSizeMax - message.length;
                for (i = 0; i + 2 <= n; i += 2) {
                    crlfs += '\r\n';
                }
                session.chan.write(crlfs + message);
-               session.chan.once('end', done);
+               session.chan.once('close', done);
            });
 
         it('sends a valid response', function (done) {
-            session.chan.end();
-            session.chan.once('close', done);
             session.response = httpTest.parseMessage(session.data);
             httpTest.expectSuccessfulOptionsResponse(session.response);
             expect(session.response.header.connection).toBe('close');
+	    done();
         });
     });
 
@@ -92,7 +93,8 @@ describe('khttpd', function () {
         });
 
         it('receives the rest of the request line', function (done) {
-            session.chan.write(' HTTP/1.1\r\n\r\n');
+            session.chan.write(' HTTP/1.1\r\nHost: ' + target.name +
+			       '\r\n\r\n');
             session.chan.once('close', done);
             session.chan.end();
         });
@@ -114,15 +116,15 @@ describe('khttpd', function () {
         it('half-closes after sending a response to the request',
            function (done) {
                var head = 'GET ',
-                   tail = ' HTTP/1.1\r\n\r\n',
-                   target = '/',
+                   tail = ' HTTP/1.1\r\nHost: ' + target.name + '\r\n\r\n',
+                   targetUri = '/',
                    i, n;
 
                n = httpTest.messageSizeMax - head.length - tail.length;
                for (i = 1; i < n; ++i) {
-                   target += 'a';
+                   targetUri += 'a';
                }
-               session.chan.write(head + target + tail);
+               session.chan.write(head + targetUri + tail);
                session.chan.once('close', done);
                session.chan.end();
            });
@@ -144,15 +146,15 @@ describe('khttpd', function () {
         it('half-closes after sending a response to the request',
            function (done) {
                var head = 'GET ',
-                   tail = ' HTTP/1.1\r\n\r\n',
-                   target = '/',
+                   tail = ' HTTP/1.1\r\nHost: ' + target.name + '\r\n\r\n',
+                   targetUri = '/',
                    i, n;
 
                n = httpTest.messageSizeMax - head.length - tail.length;
                for (i = 1; i < n; ++i) {
-                   target += 'a';
+                   targetUri += 'a';
                }
-               session.chan.write(head + target + tail);
+               session.chan.write(head + targetUri + tail);
                session.chan.once('close', done);
                session.chan.end();
            });
@@ -175,14 +177,15 @@ describe('khttpd', function () {
            function (done) {
                var head = 'GET ',
                    tail = ' HTTP/1.1\r\n',
-                   target = '/',
+                   targetUri = '/',
                    i, n;
 
                n = httpTest.messageSizeMax - head.length - tail.length;
                for (i = 1; i < n; ++i) {
-                   target += 'a';
+                   targetUri += 'a';
                }
-               session.chan.write(head + target + tail + '\r\n');
+               session.chan.write(head + targetUri + tail +
+				  'Host: ' + target.name + '\r\n\r\n');
                session.chan.once('close', done);
                session.chan.end();
            });
@@ -207,14 +210,15 @@ describe('khttpd', function () {
            function (done) {
                var head = 'GET ',
                    tail = ' HTTP/1.1\r\n',
-                   target = '/',
+                   path = '/',
                    i, n;
 
                n = httpTest.messageSizeMax - head.length - tail.length + 1;
                for (i = 1; i < n; ++i) {
-                   target += 'a';
+                   path += 'a';
                }
-               session.chan.write(head + target + tail + '\r\n');
+               session.chan.write(head + path + tail +
+				  'Host: ' + target.name + '\r\n\r\n');
                session.chan.once('close', done);
                session.chan.end();
            });
@@ -250,7 +254,7 @@ describe('khttpd', function () {
 
     describe('receiving an invalid request target', function () {
         var session = {},
-            invalidURLs = ['http://localhost/sys/ui', 'sys/ui'],
+            invalidURLs = ['/nowhere'],
             url;
 
         function testWithConnectionClose(url) {
@@ -261,8 +265,9 @@ describe('khttpd', function () {
             it('receives a request line with an invalid request target',
                function (done) {
                    session.chan.write('GET ' + url + ' HTTP/1.1\r\n' +
+				      'Host: ' + target.name + '\r\n' +
                                       'Connection: close\r\n\r\n');
-                   session.chan.once('end', done);
+                   session.chan.once('close', done);
                });
 
             it('has sent a "Not Found" response', function (done) {
@@ -282,9 +287,10 @@ describe('khttpd', function () {
 
             it('receives a request line with an invalid request target',
                function (done) {
-                   session.chan.write('GET ' + url + ' HTTP/1.1\r\n\r\n');
+                   session.chan.write('GET ' + url + ' HTTP/1.1\r\n' +
+				      'Host: ' + target.name + '\r\n\r\n');
                    session.chan.end();
-                   session.chan.once('end', done);
+                   session.chan.once('close', done);
                });
 
             it('has sent a "Not Found" response', function (done) {
@@ -308,7 +314,8 @@ describe('khttpd', function () {
 
     describe('receiving an invalid version', function () {
         var invalidVersions = ['HTTP/0.0', 'http/1.1', 'PTTH/1.1',
-                               'HTTP/0.9', 'veryyyyyyyyyyyyyyloooooong/1.1'];
+                               'HTTP/0.9', 'veryyyyyyyyyyyyyyloooooong/1.1',
+			       'sht/1.1'];
 
         function test(version) {
             var session = {};
@@ -319,7 +326,8 @@ describe('khttpd', function () {
 
             it('half-closes after sending a response to the request',
                function (done) {
-                   session.chan.write('OPTIONS * ' + version);
+                   session.chan.write('OPTIONS * ' + version + '\r\n' +
+				     'Host: ' + target.name + '\r\n\r\n');
                    session.chan.once('close', done);
                    session.chan.end();
                });

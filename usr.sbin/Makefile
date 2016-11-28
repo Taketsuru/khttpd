@@ -1,3 +1,3 @@
-SUBDIR = khttpd-init
+SUBDIR = khttpdctl
 
 .include <bsd.subdir.mk>

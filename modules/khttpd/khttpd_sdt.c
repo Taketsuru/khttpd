@@ -46,7 +46,10 @@
 #include <vm/uma.h>
 
 #include "khttpd.h"
-#include "khttpd_private.h"
+#include "khttpd_malloc.h"
+#include "khttpd_mbuf.h"
+#include "khttpd_router.h"
+#include "khttpd_string.h"
 
 #ifndef KHTTPD_SDT_KO_FILE_HASH_SIZE
 #define KHTTPD_SDT_KO_FILE_HASH_SIZE	16
@@ -125,12 +128,12 @@ SPLAY_GENERATE(khttpd_sdt_probe_tree, khttpd_sdt_probe, tree_entry,
 
 /* --------------------------------------------------- variable definitions */
 
-static struct khttpd_route_type khttpd_route_type_sdt_probe = {
-	.received_header = khttpd_sdt_probe_received_header
+static struct khttpd_route_ops khttpd_route_ops_sdt_probe = {
+	.catch_all = khttpd_sdt_probe_received_header
 };
 
-static struct khttpd_route_type khttpd_route_type_sdt_history = {
-	.received_header = khttpd_sdt_history_received_header
+static struct khttpd_route_ops khttpd_route_ops_sdt_history = {
+	.catch_all = khttpd_sdt_history_received_header
 };
 
 static TAILQ_HEAD(, sdt_provider)
@@ -162,8 +165,6 @@ khttpd_sdt_ko_file_find(struct linker_file *file)
 	struct khttpd_sdt_ko_file *ptr;
 	uint32_t hash;
 
-	TRACE("enter %s", file->filename);
-
 	hash = khttpd_sdt_ko_file_hash(file);
 	SLIST_FOREACH(ptr, &khttpd_sdt_ko_files[hash], hash_link) {
 		if (ptr->file == file)
@@ -177,8 +178,6 @@ khttpd_sdt_ko_file_add(struct linker_file *file)
 {
 	struct khttpd_sdt_ko_file *filep;
 	uint32_t hash;
-
-	TRACE("enter %s", file->filename);
 
 	KASSERT(khttpd_sdt_ko_file_find(file) == NULL,
 	    ("duplicate entry %s", file->filename));
@@ -199,8 +198,6 @@ khttpd_sdt_ko_file_remove(struct linker_file *file)
 	struct khttpd_sdt_probe *probe;
 	uint32_t hash;
 
-	TRACE("enter %s", file->filename);
-
 	KASSERT(khttpd_sdt_ko_file_find(file) != NULL,
 	    ("duplicate entry %s", file->filename));
 
@@ -212,10 +209,8 @@ khttpd_sdt_ko_file_remove(struct linker_file *file)
 		prev = ptr;
 	}
 
-	if (ptr == NULL) {
-		TRACE("error enoent");
+	if (ptr == NULL)
 		return;
-	}
 
 	if (prev == NULL)
 		SLIST_REMOVE_HEAD(&khttpd_sdt_ko_files[hash], hash_link);
@@ -270,23 +265,17 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 	uintmax_t page;
 	int i;
 
-	TRACE("enter %s", khttpd_request_suffix(request));
-
 	buffer = NULL;
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '/')
 		++suffix;
 
-	if (!isdigit(*suffix) || *suffix == '\0') {
-		TRACE("error firstch");
+	if (!isdigit(*suffix) || *suffix == '\0')
 		goto enoent;
-	}
 
 	page = strtoul(suffix, &endptr, 10);
-	if (*endptr != '\0') {
-		TRACE("error lastch");
+	if (*endptr != '\0')
 		goto enoent;
-	}
 
 	buffer = khttpd_malloc(KHTTPD_SDT_HISTORY_PAGE_SIZE);
 
@@ -298,7 +287,6 @@ khttpd_sdt_history_leaf_get_or_head(struct khttpd_socket *socket,
 
 	if (KHTTPD_SDT_HISTORY_PAGES <= i) {
 		mtx_unlock(&khttpd_sdt_history_lock);
-		TRACE("error nopage");
 		goto enoent;
 	}
 
@@ -326,8 +314,6 @@ static void
 khttpd_sdt_history_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
-
-	TRACE("enter");
 
 	switch (khttpd_request_method(request)) {
 
@@ -358,8 +344,6 @@ khttpd_sdt_history_index_get_or_head(struct khttpd_socket *socket,
 	struct khttpd_sdt_history_page *page;
 	struct khttpd_response *response;
 	int i;
-
-	TRACE("enter");
 
 	payload = m_get(M_WAITOK, MT_DATA);
 
@@ -401,8 +385,6 @@ khttpd_sdt_history_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
-	TRACE("enter");
-
 	switch (khttpd_request_method(request)) {
 
 	case KHTTPD_METHOD_GET:
@@ -426,8 +408,6 @@ khttpd_sdt_history_received_header(struct khttpd_socket *socket,
 {
 	const char *suffix;
 
-	TRACE("enter %d", khttpd_socket_fd(socket));
-
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
 		khttpd_sdt_history_index_received_header(socket, request);
@@ -445,13 +425,13 @@ khttpd_sdt_probe_json_encode(struct mbuf *output,
 	ptr = probe->probe;
 
 	khttpd_mbuf_printf(output, "{\"provider\": ");
-	khttpd_json_mbuf_append_cstring(output, ptr->prov->name);
+	khttpd_mbuf_put_json_string_cstr(output, ptr->prov->name);
 	khttpd_mbuf_printf(output, ",\n\"module\": ");
-	khttpd_json_mbuf_append_cstring(output, ptr->mod);
+	khttpd_mbuf_put_json_string_cstr(output, ptr->mod);
 	khttpd_mbuf_printf(output, ",\n\"function\": ");
-	khttpd_json_mbuf_append_cstring(output, ptr->func);
+	khttpd_mbuf_put_json_string_cstr(output, ptr->func);
 	khttpd_mbuf_printf(output, ",\n\"name\": ");
-	khttpd_json_mbuf_append_cstring(output, ptr->name);
+	khttpd_mbuf_put_json_string_cstr(output, ptr->name);
 	khttpd_mbuf_printf(output, ",\n\"index\": %jd", (intmax_t)ptr->id);
 
 	khttpd_mbuf_printf(output, ",\n\"arguments\": [ ");
@@ -459,10 +439,10 @@ khttpd_sdt_probe_json_encode(struct mbuf *output,
 		if (arg != TAILQ_FIRST(&ptr->argtype_list))
 			khttpd_mbuf_printf(output, ", ");
 		khttpd_mbuf_printf(output, "{\"type\": ");
-		khttpd_json_mbuf_append_cstring(output, arg->type);
+		khttpd_mbuf_put_json_string_cstr(output, arg->type);
 		if (arg->xtype != NULL) {
 			khttpd_mbuf_printf(output, ", \"xtype\": ");
-			khttpd_json_mbuf_append_cstring(output, arg->xtype);
+			khttpd_mbuf_put_json_string_cstr(output, arg->xtype);
 		}
 		khttpd_mbuf_printf(output, "}");
 	}
@@ -476,8 +456,6 @@ khttpd_sdt_probe_index_get_or_head(struct khttpd_socket *socket,
 	struct mbuf *payload;
 	struct khttpd_response *response;
 	struct khttpd_sdt_probe *probe;
-
-	TRACE("enter");
 
 	payload = m_get(M_WAITOK, MT_DATA);
 	khttpd_mbuf_append_ch(payload, '{');
@@ -508,8 +486,6 @@ khttpd_sdt_probe_index_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
-	TRACE("enter");
-
 	switch (khttpd_request_method(request)) {
 
 	case KHTTPD_METHOD_GET:
@@ -532,8 +508,6 @@ khttpd_sdt_probe_leaf_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 
-	TRACE("enter");
-
 	khttpd_set_not_found_response(socket, request, FALSE);
 }
 
@@ -542,8 +516,6 @@ khttpd_sdt_probe_received_header(struct khttpd_socket *socket,
     struct khttpd_request *request)
 {
 	const char *suffix;
-
-	TRACE("enter %d", khttpd_socket_fd(socket));
 
 	suffix = khttpd_request_suffix(request);
 	if (*suffix == '\0' || strcmp(suffix, "/") == 0)
@@ -559,9 +531,6 @@ khttpd_sdt_probe(uint32_t id, uintptr_t arg0, uintptr_t arg1,
 	struct khttpd_sdt_history_page *page;
 	struct khttpd_sdt_history_entry *entry;
 	int current, seqno;
-
-	TRACE("enter %d %#lx %#lx %#lx %#lx %#lx",
-	    id, arg0, arg1, arg2, arg3, arg4);
 
 	mtx_lock(&khttpd_sdt_history_lock);
 
@@ -597,8 +566,6 @@ khttpd_sdt_provider_find(const char *name)
 	struct sdt_provider *ptr;
 	uint32_t hash;
 	
-	TRACE("enter %s", name);
-
 	hash = hash32_str(name, 0) & (KHTTPD_SDT_PROVIDER_HASH_SIZE - 1);
 	TAILQ_FOREACH(ptr, &khttpd_sdt_providers[hash], prov_entry)
 		if (strcmp(name, ptr->name) == 0)
@@ -611,8 +578,6 @@ khttpd_sdt_provider_new(const char *name)
 {
 	struct sdt_provider *ptr, *provider;
 	uint32_t hash;
-
-	TRACE("enter %s", name);
 
 	ptr = khttpd_sdt_provider_find(name);
 	if (ptr != NULL) {
@@ -634,8 +599,6 @@ khttpd_sdt_provider_free(const char *name)
 	struct sdt_provider *ptr;
 	uint32_t hash;
 	
-	TRACE("enter %s", name);
-
 	hash = hash32_str(name, 0) & (KHTTPD_SDT_PROVIDER_HASH_SIZE - 1);
 	TAILQ_FOREACH(ptr, &khttpd_sdt_providers[hash], prov_entry)
 		if (strcmp(name, ptr->name) == 0) {
@@ -682,22 +645,15 @@ khttpd_sdt_kld_load(void *arg, struct linker_file *file)
 	struct khttpd_sdt_ko_file *filep;
 	int error;
 
-	TRACE("enter %s", file->filename);
-
 	error = linker_file_lookup_set(file, "sdt_providers_set", &prov_begin,
 	    &prov_end, NULL);
-	if (error != 0) {
-		TRACE("error sdt_providers_set %d", error);
-	} else
+	if (error == 0)
 		for (prov = prov_begin; prov < prov_end; ++prov)
 			khttpd_sdt_provider_new((*prov)->name);
 
 	error = linker_file_lookup_set(file, "sdt_probes_set", &prob_begin,
 	    &prob_end, NULL);
-	if (error != 0) {
-		TRACE("error sdt_probes_set %d", error);
-
-	} else {
+	if (error == 0) {
 		filep = khttpd_sdt_ko_file_add(file);
 
 		for (prob = prob_begin; prob < prob_end; ++prob) {
@@ -709,9 +665,7 @@ khttpd_sdt_kld_load(void *arg, struct linker_file *file)
 
 	error = linker_file_lookup_set(file, "sdt_argtypes_set", &argt_begin,
 	    &argt_end, NULL);
-	if (error != 0) {
-		TRACE("error sdt_argtypes_set %d", error);
-	} else
+	if (error == 0)
 		for (argt = argt_begin; argt < argt_end; ++argt) {
 			++(*argt)->probe->n_args;
 			TAILQ_INSERT_TAIL(&(*argt)->probe->argtype_list,
@@ -723,8 +677,6 @@ static void
 khttpd_sdt_kld_unload_try(void *arg, struct linker_file *file, int *error)
 {
 	struct sdt_provider **prov, **prov_begin, **prov_end;
-
-	TRACE("enter %d", *error);
 
 	if (*error != 0)
 		return;
@@ -746,23 +698,23 @@ static int khttpd_sdt_on_each_linked_file(linker_file_t file, void *context)
 	return (0);
 }
 
-int khttpd_sdt_mount(struct khttpd_route *root, const char *prefix)
+int khttpd_sdt_mount(struct khttpd_router *router, const char *prefix)
 {
 	int error;
 
 	/* XXX: prefix and KHTTPD_SDT_(PROBE|HISTORY)_PREFIX should be
 	   concatenated */
 
-	error = khttpd_route_add(root, KHTTPD_SDT_PROBE_PREFIX,
-	    &khttpd_route_type_sdt_probe);
+	error = khttpd_router_add(router, KHTTPD_SDT_PROBE_PREFIX,
+	    &khttpd_route_ops_sdt_probe);
 	if (error != 0) {
 		log(LOG_WARNING, "khttpd: failed to add route %s: %d\n",
 		     KHTTPD_SDT_PROBE_PREFIX, error);
 		return (error);
 	}
 
-	error = khttpd_route_add(root, KHTTPD_SDT_HISTORY_PREFIX,
-	    &khttpd_route_type_sdt_history);
+	error = khttpd_router_add(router, KHTTPD_SDT_HISTORY_PREFIX,
+	    &khttpd_route_ops_sdt_history);
 	if (error != 0) {
 		log(LOG_WARNING, "khttpd: failed to add route %s: %d\n",
 		    KHTTPD_SDT_HISTORY_PREFIX, error);
@@ -776,8 +728,6 @@ static int
 khttpd_sdt_load_proc(void *arg)
 {
 	int i;
-
-	TRACE("enter");
 
 	if (sdt_probe_func != sdt_probe_stub)
 		return (EBUSY);
@@ -823,8 +773,6 @@ khttpd_sdt_unload_proc(void *arg)
 	struct khttpd_sdt_ko_file *file;
 	struct khttpd_sdt_probe *probe;
 	int i;
-
-	TRACE("enter");
 
 	if (sdt_probe_func == khttpd_sdt_probe)
 		sdt_probe_func = sdt_probe_stub;
@@ -872,8 +820,6 @@ static int
 khttpd_sdt_quiesce_proc(void *arg)
 {
 	struct khttpd_sdt_probe *probe;
-
-	TRACE("enter");
 
 	TAILQ_FOREACH(probe, &khttpd_sdt_all_probes_list, list_entry)
 		if (probe->probe->id != 0) {

@@ -1,5 +1,5 @@
 SUBDIR = modules
-SUBDIR += usr.sbin
 SUBDIR += test
+SUBDIR += usr.sbin
 
 .include <bsd.subdir.mk>
