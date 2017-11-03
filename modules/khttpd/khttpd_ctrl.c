@@ -252,12 +252,12 @@ static int
 khttpd_ctrl_parse_json(struct khttpd_json **value_out,
     struct khttpd_mbuf_json *response, struct mbuf *input)
 {
-	struct khttpd_json_parse_diag diag;
+	struct khttpd_json_problem diag;
 	int status;
 
 	KHTTPD_ENTRY("khttpd_ctrl_parse_json()");
 
-	if (khttpd_json_parse_with_diagnosis(value_out, &diag, input,
+	if (khttpd_json_parse(value_out, &diag, input,
 		KHTTPD_CTRL_MAX_JSON_DEPTH))
 		return (KHTTPD_STATUS_OK);
 

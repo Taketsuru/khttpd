@@ -27,16 +27,14 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/types.h>
 #include <machine/stdarg.h>
 
-#include "khttpd_refcount.h"
-
 struct khttpd_json;
-struct khttpd_mbuf_pos;
-struct khttpd_mbuf_json;
 struct mbuf;
 
 enum {
@@ -48,7 +46,7 @@ enum {
 	KHTTPD_JSON_NULL,
 };
 
-struct khttpd_json_parse_diag {
+struct khttpd_json_problem {
 	const char	*type;
 	const char	*title;
 	struct sbuf	*detail; /* NULL or a sbuf allocated by sbuf_auto_new */
@@ -60,30 +58,26 @@ struct khttpd_json *khttpd_json_null_new(void);
 struct khttpd_json *khttpd_json_integer_new(int64_t value);
 struct khttpd_json *khttpd_json_boolean_new(boolean_t value);
 struct khttpd_json *khttpd_json_string_new(void);
+struct khttpd_json *khttpd_json_array_new(void);
+struct khttpd_json *khttpd_json_object_new(int size_hint);
 void khttpd_json_delete(struct khttpd_json *value);
-struct khttpd_json *khttpd_json_clone(struct khttpd_json *value);
 int khttpd_json_type(struct khttpd_json *value);
 int64_t khttpd_json_integer_value(struct khttpd_json *value);
 int khttpd_json_string_size(struct khttpd_json *value);
 const char *khttpd_json_string_data(struct khttpd_json *value);
 void khttpd_json_string_append_char(struct khttpd_json *value, int ch);
 void khttpd_json_string_append_utf8(struct khttpd_json *value, int code);
-struct khttpd_json *khttpd_json_array_new(void);
-void khttpd_json_array_add(struct khttpd_json *value,
-    struct khttpd_json *elem);
-struct khttpd_json *khttpd_json_object_new(int size_hint);
 int khttpd_json_array_size(struct khttpd_json *value);
 struct khttpd_json *khttpd_json_array_get(struct khttpd_json *value,
     int index);
+void khttpd_json_array_add(struct khttpd_json *value,
+    struct khttpd_json *elem);
 int khttpd_json_object_size(struct khttpd_json *value);
-void khttpd_json_object_add(struct khttpd_json *value,
-    struct khttpd_json *name, struct khttpd_json *elem);
 struct khttpd_json *khttpd_json_object_get(struct khttpd_json *value,
     const char *name);
 struct khttpd_json *khttpd_json_object_get_at(struct khttpd_json *value,
     int index, struct khttpd_json **name_out);
-
-boolean_t khttpd_json_parse_with_diagnosis(struct khttpd_json **result,
-    struct khttpd_json_parse_diag *, struct mbuf *input, int depth_limit);
-
-#endif	/* ifdef _KERNEL */
+void khttpd_json_object_add(struct khttpd_json *value,
+    struct khttpd_json *name, struct khttpd_json *elem);
+boolean_t khttpd_json_parse(struct khttpd_json **result,
+    struct khttpd_json_problem *, struct mbuf *input, int depth_limit);
