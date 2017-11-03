@@ -38,7 +38,9 @@ set heap [dict create]
 set lastAlloc [dict create]
 
 while {[gets $ktrfile line] >= 0} {
-    if {[regexp -line -- {^[[:blank:]]*#.*$} $line]} {
+    set line [string trim $line]
+
+    if {$line eq "" || [regexp -line -- {^#.*$} $line]} {
 	continue
     }
 
