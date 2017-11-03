@@ -27,7 +27,9 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/types.h>
 
@@ -35,5 +37,3 @@ void *khttpd_malloc(size_t size);
 void khttpd_free(void *mem);
 void *khttpd_realloc(void *mem, size_t size);
 char *khttpd_strdup(const char *str);
-
-#endif	/* ifdef _KERNEL */

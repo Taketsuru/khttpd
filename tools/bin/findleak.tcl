@@ -1,12 +1,12 @@
 #!/bin/sh
 # \
-exec tclsh8.6 "$0" ${1+"$@"}
+exec tclsh8.7 "$0" ${1+"$@"}
 
 # findleak --
 #
 #	This file implements memory leak detector for khttpd.ko.
 #
-# Copyright (c) 2016 Taketsuru <taketsuru11@gmail.com>.
+# Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -39,7 +39,6 @@ set lastAlloc [dict create]
 
 while {[gets $ktrfile line] >= 0} {
     if {[regexp -line -- {^[[:blank:]]*#.*$} $line]} {
-	puts "comment: $line"
 	continue
     }
 

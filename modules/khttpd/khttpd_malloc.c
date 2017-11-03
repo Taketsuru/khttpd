@@ -28,8 +28,6 @@
 #include "khttpd_malloc.h"
 
 #include <sys/param.h>
-#include <sys/ctype.h>
-#include <sys/stack.h>
 #include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/kernel.h>
@@ -37,71 +35,45 @@
 
 #include "khttpd_ktr.h"
 
-#ifndef KHTTPD_TRACE_MALLOC_STACK_DEPTH
-#define KHTTPD_TRACE_MALLOC_STACK_DEPTH	8
-#endif
-
 MALLOC_DEFINE(M_KHTTPD, "khttpd", "khttpd heap");
 
-void *khttpd_malloc(size_t size)
+void *
+khttpd_malloc(size_t size)
 {
-#ifdef KHTTPD_TRACE_MALLOC
-	struct stack st;
-#endif
 	void *mem;
 
 	mem = malloc(size, M_KHTTPD, M_WAITOK);
-
-#ifdef KHTTPD_TRACE_MALLOC
-	KHTTPD_TR("alloc %p %#lx", mem, size);
-	stack_save(&st);
-	CTRSTACK(KTR_GEN, &st, KHTTPD_TRACE_MALLOC_STACK_DEPTH, 0);
-#endif
+	KHTTPD_TR_ALLOC(mem,size);
 	return (mem);
 }
 
-void khttpd_free(void *mem)
+void
+khttpd_free(void *mem)
 {
 
-#ifdef KHTTPD_TRACE_MALLOC
-	KHTTPD_TR("free %p", mem);
-#endif
+	KHTTPD_TR_FREE(mem);
 	free(mem, M_KHTTPD);
 }
 
-void *khttpd_realloc(void *mem, size_t size)
+void *
+khttpd_realloc(void *mem, size_t size)
 {
-#ifdef KHTTPD_TRACE_MALLOC
-	struct stack st;
-#endif
 	void *newmem;
 
 	newmem = realloc(mem, size, M_KHTTPD, M_WAITOK);
-
-#ifdef KHTTPD_TRACE_MALLOC
-	KHTTPD_TR("free %p", mem);
-	KHTTPD_TR("alloc %p %#lx", newmem, size);
-	stack_save(&st);
-	CTRSTACK(KTR_GEN, &st, KHTTPD_TRACE_MALLOC_STACK_DEPTH, 0);
-#endif
+	KHTTPD_TR_FREE(mem);
+	KHTTPD_TR_ALLOC(newmem, size);
 
 	return (newmem);
 }
 
-char *khttpd_strdup(const char *str)
+char *
+khttpd_strdup(const char *str)
 {
-#ifdef KHTTPD_TRACE_MALLOC
-	struct stack st;
-#endif
 	char *newstr;
 
 	newstr = strdup(str, M_KHTTPD);
-
-#ifdef KHTTPD_TRACE_MALLOC
-	KHTTPD_TR("alloc %p %#lx", newstr, strlen(newstr) + 1);
-	stack_save(&st);
-	CTRSTACK(KTR_GEN, &st, KHTTPD_TRACE_MALLOC_STACK_DEPTH, 0);
-#endif
+	KHTTPD_TR_ALLOC(newstr, strlen(newstr) + 1);
 
 	return (newstr);
 }

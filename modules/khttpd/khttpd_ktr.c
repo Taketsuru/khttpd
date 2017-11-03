@@ -139,9 +139,18 @@ khttpd_ktr_flush(void)
 	last = khttpd_ktr_head;
 	khttpd_ktr_unlock();
 
+	n = end < khttpd_ktr_idx ? end + ktr_entries - khttpd_ktr_idx :
+	    end - khttpd_ktr_idx;
+	sbuf_printf(&khttpd_ktr_sbuf,
+	    "# index: %d, entries: %d\n", khttpd_ktr_idx, n);
+
 	n = ktr_entries;
 	for (i = khttpd_ktr_idx; i != end; i = i == n - 1 ? 0 : i + 1) {
 		ep = &ktr_buf[i];
+		if (ep->ktr_desc == NULL) {
+			sbuf_printf(&khttpd_ktr_sbuf, "# null entry @ %d\n", i);
+			continue;
+		}
 
 		sbuf_printf(&khttpd_ktr_sbuf, "%lld %d %d ",
 		    (long long)ep->ktr_timestamp,
@@ -179,11 +188,9 @@ static void
 khttpd_ktr_main(void *arg)
 {
 
-	khttpd_ktr_idx = ktr_idx;
-
 	while (!khttpd_ktr_shutdown) {
 		khttpd_ktr_flush();
-		pause("ktrflush", 10);
+		pause("ktrflush", hz / 10);
 	}
 
 	khttpd_ktr_thread = NULL;
@@ -208,6 +215,9 @@ khttpd_ktr_local_init(void)
 		goto error;
 	}
 	khttpd_ktr_fd = td->td_retval[0];
+
+	khttpd_ktr_idx = ktr_idx;
+	khttpd_ktr_head = khttpd_ktr_tail = 0;
 
 	khttpd_ktr_shutdown = FALSE;
 	error = kthread_add(khttpd_ktr_main, NULL, curproc, &khttpd_ktr_thread,
@@ -243,6 +253,6 @@ khttpd_ktr_local_fini(void)
 	khttpd_ktr_fd = -1;
 }
 
-KHTTPD_INIT(, khttpd_ktr_local_init, khttpd_ktr_local_fini, 0);
+KHTTPD_INIT(khttpd_ktr, khttpd_ktr_local_init, khttpd_ktr_local_fini, 0);
 
 #endif	/* ifdef KHTTPD_KTR_LOGGING */

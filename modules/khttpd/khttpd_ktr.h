@@ -31,6 +31,9 @@
 #error This file is not for userland code.
 #endif
 
+#include <sys/param.h>
+#include <sys/stack.h>
+
 #ifdef KHTTPD_TRACE_FN
 #define KHTTPD_ENTRY KHTTPD_TR
 #else
@@ -47,6 +50,29 @@
 #define KHTTPD_NOTE KHTTPD_TR
 #else
 #define KHTTPD_NOTE(...)
+#endif
+
+#ifdef KHTTPD_TRACE_MALLOC
+
+#ifndef KHTTPD_TRACE_MALLOC_STACK_DEPTH
+#define KHTTPD_TRACE_MALLOC_STACK_DEPTH	12
+#endif
+
+#define KHTTPD_TR_ALLOC(mem,size)					\
+	do {								\
+		struct stack st;					\
+		KHTTPD_TR("alloc %p %#lx", (mem), (size));		\
+		stack_save(&st);					\
+		CTRSTACK(KTR_GEN, &st, KHTTPD_TRACE_MALLOC_STACK_DEPTH, 0); \
+	} while (0)
+
+#define KHTTPD_TR_FREE(mem) KHTTPD_TR("free %p", (mem))
+
+#else
+
+#define KHTTPD_TR_ALLOC(mem,size)
+#define KHTTPD_TR_FREE(mem)
+
 #endif
 
 #ifdef KHTTPD_KTR_LOGGING

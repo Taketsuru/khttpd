@@ -667,7 +667,6 @@ khttpd_obj_type_get_obj_for_id(struct khttpd_obj_type *type, const char *id)
 	if (khttpd_uuid_parse(id, uuid) != 0)
 		return (NULL);
 
-	KHTTPD_TR("lookup");
 	leaf = khttpd_obj_type_lookup(type, uuid);
 	if (leaf == NULL)
 		return (NULL);
@@ -2736,7 +2735,7 @@ khttpd_ctrl_free_cmdbuf_data(struct mbuf *m, void *arg1, void *arg2)
 {
 
 	KHTTPD_ENTRY("khttpd_ctrl_free_cmdbuf_data(%p,%p)", m, arg1);
-	khttpd_free(arg1);
+	free(arg1, M_TEMP);
 }
 
 static int
@@ -2760,18 +2759,16 @@ khttpd_ctrl_ioctl_start(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 		return (EINVAL);
 	}
 
-	KHTTPD_TR("args->data=%s, args->size=%#lx", args->data, args->size);
 	cmdbuf.hdr.handler = khttpd_ctrl_start;
 	cmdbuf.data = m_get(M_WAITOK, MT_DATA);
-	buf = khttpd_malloc(roundup2(args->size, sizeof(u_int)) +
-	    sizeof(u_int));
+	buf = malloc(roundup2(args->size, sizeof(u_int)) +
+	    sizeof(u_int), M_TEMP, M_WAITOK);
 	cmdbuf.data->m_len = args->size;
 	MEXTADD(cmdbuf.data, buf, args->size, khttpd_ctrl_free_cmdbuf_data,
 	    buf, NULL, 0, EXT_EXTREF);
 	cmdbuf.data->m_ext.ext_cnt = (u_int *)
 	    (buf + roundup2(args->size, sizeof(u_int)));
 	*cmdbuf.data->m_ext.ext_cnt = 1;
-	KHTTPD_TR("cmdbuf.data=%p, buf=%p", cmdbuf.data, buf);
 
 	error = copyin(args->data, buf, args->size);
 
