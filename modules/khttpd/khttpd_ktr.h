@@ -27,24 +27,8 @@
 
 #pragma once
 
-#ifdef _KERNEL
-
-#include <sys/param.h>
-#include <sys/ktr.h>
-
-#define KHTTPD_TR_MACRO(_0, _1, _2, _3, _4, _5, _6, N, ...) TR ## N
-#define KHTTPD_TR_(__fmt, __macro, ...) __macro(__fmt, ##__VA_ARGS__)
-#ifdef KHTTPD_KTR_LOGGING
-#define KHTTPD_TR(__fmt, ...)					     \
-	do {							     \
-		khttpd_ktr_lock();				     \
-		KHTTPD_TR_(__fmt,				     \
-		    KHTTPD_TR_MACRO(_0, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0), \
-		    ##__VA_ARGS__);					\
-		khttpd_ktr_unlock();					\
-	} while (0)
-#else
-#define KHTTPD_TR(__fmt, ...)
+#ifndef _KERNEL
+#error This file is not for userland code.
 #endif
 
 #ifdef KHTTPD_TRACE_FN
@@ -65,9 +49,28 @@
 #define KHTTPD_NOTE(...)
 #endif
 
+#ifdef KHTTPD_KTR_LOGGING
+
+#include <sys/param.h>
+#include <sys/ktr.h>
+
 void khttpd_ktr_lock(void);
 void khttpd_ktr_unlock(void);
 const char *khttpd_ktr_printf(const char *fmt, ...) __printflike(1, 2);
 const char *khttpd_ktr_vprintf(const char *fmt, __va_list) __printflike(1, 0);
 
-#endif	/* _KERNEL */
+#define KHTTPD_TR_MACRO(_0, _1, _2, _3, _4, _5, _6, N, ...) TR ## N
+#define KHTTPD_TR_(__fmt, __macro, ...) __macro(__fmt, ##__VA_ARGS__)
+#define KHTTPD_TR(__fmt, ...)					     \
+	do {							     \
+		khttpd_ktr_lock();				     \
+		KHTTPD_TR_(__fmt,				     \
+		    KHTTPD_TR_MACRO(_0, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0), \
+		    ##__VA_ARGS__);					\
+		khttpd_ktr_unlock();					\
+	} while (0)
+#else
+
+#define KHTTPD_TR(__fmt, ...)
+
+#endif

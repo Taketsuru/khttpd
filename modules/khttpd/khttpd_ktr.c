@@ -27,6 +27,8 @@
 
 #include "khttpd_ktr.h"
 
+#ifdef KHTTPD_KTR_LOGGING
+
 #include <sys/param.h>
 #include <sys/limits.h>
 #include <sys/ktr.h>
@@ -51,22 +53,27 @@
 #define KHTTPD_KTR_FILE "/tmp/ktr.txt"
 #endif
 
-#ifndef KHTTPD_KTR_BUF_LEN
-#define KHTTPD_KTR_BUF_LEN	(2ul * 1024 * 1024 / MLEN)
+#ifndef KHTTPD_KTR_STRING_SIZE
+#define KHTTPD_KTR_STRING_SIZE	256
 #endif
 
-#ifdef KHTTPD_KTR_LOGGING
+#ifndef KHTTPD_KTR_STRING_BUF_COUNT
+#define KHTTPD_KTR_STRING_BUF_COUNT	8192
+#endif
 
 #ifndef KTR
 #error KTR option is disabled
 #endif
 
+static char khttpd_ktr_strbuf
+    [KHTTPD_KTR_STRING_BUF_COUNT][KHTTPD_KTR_STRING_SIZE];
 static struct mtx khttpd_ktr_mtx;
-static struct mbuf *khttpd_ktr_usedq_head;
-static struct mbuf *khttpd_ktr_usedq_tail;
-static struct mbuf *khttpd_ktr_freeq;
+static struct sbuf khttpd_ktr_sbuf;
 static struct thread *khttpd_ktr_thread;
+static int khttpd_ktr_head;
+static int khttpd_ktr_tail;
 static int khttpd_ktr_idx;
+static int khttpd_ktr_fd;
 static boolean_t khttpd_ktr_shutdown;
 
 MTX_SYSINIT(khttpd_ktr_lock, &khttpd_ktr_mtx, "ktr", MTX_DEF);
@@ -88,26 +95,19 @@ khttpd_ktr_unlock(void)
 const char *
 khttpd_ktr_vprintf(const char *fmt, __va_list ap)
 {
-	struct mbuf *newent;
+	int i, ni;
 
 	mtx_assert(&khttpd_ktr_mtx, MA_LOCKED);
 
-	newent = khttpd_ktr_freeq;
-	if (newent == NULL)
-		return ("<empty>");
-	khttpd_ktr_freeq = newent->m_next;
+	i = khttpd_ktr_head;
+	ni = i == KHTTPD_KTR_STRING_BUF_COUNT - 1 ? 0 : i + 1;
+	if (ni == khttpd_ktr_head)
+		return ("<buffer full>");
 
-	newent->m_len = vsnprintf(mtod(newent, char *), 
-	    M_TRAILINGSPACE(newent), fmt, ap);
-	newent->m_next = NULL;
+	khttpd_ktr_head = ni;
+	vsnprintf(khttpd_ktr_strbuf[i], KHTTPD_KTR_STRING_SIZE, fmt, ap);
 
-	if (khttpd_ktr_usedq_head == NULL)
-		khttpd_ktr_usedq_head = newent;
-	else
-		khttpd_ktr_usedq_tail->m_next = newent;
-	khttpd_ktr_usedq_tail = newent;
-
-	return (mtod(newent, char *));
+	return (khttpd_ktr_strbuf[i]);
 }
 
 const char *
@@ -124,161 +124,125 @@ khttpd_ktr_printf(const char *fmt, ...)
 }
 
 static void
-khttpd_ktr_flush(struct sbuf *sbuf)
+khttpd_ktr_flush(void)
 {
 	struct uio auio;
 	struct iovec aiov;
 	struct ktr_entry *ep;
 	struct thread *td;
-	struct mbuf *head, *tail;
-	int error, fd, i, n, end;
+	int error, i, n, end, last;
 
 	td = curthread;
 
-	error = kern_openat(td, AT_FDCWD, KHTTPD_KTR_FILE, UIO_SYSSPACE,
-	    O_WRONLY | O_APPEND, 0644);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: "
-		    "open(\"" KHTTPD_KTR_FILE "\") failed (error: %d)", error);
-		return;
-	}
-	fd = td->td_retval[0];
-
 	khttpd_ktr_lock();
 	end = ktr_idx;
-	head = khttpd_ktr_usedq_head;
-	tail = khttpd_ktr_usedq_tail;
-	khttpd_ktr_usedq_head = khttpd_ktr_usedq_tail = NULL;
+	last = khttpd_ktr_head;
 	khttpd_ktr_unlock();
 
 	n = ktr_entries;
 	for (i = khttpd_ktr_idx; i != end; i = i == n - 1 ? 0 : i + 1) {
 		ep = &ktr_buf[i];
 
-		sbuf_printf(sbuf, "%lld %d %d ", (long long)ep->ktr_timestamp,
-		    ep->ktr_thread->td_tid, ep->ktr_cpu);
-		sbuf_printf(sbuf, ep->ktr_desc, ep->ktr_parms[0], 
+		sbuf_printf(&khttpd_ktr_sbuf, "%lld %d %d ",
+		    (long long)ep->ktr_timestamp,
+		    ep->ktr_thread == NULL ? 0 : ep->ktr_thread->td_tid,
+		    ep->ktr_cpu);
+		sbuf_printf(&khttpd_ktr_sbuf, ep->ktr_desc, ep->ktr_parms[0], 
 		    ep->ktr_parms[1], ep->ktr_parms[2], ep->ktr_parms[3],
 		    ep->ktr_parms[4], ep->ktr_parms[5]);
-		sbuf_cat(sbuf, "\n");
+		sbuf_cat(&khttpd_ktr_sbuf, "\n");
 	}
 
-	sbuf_finish(sbuf);
+	sbuf_finish(&khttpd_ktr_sbuf);
 
 	khttpd_ktr_lock();
-	if (tail != NULL) {
-		tail->m_next = khttpd_ktr_freeq;
-		khttpd_ktr_freeq = head;
-	}
+	khttpd_ktr_tail = last;
 	khttpd_ktr_unlock();
 
 	khttpd_ktr_idx = i;
 
-	aiov.iov_base = sbuf_data(sbuf);
-	aiov.iov_len = sbuf_len(sbuf);
+	aiov.iov_base = sbuf_data(&khttpd_ktr_sbuf);
+	aiov.iov_len = sbuf_len(&khttpd_ktr_sbuf);
 	auio.uio_iov = &aiov;
 	auio.uio_iovcnt = 1;
 	auio.uio_resid = aiov.iov_len;
 	auio.uio_segflg = UIO_SYSSPACE;
-	error = kern_writev(td, fd, &auio);
+	error = kern_writev(td, khttpd_ktr_fd, &auio);
 	if (error != 0)
-		log(LOG_WARNING, "khttpd: "
-		    "write(\"" KHTTPD_KTR_FILE "\") failed (error: %d)",
-		    error);
+		log(LOG_WARNING, "khttpd: write(\"" KHTTPD_KTR_FILE
+		    "\") failed (error: %d)", error);
 
-	sbuf_clear(sbuf);
-	kern_close(td, fd);
+	sbuf_clear(&khttpd_ktr_sbuf);
 }
 
 static void
 khttpd_ktr_main(void *arg)
 {
-	struct sbuf sbuf;
-	struct thread *td;
-	int error;
-
-	td = curthread;
 
 	khttpd_ktr_idx = ktr_idx;
 
-	error = kern_openat(td, AT_FDCWD, KHTTPD_KTR_FILE, UIO_SYSSPACE,
-	    O_CREAT | O_TRUNC | O_WRONLY, 0666);
-	if (error != 0) {
-		log(LOG_WARNING, "khttpd: "
-		    "open(\"" KHTTPD_KTR_FILE "\") failed (error: %d)", error);
-		goto quit;
-	}
-	kern_close(td, td->td_retval[0]);
-
-	sbuf_new(&sbuf, NULL, 1024 * 1024, SBUF_AUTOEXTEND);
-
 	while (!khttpd_ktr_shutdown) {
-		khttpd_ktr_flush(&sbuf);
-		pause("khttpd-ktr", hz);
+		khttpd_ktr_flush();
+		pause("ktrflush", 10);
 	}
 
-	sbuf_delete(&sbuf);
-
-quit:
 	khttpd_ktr_thread = NULL;
 	kthread_exit();
 }
 
 static int
-khttpd_ktr_start(void)
+khttpd_ktr_local_init(void)
 {
-	struct mbuf *m, *last;
-	int error, i;
+	struct thread *td;
+	int error;
 
-	last = NULL;
-	for (i = 0; i < KHTTPD_KTR_BUF_LEN; ++i) {
-		m = m_get(M_WAITOK, MT_DATA);
-		m->m_next = last;
-		last = m;
+	td = curthread;
+
+	sbuf_new(&khttpd_ktr_sbuf, NULL, 1024ul * 1024, SBUF_AUTOEXTEND);
+
+	error = kern_openat(td, AT_FDCWD, KHTTPD_KTR_FILE, UIO_SYSSPACE,
+	    O_CREAT | O_TRUNC | O_WRONLY, 0666);
+	if (error != 0) {
+		log(LOG_WARNING, "khttpd: open(\"" KHTTPD_KTR_FILE
+		    "\") failed (error: %d)", error);
+		goto error;
 	}
-
-	khttpd_ktr_lock();
-	khttpd_ktr_freeq = last;
-	khttpd_ktr_unlock();
+	khttpd_ktr_fd = td->td_retval[0];
 
 	khttpd_ktr_shutdown = FALSE;
-
 	error = kthread_add(khttpd_ktr_main, NULL, curproc, &khttpd_ktr_thread,
 	    0, 0, "ktr");
 	if (error != 0) {
-		log(LOG_WARNING, "khttpd: "
-		    "failed to fork ktr (error: %d)", error);
-		return (error);
+		log(LOG_WARNING, "khttpd: failed to fork ktr (error: %d)",
+		    error);
+		goto error;
 	}
 
 	return (0);
+
+error:
+	sbuf_delete(&khttpd_ktr_sbuf);
+	kern_close(td, khttpd_ktr_fd);
+	khttpd_ktr_fd = -1;
+
+	return (error);
 }
 
 static void
-khttpd_ktr_stop(void)
+khttpd_ktr_local_fini(void)
 {
-	struct mbuf *m1, *m2;
-	struct sbuf *sbuf;
 
 	khttpd_ktr_shutdown = TRUE;
 	while (khttpd_ktr_thread != NULL)
 		pause("ktrstop", hz);
 
-	sbuf = sbuf_new_auto();
-	khttpd_ktr_flush(sbuf);
-	sbuf_delete(sbuf);
+	khttpd_ktr_flush();
 
-	khttpd_ktr_lock();
-	m1 = khttpd_ktr_usedq_head;
-	m2 = khttpd_ktr_freeq;
-	khttpd_ktr_usedq_head = khttpd_ktr_usedq_tail = 
-	    khttpd_ktr_freeq = NULL;
-	khttpd_ktr_unlock();
-
-	m_freem(m1);
-	m_freem(m2);
+	sbuf_delete(&khttpd_ktr_sbuf);
+	kern_close(curthread, khttpd_ktr_fd);
+	khttpd_ktr_fd = -1;
 }
 
-KHTTPD_INIT(, khttpd_ktr_start, khttpd_ktr_stop, KHTTPD_INIT_PHASE_LOCAL - 1);
+KHTTPD_INIT(, khttpd_ktr_local_init, khttpd_ktr_local_fini, 0);
 
 #endif	/* ifdef KHTTPD_KTR_LOGGING */
