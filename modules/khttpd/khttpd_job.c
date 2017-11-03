@@ -347,7 +347,7 @@ khttpd_job_register_events(void)
 
 		TAILQ_INIT(&queue->idle_workers);
 		STAILQ_INIT(&queue->jobs);
-		mtx_init(&queue->lock, "queue", NULL, MTX_DEF);
+		mtx_init(&queue->lock, "queue", NULL, MTX_DEF | MTX_NEW);
 		queue->id = i;
 		queue->worker_count = 0;
 		queue->worker_count_max = 16;

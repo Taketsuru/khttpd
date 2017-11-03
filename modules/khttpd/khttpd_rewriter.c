@@ -89,7 +89,7 @@ khttpd_rewriter_new(struct khttpd_rewriter **rewriter_out)
 	KHTTPD_ENTRY("khttpd_rewriter_new()");
 
 	rewriter = khttpd_malloc(sizeof(*rewriter));
-	sx_init(&rewriter->lock, "rewriter");
+	sx_init_flags(&rewriter->lock, "rewriter", SX_NEW);
 	rewriter->default_value = NULL;
 	for (i = 0; i < KHTTPD_REWRITER_SUFFIX_TABLE_SIZE; ++i)
 		SLIST_INIT(&rewriter->suffix_table[i]);

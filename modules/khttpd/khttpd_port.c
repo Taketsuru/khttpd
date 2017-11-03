@@ -185,7 +185,7 @@ khttpd_port_new(struct khttpd_port **port_out)
 	port = khttpd_malloc(khttpd_costruct_instance_size
 	    (khttpd_port_costruct_info));
 
-	mtx_init(&port->lock, "port", NULL, MTX_DEF);
+	mtx_init(&port->lock, "port", NULL, MTX_DEF | MTX_NEW);
 	bzero((char *)port + 
 	    offsetof(struct khttpd_port, khttpd_port_zctor_begin),
 	    offsetof(struct khttpd_port, khttpd_port_zctor_end) -
@@ -366,7 +366,7 @@ khttpd_socket_init(void *mem, int size, int flags)
 	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
 
 	socket = mem;
-	mtx_init(&socket->lock, "socket", NULL, MTX_DEF);
+	mtx_init(&socket->lock, "socket", NULL, MTX_DEF | MTX_NEW);
 	callout_init_mtx(&socket->recv_callout, &socket->lock, 0);
 	callout_init_mtx(&socket->xmit_callout, &socket->lock, 0);
 	socket->recv_timeout_job = 

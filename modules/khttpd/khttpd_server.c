@@ -554,7 +554,7 @@ khttpd_server_new(int *error_out)
 	server = khttpd_malloc(khttpd_costruct_instance_size
 	    (khttpd_server_costruct_info));
 
-	rw_init(&server->lock, "khttpd-server");
+	rw_init_flags(&server->lock, "server", RW_NEW);
 	server->root = khttpd_location_new_root(server);
 	server->costructs_ready = FALSE;
 	KHTTPD_REFCOUNT1_INIT(khttpd_server, server);

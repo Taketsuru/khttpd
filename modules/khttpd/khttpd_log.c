@@ -108,7 +108,7 @@ static void
 khttpd_log_init(struct khttpd_log *log)
 {
 
-	mtx_init(&log->lock, "log", NULL, MTX_DEF);
+	mtx_init(&log->lock, "log", NULL, MTX_DEF | MTX_NEW);
 	mbufq_init(&log->queue, KHTTPD_LOG_LIMIT);
 	log->job = khttpd_job_new(khttpd_log_handle_job, log, NULL);
 	log->fd = -1;

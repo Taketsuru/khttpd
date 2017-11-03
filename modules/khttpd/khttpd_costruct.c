@@ -75,7 +75,7 @@ khttpd_costruct_info_new(struct khttpd_costruct_info **info_out,
 	    ("%s is called in phase %d", __func__, khttpd_init_get_phase()));
 
 	info = khttpd_malloc(sizeof(*info));
-	sx_init(&info->lock, "costruct");
+	sx_init_flags(&info->lock, "costruct", SX_NEW);
 	info->callbacks = khttpd_malloc(KHTTPD_COSTRUCT_INITIAL_ARRAY_SIZE *
 	    sizeof(struct khttpd_costruct_callback));
 	info->instance_size = host_size;
