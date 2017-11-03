@@ -85,18 +85,6 @@ CTASSERT(sizeof(khttpd_methods) / sizeof(khttpd_methods[0]) ==
 static struct khttpd_strtab_entry_slist
     khttpd_method_table[KHTTPD_STRTAB_POW2_CEIL(KHTTPD_METHOD_END)];
 
-static int
-khttpd_method_init(void)
-{
-
-	khttpd_strtab_init(khttpd_method_table,
-	    sizeof(khttpd_method_table) / sizeof(khttpd_method_table[0]),
-	    khttpd_methods, sizeof(khttpd_methods) /
-	    sizeof(khttpd_methods[0]));
-
-	return (0);
-}
-
 int
 khttpd_method_find(const char *begin, const char *end)
 {
@@ -119,4 +107,16 @@ khttpd_method_name(int method)
 	return (khttpd_methods[method].name);
 }
 
-KHTTPD_INIT(method, khttpd_method_init, NULL, 0);
+static int
+khttpd_method_init(void)
+{
+
+	khttpd_strtab_init(khttpd_method_table,
+	    sizeof(khttpd_method_table) / sizeof(khttpd_method_table[0]),
+	    khttpd_methods, sizeof(khttpd_methods) /
+	    sizeof(khttpd_methods[0]));
+
+	return (0);
+}
+
+KHTTPD_INIT(khttpd_method, khttpd_method_init, NULL, KHTTPD_INIT_PHASE_LOCAL);

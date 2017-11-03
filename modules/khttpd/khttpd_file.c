@@ -610,6 +610,6 @@ khttpd_file_deregister_location_type(void)
 	khttpd_location_type_deregister("khttpd_file");
 }
 
-KHTTPD_INIT(khttpd::file, khttpd_file_register_location_type,
+KHTTPD_INIT(khttpd_file, khttpd_file_register_location_type,
     khttpd_file_deregister_location_type,
     KHTTPD_INIT_PHASE_REGISTER_LOCATION_TYPES);

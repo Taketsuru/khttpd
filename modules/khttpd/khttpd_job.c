@@ -322,7 +322,7 @@ khttpd_job_terminate(void)
 }
 
 static int
-khttpd_job_load(void)
+khttpd_job_register_events(void)
 {
 	struct khttpd_job_queue *queue, **queues;
 	struct thread *td;
@@ -375,7 +375,7 @@ khttpd_job_load(void)
 }
 
 static void
-khttpd_job_unload(void)
+khttpd_job_deregister_events(void)
 {
 	struct khttpd_job_queue *queue, **queues;
 	struct thread *td;
@@ -396,5 +396,5 @@ khttpd_job_unload(void)
 	uma_zdestroy(khttpd_job_queue_zone);
 }
 
-KHTTPD_INIT(khttpd::job, khttpd_job_load, khttpd_job_unload, 
-    KHTTPD_INIT_PHASE_REGISTER_EVENTS - 1);
+KHTTPD_INIT(khttpd_job, khttpd_job_register_events,
+    khttpd_job_deregister_events, KHTTPD_INIT_PHASE_REGISTER_EVENTS - 1);

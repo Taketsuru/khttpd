@@ -2247,5 +2247,5 @@ khttpd_http_local_fini(void)
 	uma_zdestroy(khttpd_http_client_zone);
 }
 
-KHTTPD_INIT(http, khttpd_http_local_init, khttpd_http_local_fini,
+KHTTPD_INIT(khttpd_http, khttpd_http_local_init, khttpd_http_local_fini,
     KHTTPD_INIT_PHASE_LOCAL);

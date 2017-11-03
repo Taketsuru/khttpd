@@ -132,6 +132,8 @@ khttpd_init_run(void (*fn)(int))
 		khttpd_init_current = init;
 		sx_xunlock(&khttpd_init_lock);
 
+		KHTTPD_NOTE("init %p \"%s\" %d", init, init->name,
+		    init->phase);
 		error = init->init();
 		KASSERT(0 <= error && error <= ELAST, ("error %d", error));
 
@@ -154,6 +156,8 @@ khttpd_init_run(void (*fn)(int))
 		khttpd_init_current = init;
 		sx_xunlock(&khttpd_init_lock);
 
+		KHTTPD_NOTE("fini %p \"%s\" %d", init, init->name,
+		    init->phase);
 		init->fini();
 
 		sx_xlock(&khttpd_init_lock);

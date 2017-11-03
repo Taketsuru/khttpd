@@ -825,10 +825,10 @@ khttpd_server_verror(struct khttpd_server *server, int severity,
 }
 
 static int
-khttpd_server_load(void)
+khttpd_server_register_costructs(void)
 {
 
-	KHTTPD_ENTRY("khttpd_server_load()");
+	KHTTPD_ENTRY("khttpd_server_register_costructs()");
 	khttpd_costruct_info_new(&khttpd_server_costruct_info,
 	    sizeof(struct khttpd_server));
 	khttpd_costruct_info_new(&khttpd_location_costruct_info, 
@@ -838,15 +838,16 @@ khttpd_server_load(void)
 }
 
 static void
-khttpd_server_unload(void)
+khttpd_server_deregister_costructs(void)
 {
 
-	KHTTPD_ENTRY("khttpd_server_unload()");
+	KHTTPD_ENTRY("khttpd_server_deregister_costructs()");
 	khttpd_costruct_info_destroy(khttpd_server_costruct_info);
 	khttpd_costruct_info_destroy(khttpd_location_costruct_info);
 }
 
-KHTTPD_INIT(khttpd::server, khttpd_server_load, khttpd_server_unload,
+KHTTPD_INIT(khttpd_server, khttpd_server_register_costructs,
+    khttpd_server_deregister_costructs,
     KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS - 1);
 
 #ifdef INVARIANTS
@@ -864,7 +865,7 @@ khttpd_server_exit(void)
 	KASSERT(n == 0, ("location instance count=%d", n));
 }
 
-KHTTPD_INIT(khttpd::server, NULL, khttpd_server_exit, KHTTPD_INIT_PHASE_RUN);
+KHTTPD_INIT(khttpd_server, NULL, khttpd_server_exit, KHTTPD_INIT_PHASE_RUN);
 
 #endif
 

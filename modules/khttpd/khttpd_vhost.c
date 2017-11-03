@@ -613,6 +613,6 @@ khttpd_vhost_register_costructs(void)
 	return (0);
 }
 
-KHTTPD_INIT(vhost, khttpd_vhost_register_costructs, NULL,
+KHTTPD_INIT(khttpd_vhost, khttpd_vhost_register_costructs, NULL,
 	KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS);
 
