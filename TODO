@@ -1,8 +1,8 @@
+- give a name to each khttpd_log and use it to log errors in the log writer.
+
 - ktr flushing should be stopped if write or fdatasync fails.
 
-- access.log should be flushed explicitly with fdatasync().
-
-- Balance between frequent flush and buffering of access logs.
+- khttpd_job_schedule should not sleep because it's called by callout handlers.
 
 - Move and rename khttpd_ctrl_parse_json to khttpd_webapi.
 

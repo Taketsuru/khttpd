@@ -49,44 +49,57 @@
 #include "khttpd_mbuf.h"
 
 #ifndef KHTTPD_LOG_LIMIT
-#define KHTTPD_LOG_LIMIT	1024
+#define KHTTPD_LOG_LIMIT	512
 #endif
 
 struct khttpd_log {
 	struct mtx	lock;
 	struct mbufq	queue;
+	struct callout	flush_callout;
+	sbintime_t	silence_till;
 	struct khttpd_job *job;
-	u_long		put_count;
-	u_long		done_count;
+	char		*name;
 	int		fd;
 	unsigned	choking:1;
 	unsigned	busy:1;
+	unsigned	waiting:1;
+	unsigned	silence:1;
 };
 
 static const char *khttpd_log_severities[] = {
 	"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"
 };
+static sbintime_t khttpd_log_silence_time = 10 * SBT_1S;
+static sbintime_t khttpd_log_flush_time = SBT_1S;
 
 static void khttpd_log_handle_job(void *arg);
 
 static void
 khttpd_log_choke(struct khttpd_log *log)
 {
-	u_long put_count;
 
+	KHTTPD_ENTRY("%s(%p)", __func__, log);
 	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
 	    __func__);
 
 	mtx_lock(&log->lock);
 
-	while (log->choking)
+	while (log->choking) {
+		log->waiting = TRUE;
 		mtx_sleep(log, &log->lock, 0, "choke", 0);
-
+	}
 	log->choking = TRUE;
-	put_count = log->put_count;
-
-	while (log->done_count < put_count)
-		mtx_sleep(log, &log->lock, 0, "drain", 0);
+	
+	while (0 < mbufq_len(&log->queue) || log->busy)
+		if (log->busy) {
+			log->waiting = TRUE;
+			mtx_sleep(log, &log->lock, 0, "drain", 0);
+		} else {
+			log->busy = TRUE;
+			mtx_unlock(&log->lock);
+			khttpd_job_schedule(log->job);
+			mtx_lock(&log->lock);
+		}
 
 	mtx_unlock(&log->lock);
 }
@@ -95,35 +108,17 @@ static void
 khttpd_log_dechoke(struct khttpd_log *log)
 {
 
+	KHTTPD_ENTRY("%s(%p)", __func__, log);
 	mtx_lock(&log->lock);
 
-	KASSERT(log->choking, ("log(%p)->choking is FALSE"));
+	KASSERT(log->choking, ("log(%p)->choking is FALSE", log));
 	log->choking = FALSE;
-	wakeup(log);
+	if (log->waiting) {
+		log->waiting = FALSE;
+		wakeup(log);
+	}
 
 	mtx_unlock(&log->lock);
-}
-
-static void
-khttpd_log_init(struct khttpd_log *log)
-{
-
-	mtx_init(&log->lock, "log", NULL, MTX_DEF | MTX_NEW);
-	mbufq_init(&log->queue, KHTTPD_LOG_LIMIT);
-	log->job = khttpd_job_new(khttpd_log_handle_job, log, NULL);
-	log->fd = -1;
-	log->put_count = log->done_count = 0;
-	log->choking = log->busy = FALSE;
-}
-
-static void
-khttpd_log_fini(struct khttpd_log *log)
-{
-
-	khttpd_log_close(log);
-	khttpd_job_delete(log->job);
-	kern_close(curthread, log->fd);
-	mtx_destroy(&log->lock);
 }
 
 struct khttpd_log *
@@ -131,8 +126,17 @@ khttpd_log_new(void)
 {
 	struct khttpd_log *log;
 
+	KHTTPD_ENTRY("%s()", __func__);
 	log = khttpd_malloc(sizeof(*log));
-	khttpd_log_init(log);
+
+	mtx_init(&log->lock, "log", NULL, MTX_DEF | MTX_NEW);
+	mbufq_init(&log->queue, INT_MAX);
+	callout_init_mtx(&log->flush_callout, &log->lock,
+	    CALLOUT_RETURNUNLOCKED);
+	log->job = khttpd_job_new(khttpd_log_handle_job, log, NULL);
+	log->fd = -1;
+	log->choking = log->busy = FALSE;
+
 	return (log);
 }
 
@@ -140,10 +144,30 @@ void
 khttpd_log_delete(struct khttpd_log *log)
 {
 
+	KHTTPD_ENTRY("%s(%p)", __func__, log);
 	if (log == NULL)
 		return;
 
-	khttpd_log_fini(log);
+	khttpd_log_close(log);
+
+	/*
+	 * Once khttpd_log_close() is called, queue is kept empty.  Because the
+	 * queue is empty, the flush job is no longer be busy.  So we can
+	 * safely delete the job.
+	 */
+	KASSERT(mbufq_len(&log->queue) == 0,
+	    ("log(%p)->queue is not empty", log));
+	KASSERT(!log->busy, ("log(%p)->busy is TRUE", log));
+	khttpd_job_delete(log->job);
+
+	/*
+	 * The callout must be drained before the destruction of the associated
+	 * lock.
+	 */
+	callout_drain(&log->flush_callout);
+
+	mtx_destroy(&log->lock);
+
 	khttpd_free(log);
 }
 
@@ -156,14 +180,16 @@ khttpd_log_set_fd(struct khttpd_log *log, int fd)
 {
 	int old_fd;
 
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, log, fd);
 	khttpd_log_choke(log);
 
 	old_fd = log->fd;
 	log->fd = fd;
-	if (old_fd != -1)
-		kern_close(curthread, old_fd);
 
 	khttpd_log_dechoke(log);
+
+	if (old_fd != -1)
+		kern_close(curthread, old_fd);
 }
 
 /*
@@ -175,21 +201,35 @@ void
 khttpd_log_close(struct khttpd_log *log)
 {
 
-	khttpd_log_choke(log);
+	KHTTPD_ENTRY("%s(%p)", __func__, log);
+	khttpd_log_set_fd(log, -1);
+}
 
-	if (log->fd != -1) {
-		kern_close(curthread, log->fd);
-		log->fd = -1;
-	}
+static void
+khttpd_log_timeout(void *arg)
+{
+	struct khttpd_log *log;
+	boolean_t need_scheduling;
 
-	khttpd_log_dechoke(log);
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+	log = arg;
+	mtx_assert(&log->lock, MA_LOCKED);
+
+	need_scheduling = !log->busy && 0 < mbufq_len(&log->queue);
+	if (need_scheduling)
+		log->busy = TRUE;
+	mtx_unlock(&log->lock);
+
+	if (need_scheduling)
+		khttpd_job_schedule(log->job);
 }
 
 void
 khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 {
-	boolean_t need_kick;
+	boolean_t need_scheduling;
 
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, log, m);
 	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
 	    __func__);
 
@@ -197,8 +237,10 @@ khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 
 	mtx_lock(&log->lock);
 
-	while (log->choking || mbufq_full(&log->queue))
+	while (log->choking) {
+		log->waiting = TRUE;
 		mtx_sleep(log, &log->lock, 0, "logput", 0);
+	}
 
 	if (log->fd == -1) {
 		mtx_unlock(&log->lock);
@@ -206,15 +248,22 @@ khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 		return;
 	}
 
-	++log->put_count;
-	need_kick = mbufq_len(&log->queue) == 0 && !log->busy;
-	if (need_kick)
+	need_scheduling = !log->busy && 
+	    KHTTPD_LOG_LIMIT <= mbufq_len(&log->queue);
+	if (need_scheduling)
 		log->busy = TRUE;
+
 	mbufq_enqueue(&log->queue, m);
+
+	if (need_scheduling)
+		callout_stop(&log->flush_callout);
+	else
+		callout_reset_sbt(&log->flush_callout, khttpd_log_flush_time,
+		    SBT_1S, khttpd_log_timeout, log, 0);
 
 	mtx_unlock(&log->lock);
 
-	if (need_kick)
+	if (need_scheduling)
 		khttpd_job_schedule(log->job);
 }
 
@@ -223,35 +272,31 @@ khttpd_log_handle_job(void *arg)
 {
 	struct iovec iovs[64];
 	struct uio auio;
+	struct bintime bt;
 	struct thread *td;
-	struct khttpd_log *l;
+	struct khttpd_log *subject;
 	struct mbuf *pkt, *m;
+	sbintime_t current;
 	ssize_t resid;
-	u_long put_count;
 	int error, fd, i, niov;
+	boolean_t warn;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
 	td = curthread;
 	niov = sizeof(iovs) / sizeof(iovs[0]);
-	l = arg;
+	subject = arg;
 
-	mtx_lock(&l->lock);
+	mtx_lock(&subject->lock);
 
-	for (;;) {
-		if (mbufq_full(&l->queue))
-			wakeup(l);
+	callout_stop(&subject->flush_callout);
 
-		pkt = mbufq_flush(&l->queue);
-		if (pkt == NULL)
-			break;
+	/* khttpd_log::fd doesn't change while the log is busy */
+	fd = subject->fd;
 
-		KASSERT(done_count < put_count,
-		    ("log=%p, done_count=%d, put_count=%d", l, l->done_count,
-			    l->put_count));
+	while ((pkt = mbufq_flush(&subject->queue)) != NULL) {
+		mtx_unlock(&subject->lock);
 
-		put_count = l->put_count;
-		mtx_unlock(&l->lock);
-
-		fd = l->fd;
 		error = 0;
 		while (pkt != NULL) {
 			m = pkt;
@@ -272,9 +317,6 @@ khttpd_log_handle_job(void *arg)
 				auio.uio_segflg = UIO_SYSSPACE;
 				auio.uio_td = td;
 				error = kern_writev(td, fd, &auio);
-				if (error != 0)
-					log(LOG_WARNING, "khttpd: log failed "
-					    "(error: %d)", error);
 			}
 
 			m = pkt;
@@ -282,21 +324,35 @@ khttpd_log_handle_job(void *arg)
 			m_freem(m);
 		}
 
-		if (error != 0) {
-			l->fd = -1;
-			kern_close(td, fd);
+		if (error == 0)
+			error = kern_fsync(td, fd, FALSE);
+		else {
+			bintime(&bt);
+			current = bttosbt(bt);
 		}
 
-		mtx_lock(&l->lock);
-
-		l->done_count = put_count;
-		if (l->choking)
-			wakeup(l);
+		mtx_lock(&subject->lock);
 	}
 
-	l->busy = FALSE;
+	subject->busy = FALSE;
+	if (subject->waiting) {
+		subject->waiting = FALSE;
+		wakeup(subject);
+	}
 
-	mtx_unlock(&l->lock);
+	warn = FALSE;
+	if (error == 0)
+		subject->silence = FALSE;
+
+	else if (!subject->silence || subject->silence_till <= current) {
+		warn = subject->silence = TRUE;
+		subject->silence_till = current + khttpd_log_silence_time;
+	}
+
+	mtx_unlock(&subject->lock);
+
+	if (warn)
+		log(LOG_WARNING, "khttpd: log I/O error (error: %d)", error);
 }
 
 const char *

@@ -41,6 +41,8 @@ void khttpd_log_delete(struct khttpd_log *log);
 void khttpd_log_set_fd(struct khttpd_log *log, int fd);
 void khttpd_log_close(struct khttpd_log *log);
 void khttpd_log_put(struct khttpd_log *log, struct mbuf *m);
+void khttpd_log_set_name(struct khttpd_log *log, const char *name);
+const char*khttpd_log_get_name(struct khttpd_log *log);
 
 const char *khttpd_log_get_severity_label(int severity);
 
