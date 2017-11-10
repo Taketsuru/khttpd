@@ -112,6 +112,35 @@ khttpd_rewriter_new(struct khttpd_rewriter **rewriter_out)
 	return (0);
 }
 
+static void
+khttpd_rewriter_dtor(struct khttpd_rewriter *rewriter)
+{
+	struct khttpd_rewriter_suffix_rule *rule;
+	struct khttpd_rewriter_suffix_rule_slist *head;
+	int i;
+
+	KHTTPD_ENTRY("khttpd_rewriter_dtor(%p)", rewriter);
+
+	if (rewriter->costructs_ready)
+		khttpd_costruct_call_dtors(khttpd_rewriter_costruct_info,
+		    rewriter);
+
+	khttpd_free(rewriter->default_value);
+
+	for (i = 0; i < KHTTPD_REWRITER_SUFFIX_TABLE_SIZE; ++i) {
+		head = &rewriter->suffix_table[i];
+		while (!SLIST_EMPTY(head)) {
+			rule = SLIST_FIRST(head);
+			SLIST_REMOVE_HEAD(head, hlink);
+			khttpd_free(rule->suffix);
+			khttpd_free(rule->result);
+			khttpd_free(rule);
+		}
+	}
+
+	sx_destroy(&rewriter->lock);
+}
+
 void
 khttpd_rewriter_swap(struct khttpd_rewriter *x, struct khttpd_rewriter *y)
 {
@@ -158,35 +187,6 @@ khttpd_rewriter_swap(struct khttpd_rewriter *x, struct khttpd_rewriter *y)
 	sx_xunlock(&x->lock);
 }
 
-static void
-khttpd_rewriter_dtor(struct khttpd_rewriter *rewriter)
-{
-	struct khttpd_rewriter_suffix_rule *rule;
-	struct khttpd_rewriter_suffix_rule_slist *head;
-	int i;
-
-	KHTTPD_ENTRY("khttpd_rewriter_dtor(%p)", rewriter);
-
-	if (rewriter->costructs_ready)
-		khttpd_costruct_call_dtors(khttpd_rewriter_costruct_info,
-		    rewriter);
-
-	khttpd_free(rewriter->default_value);
-
-	for (i = 0; i < KHTTPD_REWRITER_SUFFIX_TABLE_SIZE; ++i) {
-		head = &rewriter->suffix_table[i];
-		while (!SLIST_EMPTY(head)) {
-			rule = SLIST_FIRST(head);
-			SLIST_REMOVE_HEAD(head, hlink);
-			khttpd_free(rule->suffix);
-			khttpd_free(rule->result);
-			khttpd_free(rule);
-		}
-	}
-
-	sx_destroy(&rewriter->lock);
-}
-
 static struct khttpd_rewriter_suffix_rule_slist *
 khttpd_rewriter_hash_suffix(struct khttpd_rewriter *rewriter,
     const char *suffix)
@@ -211,6 +211,7 @@ khttpd_rewriter_add_suffix_rule(struct khttpd_rewriter *rewriter,
 	struct khttpd_rewriter_suffix_rule_slist *head;
 
 	rule = khttpd_malloc(sizeof(struct khttpd_rewriter_suffix_rule));
+	rule->hdr.type = KHTTPD_REWRITER_RULE_SUFFIX;
 	rule->suffix = khttpd_strdup(pattern);
 	rule->result = khttpd_strdup(result);
 

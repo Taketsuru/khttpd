@@ -92,22 +92,39 @@ khttpd_ktr_unlock(void)
 	mtx_unlock(&khttpd_ktr_mtx);
 }
 
-const char *
-khttpd_ktr_vprintf(const char *fmt, __va_list ap)
+char *
+khttpd_ktr_newbuf(int *bufsize)
 {
 	int i, ni;
 
 	mtx_assert(&khttpd_ktr_mtx, MA_LOCKED);
 
+	if (bufsize != NULL)
+		*bufsize = KHTTPD_KTR_STRING_SIZE;
+
 	i = khttpd_ktr_head;
 	ni = i == KHTTPD_KTR_STRING_BUF_COUNT - 1 ? 0 : i + 1;
 	if (ni == khttpd_ktr_head)
-		return ("<buffer full>");
-
+		return (NULL);
 	khttpd_ktr_head = ni;
-	vsnprintf(khttpd_ktr_strbuf[i], KHTTPD_KTR_STRING_SIZE, fmt, ap);
 
 	return (khttpd_ktr_strbuf[i]);
+}
+
+const char *
+khttpd_ktr_vprintf(const char *fmt, __va_list ap)
+{
+	char *buf;
+
+	mtx_assert(&khttpd_ktr_mtx, MA_LOCKED);
+
+	buf = khttpd_ktr_newbuf(NULL);
+	if (buf == NULL)
+		return ("<buffer full>");
+
+	vsnprintf(buf, KHTTPD_KTR_STRING_SIZE, fmt, ap);
+
+	return (buf);
 }
 
 const char *
@@ -179,6 +196,11 @@ khttpd_ktr_flush(void)
 	error = kern_writev(td, khttpd_ktr_fd, &auio);
 	if (error != 0)
 		log(LOG_WARNING, "khttpd: write(\"" KHTTPD_KTR_FILE
+		    "\") failed (error: %d)", error);
+
+	error = kern_fsync(td, khttpd_ktr_fd, FALSE);
+	if (error != 0)
+		log(LOG_WARNING, "khttpd: fdatasync(\"" KHTTPD_KTR_FILE
 		    "\") failed (error: %d)", error);
 
 	sbuf_clear(&khttpd_ktr_sbuf);

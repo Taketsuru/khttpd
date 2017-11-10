@@ -55,6 +55,7 @@ struct khttpd_mbuf_pos {
 struct khttpd_mbuf_json {
 	struct mbuf *mbuf;
 	unsigned is_first:1;
+	unsigned is_property_value:1;
 };
 
 int khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl);
@@ -115,6 +116,9 @@ void khttpd_mbuf_json_vformat(struct khttpd_mbuf_json *v, boolean_t is_string,
     const char *fmt, va_list args);
 void khttpd_mbuf_json_object_begin(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_object_end(struct khttpd_mbuf_json *v);
+void khttpd_mbuf_json_property(struct khttpd_mbuf_json *, const char *);
+void khttpd_mbuf_json_property_null(struct khttpd_mbuf_json *v,
+    const char *name);
 void khttpd_mbuf_json_property_null(struct khttpd_mbuf_json *v,
     const char *name);
 void khttpd_mbuf_json_property_boolean(struct khttpd_mbuf_json *v,

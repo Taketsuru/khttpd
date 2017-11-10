@@ -32,9 +32,8 @@ SRCS += khttpd_stream.c khttpd_port.c khttpd_server.c khttpd_vhost.c
 SRCS += khttpd_http.c
 SRCS += khttpd_ctrl.c
 SRCS += khttpd_file.c
-#SRCS += khttpd_sysctl.c
-#SRCS += khttpd_sdt.c
-SRCS += 
+SRCS += khttpd_sysctl.c
+
 KMOD = khttpd
 
 .if !defined(KERNBUILDDIR)

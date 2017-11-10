@@ -92,8 +92,6 @@ struct khttpd_server * khttpd_location_get_server
 struct khttpd_location *khttpd_location_get_parent(struct khttpd_location *);
 void khttpd_location_get_options(struct khttpd_location *,
     struct sbuf *output);
-void khttpd_location_hide(struct khttpd_location *);
-void khttpd_location_show(struct khttpd_location *);
 
 KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_server, khttpd_server);
 

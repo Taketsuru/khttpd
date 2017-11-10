@@ -82,6 +82,7 @@
 
 void khttpd_ktr_lock(void);
 void khttpd_ktr_unlock(void);
+char *khttpd_ktr_newbuf(int *);
 const char *khttpd_ktr_printf(const char *fmt, ...) __printflike(1, 2);
 const char *khttpd_ktr_vprintf(const char *fmt, __va_list) __printflike(1, 0);
 

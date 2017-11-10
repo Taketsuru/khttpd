@@ -75,7 +75,6 @@ struct khttpd_location {
 	struct khttpd_location *parent;
 	struct khttpd_log *logs[KHTTPD_SERVER_LOG_END];
 	unsigned	costructs_ready:1;
-	unsigned	hide:1;
 
 #define khttpd_location_zctor_end refcount
 	KHTTPD_REFCOUNT1_MEMBERS;
@@ -239,6 +238,7 @@ khttpd_location_set_log(struct khttpd_location *location,
 	KASSERT(0 <= log_id && log_id < KHTTPD_SERVER_LOG_END,
 	    ("invalid log id %d", log_id));
 
+	khttpd_log_delete(location->logs[log_id]);
 	location->logs[log_id] = log;
 }
 
@@ -334,6 +334,9 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	size_t len;
 	boolean_t need_not_append_slash;
 
+	KHTTPD_ENTRY("%s(%p,%s,%p,%p)", __func__, server,
+	    khttpd_ktr_printf("\"%s\"", path), ops, data);
+
 	/*
 	 * This function doesn't accept NULL ops.  NULL ops means it is a root
 	 * location.
@@ -396,6 +399,11 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	oldloc = NULL;
 	parent = server->root;
 	for (;;) {
+		KHTTPD_TR("%s %s, len=%d", __func__,
+		    khttpd_ktr_printf("parent=%p(%s), [lbegin,lend)=%*s",
+			parent, parent->path, (int)(lend - lbegin), lbegin),
+			lend - lbegin);
+
 		/*
 		 * Find the location that might be the previous element in the
 		 * list.  Let 'ptr' point to it.
@@ -465,7 +473,7 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 		 * location.
 		 */
 
-		lbegin += len;
+		lbegin += ptr->key_len;
 		parent = ptr;
 	}
 
@@ -581,10 +589,15 @@ khttpd_server_adopt_successors(struct khttpd_location *parent,
 {
 	struct khttpd_location *next, *ptr;
 
+	KHTTPD_ENTRY("%s(%s)", __func__,
+	    khttpd_ktr_printf("%p(%s),%p(%s),%*s", parent, parent->path,
+		new_parent, new_parent->path, (int)len, lbegin));
+
 	for (ptr = TAILQ_NEXT(new_parent, children_link);
 	     ptr != NULL && len <= ptr->key_len &&
 		 memcmp(ptr->key, lbegin, len) == 0;
 	     ptr = next) {
+		KHTTPD_TR("%s move %p(%s)", __func__, ptr, ptr->path);
 		next = TAILQ_NEXT(ptr, children_link);
 
 		RB_REMOVE(khttpd_location_tree, &parent->children_tree, ptr);
@@ -616,7 +629,7 @@ khttpd_server_find_location(struct khttpd_server *server,
 	struct khttpd_location *ptr, *prev, *parent, *root;
 	const char *cp;
 
-	KHTTPD_ENTRY("%s(%p,%s)\n", __func__, server,
+	KHTTPD_ENTRY("%s(%p,\"%s\")", __func__, server,
 	    khttpd_ktr_printf("%*s", (int)(end - begin), begin));
 	cp = begin;
 
@@ -624,6 +637,17 @@ khttpd_server_find_location(struct khttpd_server *server,
 
 	parent = root = server->root;
 	while (!RB_EMPTY(&parent->children_tree)) {
+		KHTTPD_TR("%s find %s", __func__,
+		    khttpd_ktr_printf("parent %s, target %*s",
+			parent->path, (int)(end - cp), cp));
+
+		TAILQ_FOREACH(ptr, &parent->children_list, children_link)
+			KHTTPD_TR("%s list child %s", __func__,
+			    khttpd_ktr_printf("%s", ptr->path));
+		RB_FOREACH(ptr, khttpd_location_tree, &parent->children_tree)
+			KHTTPD_TR("%s tree child %s", __func__,
+			    khttpd_ktr_printf("%s", ptr->path));
+
 		key.key = cp;
 		key.key_len = end - cp;
 		ptr = RB_NFIND(khttpd_location_tree, &parent->children_tree,
@@ -635,6 +659,7 @@ khttpd_server_find_location(struct khttpd_server *server,
 			(end - cp == ptr->key_len - 1 &&
 			    memcmp(ptr->key, cp, end - cp) == 0))) {
 			parent = ptr;
+			cp = MIN(end, cp + ptr->key_len);
 			break;
 		}
 
@@ -660,14 +685,13 @@ khttpd_server_find_location(struct khttpd_server *server,
 		cp += prev->key_len;
 	}
 
-	while (parent->parent != NULL && parent->hide) {
-		cp -= parent->key_len;
-		parent = parent->parent;
-	}
-
 	khttpd_location_acquire(parent);
 
 	rw_runlock(&server->lock);
+
+	KHTTPD_TR("%s result %s", __func__,
+	    khttpd_ktr_printf("location \"%s\", suffix \"%s\"", parent->path,
+		    cp));
 
 	*suffix_out = cp;
 
@@ -765,28 +789,6 @@ khttpd_location_set_data(struct khttpd_location *location, void *data)
 	rw_wunlock(&location->server->lock);
 
 	return (old_data);
-}
-
-void
-khttpd_location_hide(struct khttpd_location *location)
-{
-	struct khttpd_server *server;
-
-	server = location->server;
-	rw_wlock(&server->lock);
-	location->hide = TRUE;
-	rw_wunlock(&server->lock);
-}
-
-void
-khttpd_location_show(struct khttpd_location *location)
-{
-	struct khttpd_server *server;
-
-	server = location->server;
-	rw_wlock(&server->lock);
-	location->hide = FALSE;
-	rw_wunlock(&server->lock);
 }
 
 struct khttpd_log *

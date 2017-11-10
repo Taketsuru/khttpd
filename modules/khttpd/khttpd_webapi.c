@@ -41,6 +41,7 @@
 #include <netinet/in.h>
 
 #include "khttpd_json.h"
+#include "khttpd_ktr.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_status_code.h"
 #include "khttpd_string.h"
@@ -267,11 +268,121 @@ SYSINIT(khttpd_webapi_init, SI_SUB_TUNABLES, SI_ORDER_FIRST,
     khttpd_webapi_init, NULL);
 
 void
+khttpd_webapi_property_specifier_to_string(struct sbuf *output,
+    struct khttpd_webapi_property *prop_spec)
+{
+	struct khttpd_webapi_property *ptr, *top, *next, *prev;
+
+	if (prop_spec == NULL)
+		return;
+
+	ptr = top = prop_spec;
+
+	/* reverse the chain */
+
+	prev = NULL;
+	while (ptr != NULL) {
+		next = ptr->link;
+		ptr->link = prev;
+		prev = ptr;
+		ptr = next;
+	}
+
+	/*
+	 * Put the name of each prop_spec and reverse the chain simultaneously.
+	 */
+
+	ptr = prev;
+	prev = NULL;
+	while (ptr != NULL) {
+		if (prev != NULL) {
+			if (ptr->name[0] != '[')
+				sbuf_putc(output, '.');
+			prev->link = ptr;
+		}
+		sbuf_cat(output, ptr->name);
+
+		prev = ptr;
+		ptr = ptr->link;
+	}
+	if (prev != NULL)
+		prev->link = NULL;
+}
+
+#ifdef KHTTPD_KTR_LOGGING
+
+const char *
+khttpd_webapi_ktr_print_property(struct khttpd_webapi_property *prop_spec)
+{
+	struct khttpd_webapi_property *ptr, *top, *next, *prev;
+	char *buf, *cp, *end;
+	size_t len;
+	int bufsiz;
+
+	if (prop_spec == NULL)
+		return ("<empty>");
+
+	buf = khttpd_ktr_newbuf(&bufsiz);
+	if (buf == NULL)
+		return ("<buffer full>");
+
+	ptr = top = prop_spec;
+
+	/* reverse the chain */
+
+	prev = NULL;
+	while (ptr != NULL) {
+		next = ptr->link;
+		ptr->link = prev;
+		prev = ptr;
+		ptr = next;
+	}
+
+	/*
+	 * Put the name of each prop_spec and reverse the chain simultaneously.
+	 */
+
+	cp = buf;
+	end = buf + bufsiz - 1;
+	ptr = prev;
+	prev = NULL;
+	while (ptr != NULL) {
+		if (prev != NULL) {
+			if (ptr->name[0] != '[' && cp < end)
+				*cp++ = '.';
+			prev->link = ptr;
+		}
+		len = MIN(strlen(ptr->name), end - cp);
+		bcopy(ptr->name, cp, len);
+		cp += len;
+
+		prev = ptr;
+		ptr = ptr->link;
+	}
+	if (prev != NULL)
+		prev->link = NULL;
+
+	*cp++ = '\0';
+
+	return (buf);
+}
+
+#endif
+
+void
 khttpd_webapi_set_problem(struct khttpd_mbuf_json *output, int status,
     const char *type, const char *title)
 {
 	struct khttpd_webapi_known_code *codep;
 	struct khttpd_webapi_known_code_slist *head;
+
+	KHTTPD_ENTRY("%s(%p,%d,%s,%s)", __func__, output, status,
+	    type == NULL ? "<null>" : type, title == NULL ? "<null>" : title);
+#ifdef KHTTPD_TRACE_BRANCH
+	struct stack st;
+	stack_save(&st);
+	CTRSTACK(KTR_GEN, &st, 16, 0);
+#endif
 
 	khttpd_mbuf_json_delete(output);
 	khttpd_mbuf_json_new(output);
@@ -301,43 +412,12 @@ khttpd_webapi_set_problem_property(struct khttpd_mbuf_json *output,
 {
 	char buf[32];
 	struct sbuf sbuf;
-	struct khttpd_webapi_property *ptr, *top, *next, *prev;
 
 	if (prop_spec == NULL)
 		return;
 
-	ptr = top = prop_spec;
-
-	/* reverse the chain */
-
-	prev = NULL;
-	while (ptr != NULL) {
-		next = ptr->link;
-		ptr->link = prev;
-		prev = ptr;
-		ptr = next;
-	}
-
-	/*
-	 * Put the name of each prop_spec and reverse the chain simultaneously.
-	 */
-
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	ptr = prev;
-	prev = NULL;
-	while (ptr != NULL) {
-		if (prev != NULL) {
-			if (ptr->name[0] != '[')
-				sbuf_putc(&sbuf, '.');
-			prev->link = ptr;
-		}
-		sbuf_cat(&sbuf, ptr->name);
-
-		prev = ptr;
-		ptr = ptr->link;
-	}
-	if (prev != NULL)
-		prev->link = NULL;
+	khttpd_webapi_property_specifier_to_string(&sbuf, prop_spec);
 	sbuf_finish(&sbuf);
 	khttpd_mbuf_json_property_format(output, "property", TRUE,
 	    "%s", sbuf_data(&sbuf));

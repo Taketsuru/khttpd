@@ -40,6 +40,7 @@
 #include <netinet/in.h>
 
 #include "khttpd.h"
+#include "khttpd_ktr.h"
 #include "khttpd_malloc.h"
 #include "khttpd_string.h"
 
@@ -1066,6 +1067,7 @@ khttpd_mbuf_json_new(struct khttpd_mbuf_json *v)
 
 	v->mbuf = m_get(M_WAITOK, MT_DATA);
 	v->is_first = TRUE;
+	v->is_property_value = FALSE;
 }
 
 struct mbuf *
@@ -1120,6 +1122,8 @@ khttpd_mbuf_json_begin_element(struct khttpd_mbuf_json *v)
 {
 	if (v->is_first)
 		v->is_first = FALSE;
+	else if (v->is_property_value)
+		v->is_property_value = FALSE;
 	else
 		khttpd_mbuf_append(v->mbuf, khttpd_mbuf_comma,
 		    khttpd_mbuf_comma + sizeof(khttpd_mbuf_comma) - 1);
@@ -1210,7 +1214,10 @@ khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
 	in_addr_t ip_addr;
 	in_port_t port;
 
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, v, sockaddr);
+
 	if (sockaddr->sa_family == AF_UNSPEC) {
+		KHTTPD_BRANCH("%s AF_UNSPEC", __func__);
 		khttpd_mbuf_json_null(v);
 		return;
 	}
@@ -1284,16 +1291,29 @@ khttpd_mbuf_json_object_end(struct khttpd_mbuf_json *v)
 {
 
 	khttpd_mbuf_append_ch(v->mbuf, '}');
+	v->is_first = FALSE;
+}
+
+void
+khttpd_mbuf_json_property(struct khttpd_mbuf_json *v, const char *name)
+{
+
+	KASSERT(!v->is_property_value,
+	    ("the previous property name isn't followed by a value"));
+
+	khttpd_mbuf_json_begin_element(v);
+	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
+	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
+	    sizeof(khttpd_mbuf_colon) - 1);
+	v->is_property_value = TRUE;
 }
 
 void
 khttpd_mbuf_json_property_null(struct khttpd_mbuf_json *v, const char *name)
 {
 
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
 	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_null_literal,
 	    khttpd_mbuf_null_literal + sizeof(khttpd_mbuf_null_literal) - 1);
 }
@@ -1303,10 +1323,8 @@ khttpd_mbuf_json_property_boolean(struct khttpd_mbuf_json *v, const char *name,
     boolean_t value)
 {
 
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
 	if (value)
 		khttpd_mbuf_append(v->mbuf, khttpd_mbuf_true_literal,
 		    khttpd_mbuf_true_literal +
@@ -1322,10 +1340,8 @@ khttpd_mbuf_json_property_cstr(struct khttpd_mbuf_json *v, const char *name,
     boolean_t is_string, const char *value)
 {
 
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
 	if (is_string)
 		khttpd_mbuf_put_json_string_cstr(v->mbuf, value);
 	else
@@ -1337,10 +1353,8 @@ khttpd_mbuf_json_property_mbuf(struct khttpd_mbuf_json *v, const char *name,
     boolean_t is_string, struct mbuf *m)
 {
 
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
 	if (is_string)
 		khttpd_mbuf_put_json_string_mbuf(v->mbuf, m);
 	else
@@ -1351,10 +1365,8 @@ void khttpd_mbuf_json_property_mbuf_1st_line(struct khttpd_mbuf_json *v,
     const char *name, struct mbuf *m)
 {
 
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
 	khttpd_mbuf_put_json_string_mbuf_1st_line(v->mbuf, m);
 }
 
@@ -1374,6 +1386,9 @@ khttpd_mbuf_json_property_vformat(struct khttpd_mbuf_json *v, const char *name,
     boolean_t is_string, const char *fmt, va_list args)
 {
 	struct sbuf sbuf;
+
+	KASSERT(!v->is_property_value,
+	    ("the previous property name isn't followed by a value"));
 
 	sbuf_new(&sbuf, NULL, 256, SBUF_AUTOEXTEND);
 	sbuf_vprintf(&sbuf, fmt, args);
@@ -1399,11 +1414,7 @@ khttpd_mbuf_json_property_array_begin(struct khttpd_mbuf_json *v,
     const char *name)
 {
 
-	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
-	v->is_first = TRUE;
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_array_begin(v);
 }
 
@@ -1412,11 +1423,7 @@ khttpd_mbuf_json_property_object_begin(struct khttpd_mbuf_json *v,
     const char *name)
 {
 
-	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_put_json_string_cstr(v->mbuf, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
-	    sizeof(khttpd_mbuf_colon) - 1);
-	v->is_first = TRUE;
+	khttpd_mbuf_json_property(v, name);
 	khttpd_mbuf_json_object_begin(v);
 }
 
@@ -1433,5 +1440,6 @@ void
 khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *v)
 {
 	khttpd_mbuf_append_ch(v->mbuf, ']');
+	v->is_first = FALSE;
 }
 

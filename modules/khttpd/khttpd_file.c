@@ -64,7 +64,6 @@ struct khttpd_file_location_data {
 	struct khttpd_rewriter *mime_type_rewriter;
 	char		*docroot;
 	int		docroot_fd;
-	KHTTPD_REFCOUNT1_MEMBERS;
 };
 
 struct khttpd_file_get_exchange_data {
@@ -79,7 +78,6 @@ static int khttpd_file_get_exchange_get(struct khttpd_exchange *, void *,
     struct khttpd_stream *, size_t *);
 static void khttpd_file_get(struct khttpd_exchange *);
 static void khttpd_file_location_dtor(struct khttpd_location *);
-static void khttpd_file_location_data_dtor(struct khttpd_file_location_data *);
 
 static struct khttpd_location_ops khttpd_file_ops = {
 	.dtor = khttpd_file_location_dtor,
@@ -94,12 +92,6 @@ static struct khttpd_exchange_ops khttpd_file_get_exchange_ops = {
 static struct mtx khttpd_file_lock;
 
 MTX_SYSINIT(khttpd_file_lock, &khttpd_file_lock, "khttpd-file", MTX_DEF);
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
-KHTTPD_REFCOUNT1_GENERATE_STATIC(khttpd_file_location_data, 
-    khttpd_file_location_data, khttpd_file_location_data_dtor, khttpd_free);
-#pragma clang diagnostic pop
 
 static int
 khttpd_file_normalize_path(const char *path, char *buf, size_t bufsize)
@@ -265,24 +257,26 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 
 	error = fo_sendfile(fp, khttpd_stream_get_fd(stream), NULL, NULL,
 	    data->xmit_offset, data->xmit_residual, &sent, 0, td);
+	KHTTPD_TR("%s %u error %d", __func__, __LINE__, error);
 
 	fdrop(fp, td);
 
 	if (error != 0 && error != EWOULDBLOCK)
 		return (error);
 
+
 	data->xmit_residual -= sent;
 	data->xmit_offset += sent;
 	*sent_out = sent;
 
-	return (0);
+	return (error);
 }
 
 static void
 khttpd_file_get(struct khttpd_exchange *exchange)
 {
-	char buf[64];
-	struct sbuf sbuf;
+	char type_buf[32], charset_buf[32];
+	struct sbuf type_sbuf, charset_sbuf;
 	struct stat statbuf;
 	struct khttpd_file_get_exchange_data *data;
 	struct khttpd_file_location_data *location_data;
@@ -290,8 +284,8 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	struct thread *td;
 	const char *suffix;
 	size_t pathsize;
-	int error;
-	int status;
+	int error, status;
+	boolean_t mime_type_specified, charset_specified;
 
 	KHTTPD_ENTRY("khttpd_file_get(%p), target=\"%s\"", exchange,
 	    khttpd_ktr_printf("%s", khttpd_exchange_get_target(exchange)));
@@ -299,8 +293,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	td = curthread;
 	location = khttpd_exchange_location(exchange);
 	mtx_lock(&khttpd_file_lock);
-	location_data = khttpd_file_location_data_acquire
-	    (khttpd_location_data(location));
+	location_data = khttpd_location_data(location);
 	mtx_unlock(&khttpd_file_lock);
 
 	suffix = khttpd_exchange_suffix(exchange);
@@ -353,33 +346,44 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	data->xmit_residual = statbuf.st_size;
 
-	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
+	sbuf_new(&type_sbuf, type_buf, sizeof(type_buf), SBUF_AUTOEXTEND);
+	sbuf_new(&charset_sbuf, charset_buf, sizeof(charset_buf), 
+	    SBUF_AUTOEXTEND);
+
+	mime_type_specified = charset_specified = FALSE;
 
 	if (location_data->mime_type_rewriter != NULL)
-		khttpd_rewriter_rewrite(location_data->mime_type_rewriter,
-		    &sbuf, data->path);
+		mime_type_specified = khttpd_rewriter_rewrite
+		    (location_data->mime_type_rewriter, &type_sbuf,
+			data->path);
 
-	if (location_data->charset_rewriter != NULL) {
-		sbuf_cat(&sbuf, sbuf_len(&sbuf) == 0 ? "charset=" :
-		    "; charset=");
-		khttpd_rewriter_rewrite(location_data->charset_rewriter,
-		    &sbuf, data->path);
-	}
+	if (mime_type_specified && location_data->charset_rewriter != NULL)
+		charset_specified = khttpd_rewriter_rewrite
+		    (location_data->charset_rewriter, &charset_sbuf,
+			data->path);
 
-	sbuf_finish(&sbuf);
+	sbuf_finish(&type_sbuf);
+	sbuf_finish(&charset_sbuf);
 
-	if (0 < sbuf_len(&sbuf))
-		khttpd_exchange_add_response_field(exchange, "Content-Type",
-		    "%s", sbuf_data(&sbuf));
+	if (!mime_type_specified)
+		; /* nothing */
+	else if (!charset_specified)
+		khttpd_exchange_add_response_field(exchange, 
+		    "Content-Type", "%s", 
+		    sbuf_data(&type_sbuf));
+	else
+		khttpd_exchange_add_response_field(exchange,
+		    "Content-Type", "%s; charset=%s",
+		    sbuf_data(&type_sbuf), sbuf_data(&charset_sbuf));
 
-	sbuf_delete(&sbuf);
+	sbuf_delete(&type_sbuf);
+	sbuf_delete(&charset_sbuf);
 
 	khttpd_exchange_set_response_content_length(exchange, statbuf.st_size);
 	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
 	return;
 
  error:
-	khttpd_file_location_data_release(location_data);
 	khttpd_exchange_respond(exchange, status);
 }
 
@@ -454,7 +458,6 @@ khttpd_file_location_data_new
 	    khttpd_rewriter_acquire(mime_type_rewriter);
 	location_data->docroot = khttpd_strdup(docroot_str);
 	location_data->docroot_fd = docroot_fd;
-	KHTTPD_REFCOUNT1_INIT(khttpd_file_location_data, location_data);
 
 	*location_data_out = location_data;
 
@@ -463,22 +466,21 @@ khttpd_file_location_data_new
 quit:
 	if (docroot_fd != -1)
 		kern_close(td, docroot_fd);
-	khttpd_free(location_data);
 
 	return (status);
 }
 
 static void
-khttpd_file_location_data_dtor(struct khttpd_file_location_data *data)
+khttpd_file_location_data_destroy(struct khttpd_file_location_data *data)
 {
-
-	KHTTPD_ENTRY("khttpd_file_location_data_dtor(%p)", data);
+	KHTTPD_ENTRY("khttpd_file_location_data_destroy(%p)", data);
 
 	khttpd_rewriter_release(data->charset_rewriter);
 	khttpd_rewriter_release(data->mime_type_rewriter);
 	khttpd_free(data->docroot);
 	if (data->docroot_fd != -1)
 		kern_close(curthread, data->docroot_fd);
+	khttpd_free(data);
 }
 
 static void
@@ -486,7 +488,7 @@ khttpd_file_location_dtor(struct khttpd_location *location)
 {
 
 	KHTTPD_ENTRY("khttpd_file_location_dtor(%p)", location);
-	khttpd_file_location_data_release(khttpd_location_data(location));
+	khttpd_file_location_data_destroy(khttpd_location_data(location));
 }
 
 static void
@@ -501,8 +503,7 @@ khttpd_file_location_get(struct khttpd_location *location,
 
 	mtx_lock(&khttpd_file_lock);
 	KHTTPD_ENTRY("khttpd_file_location_dtor(%p)", location);
-	location_data = khttpd_file_location_data_acquire
-	    (khttpd_location_data(location));
+	location_data = khttpd_location_data(location);
 	mtx_unlock(&khttpd_file_lock);
 
 	khttpd_mbuf_json_object_begin(output);
@@ -532,7 +533,6 @@ khttpd_file_location_get(struct khttpd_location *location,
 	khttpd_mbuf_json_object_end(output);
 
 	sbuf_delete(&sbuf);
-	khttpd_file_location_data_release(location_data);
 }
 
 static int 
@@ -553,7 +553,8 @@ khttpd_file_location_put(struct khttpd_location *location,
 	mtx_lock(&khttpd_file_lock);
 	location_data = khttpd_location_set_data(location, location_data);
 	mtx_unlock(&khttpd_file_lock);
-	khttpd_file_location_data_release(location_data);
+
+	khttpd_file_location_data_destroy(location_data);
 
 	return (KHTTPD_STATUS_OK);
 }
@@ -565,28 +566,17 @@ khttpd_file_location_create(struct khttpd_location **location_out,
     struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct khttpd_file_location_data *location_data;
-	int error, status;
+	int status;
 
 	KHTTPD_ENTRY("khttpd_file_location_create(%p)", server);
 
 	status = khttpd_file_location_data_new(&location_data, output,
 	    input_prop_spec, input);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-		return (status);
 
-	*location_out = khttpd_location_new(&error, server, path,
-	    &khttpd_file_ops, location_data);
-	if (error != 0) {
-		khttpd_file_location_data_release(location_data);
-		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_detail(output,
-		    "failed to construct a location");
-		khttpd_webapi_set_problem_errno(output, error);
-		return (status);
-	}
-
-	return (KHTTPD_STATUS_CREATED);
+	return (!KHTTPD_STATUS_IS_SUCCESSFUL(status) ? status :
+	    khttpd_location_type_create_location(location_out, server, path,
+		output, input_prop_spec, input,
+		&khttpd_file_ops, location_data));
 }
 
 static int

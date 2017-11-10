@@ -64,8 +64,9 @@
 
 #define KHTTPD_CTRL_VERSION "1"
 #define KHTTPD_CTRL_PATH_PREFIX "/sys/khttpd/" KHTTPD_CTRL_VERSION "/"
-#define KHTTPD_CTRL_PATH_SERVERS KHTTPD_CTRL_PATH_PREFIX "servers"
+#define KHTTPD_CTRL_PATH_REWRITERS KHTTPD_CTRL_PATH_PREFIX "rewriters"
 #define KHTTPD_CTRL_PATH_PORTS KHTTPD_CTRL_PATH_PREFIX "ports"
+#define KHTTPD_CTRL_PATH_SERVERS KHTTPD_CTRL_PATH_PREFIX "servers"
 #define KHTTPD_CTRL_PATH_LOCATIONS KHTTPD_CTRL_PATH_PREFIX "locations"
 
 #ifndef KHTTPD_CTRL_MAX_JSON_DEPTH
@@ -248,7 +249,7 @@ khttpd_ctrl_options_asterisc(struct khttpd_exchange *exchange)
 	sbuf_delete(&sbuf);
 }
 
-static int
+int
 khttpd_ctrl_parse_json(struct khttpd_json **value_out,
     struct khttpd_mbuf_json *response, struct mbuf *input)
 {
@@ -932,8 +933,10 @@ khttpd_ctrl_get_leaf(struct khttpd_exchange *exchange)
 
 	KHTTPD_ENTRY("khttpd_ctrl_get_leaf(%p)", exchange);
 
-	if (khttpd_uuid_parse(khttpd_exchange_suffix(exchange), uuid) != 0)
+	if (khttpd_uuid_parse(khttpd_exchange_suffix(exchange), uuid) != 0) {
+		KHTTPD_BRANCH("%s khttpd_uuid_parse failure", __func__);
 		goto not_found;
+	}
 
 	node = khttpd_exchange_location(exchange);
 	type = khttpd_location_data(node);
@@ -942,11 +945,13 @@ khttpd_ctrl_get_leaf(struct khttpd_exchange *exchange)
 
 	leaf = khttpd_obj_type_lookup(type, uuid);
 	if (leaf == NULL) {
+		KHTTPD_BRANCH("%s leaf == NULL", __func__);
 		sx_sunlock(&khttpd_ctrl_lock);
 		goto not_found;
 	}
 
 	object = leaf->object;
+	khttpd_mbuf_json_new(&response);
 	status = type->get(object, &response);
 
 	sx_sunlock(&khttpd_ctrl_lock);
@@ -1039,8 +1044,10 @@ khttpd_ctrl_json_io_end(struct khttpd_exchange *exchange, void *arg)
 
 	json_io_data = arg;
 
-	if (khttpd_uuid_parse(khttpd_exchange_suffix(exchange), uuid) != 0)
+	if (khttpd_uuid_parse(khttpd_exchange_suffix(exchange), uuid) != 0) {
+		KHTTPD_BRANCH("%s khttpd_uuid_parse failure", __func__);
 		goto not_found;
+	}
 
 	node = khttpd_exchange_location(exchange);
 	type = khttpd_location_data(node);
@@ -1049,6 +1056,7 @@ khttpd_ctrl_json_io_end(struct khttpd_exchange *exchange, void *arg)
 
 	leaf = khttpd_obj_type_lookup(type, uuid);
 	if (leaf == NULL) {
+		KHTTPD_BRANCH("%s leaf == NULL", __func__);
 		sx_xunlock(&khttpd_ctrl_lock);
 		goto not_found;
 	}
@@ -1310,6 +1318,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 
 	error = khttpd_uuid_parse(suffix, uuid);
 	if (error != 0) {
+		KHTTPD_BRANCH("%s khttpd_uuid_parse %d", __func__, error);
 		status = KHTTPD_STATUS_NOT_FOUND;
 		khttpd_webapi_set_problem(&response, status, NULL, NULL);
 		goto respond;
@@ -1319,6 +1328,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 
 	leaf = khttpd_obj_type_lookup(type, uuid);
 	if (leaf == NULL) {
+		KHTTPD_BRANCH("%s leaf==NULL", __func__);
 		sx_xunlock(&khttpd_ctrl_lock);
 		status = KHTTPD_STATUS_NOT_FOUND;
 		khttpd_webapi_set_problem(&response, status, NULL, NULL);
@@ -1360,9 +1370,8 @@ static const char *
 khttpd_ctrl_protocol_name(int protocol)
 {
 
-	return (protocol == 0 || sizeof(khttpd_ctrl_protocol_table) /
-	    sizeof(khttpd_ctrl_protocol_table[0]) < protocol ? NULL :
-	    khttpd_ctrl_protocol_table[protocol + 1]);
+	return (protocol < 0 || KHTTPD_CTRL_PROTOCOL_END <= protocol ? NULL :
+	    khttpd_ctrl_protocol_table[protocol]);
 }
 
 static struct khttpd_location_type_slist *
@@ -1389,6 +1398,56 @@ khttpd_location_type_find(const char *name)
 	return (ptr);
 }
 
+int
+khttpd_location_type_create_location(struct khttpd_location **location_out,
+    struct khttpd_server *server, const char *path,
+    struct khttpd_mbuf_json *output,
+    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_json *input, struct khttpd_location_ops *ops, void *arg)
+{
+	struct khttpd_location *location;
+	int error, status;
+
+	error = 0;
+	location = khttpd_location_new(&error, server, path, ops, arg);
+	if (error == 0) {
+		status = KHTTPD_STATUS_OK;
+		*location_out = location;
+	} else {
+		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
+		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_webapi_set_problem_errno(output, error);
+		khttpd_webapi_set_problem_detail(output,
+		    "location routing failure");
+		khttpd_webapi_set_problem_property(output, input_prop_spec);
+	}
+
+	return (status);
+}
+
+static int
+khttpd_location_type_default_delete(struct khttpd_location *location,
+    struct khttpd_mbuf_json *output)
+{
+
+	return (KHTTPD_STATUS_OK);
+}
+
+static void
+khttpd_location_type_default_get(struct khttpd_location *location,
+    struct khttpd_mbuf_json *output)
+{
+}
+
+static int
+khttpd_location_type_default_put(struct khttpd_location *location,
+    struct khttpd_mbuf_json *output,
+    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+{
+
+	return (KHTTPD_STATUS_OK);
+}
+
 void
 khttpd_location_type_register(const char *name,
     khttpd_ctrl_location_create_fn_t create,
@@ -1400,6 +1459,12 @@ khttpd_location_type_register(const char *name,
 
 	KASSERT(khttpd_init_get_phase() == KHTTPD_INIT_PHASE_RUN,
 	    ("khttpd_init_get_phase()=%d", khttpd_init_get_phase()));
+
+	if (create == NULL) {
+		log(LOG_ERR, "khttpd: parameter 'create' given to %s is NULL",
+		    __func__);
+		return;
+	}
 
 	sx_xlock(&khttpd_ctrl_lock);
 
@@ -1418,9 +1483,10 @@ khttpd_location_type_register(const char *name,
 	bzero(ptr, sizeof(*ptr));
 	ptr->name = name;
 	ptr->create = create;
-	ptr->delete = delete;
-	ptr->get = get;
-	ptr->put = put;
+	ptr->delete = delete != NULL ? delete :
+	    khttpd_location_type_default_delete;
+	ptr->get = get != NULL ? get : khttpd_location_type_default_get;
+	ptr->put = put != NULL ? put : khttpd_location_type_default_put;
 
 	SLIST_INSERT_HEAD(head, ptr, slink);
 
@@ -1509,6 +1575,9 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 	const char *type_str, *path_str;
 	int error, fd, status;
 
+	KHTTPD_ENTRY("%s(,%p,%s,%p)", __func__, output,
+	    khttpd_webapi_ktr_print_property(input_prop_spec), input);
+
 	if (khttpd_json_type(input) != KHTTPD_JSON_OBJECT) {
 		khttpd_webapi_set_wrong_type_problem(output);
 		khttpd_webapi_set_problem_property(output, input_prop_spec);
@@ -1517,7 +1586,7 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 
 	status = khttpd_webapi_get_string_property(&type_str, "type",
 	    input_prop_spec, input, output, FALSE);
-	if (KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
 	prop_spec.link = input_prop_spec;
@@ -1531,7 +1600,7 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 
 	status = khttpd_webapi_get_string_property(&path_str, "path",
 	    input_prop_spec, input, output, FALSE);
-	if (KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
 	prop_spec.name = "path";
@@ -1595,7 +1664,7 @@ khttpd_ctrl_port_release(void *object)
 }
 
 static int
-khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
+khttpd_ctrl_port_get_index(void *object, struct khttpd_mbuf_json *output)
 {
 	struct khttpd_ctrl_port_data *port_data;
 	struct khttpd_port *port;
@@ -1606,13 +1675,25 @@ khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
 	port = object;
 	port_data = khttpd_costruct_get(port, khttpd_ctrl_port_data_key);
 
-	khttpd_mbuf_json_object_begin(output);
 	khttpd_obj_type_put_id_property(&khttpd_ctrl_ports, object, output);
+	khttpd_mbuf_json_property(output, "address");
 	khttpd_mbuf_json_sockaddr(output, (struct sockaddr *)&port_data->addr);
 	proto_name = khttpd_ctrl_protocol_name(port_data->protocol);
 	if (proto_name != NULL)
 		khttpd_mbuf_json_property_format(output, "protocol", TRUE,
 		    "%s", proto_name);
+
+	return (KHTTPD_STATUS_OK);
+}
+
+static int
+khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
+{
+
+	sx_assert(&khttpd_ctrl_lock, SA_LOCKED);
+
+	khttpd_mbuf_json_object_begin(output);
+	khttpd_ctrl_port_get_index(object, output);
 	khttpd_mbuf_json_object_end(output);
 
 	return (KHTTPD_STATUS_OK);
@@ -1625,6 +1706,7 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	struct sockaddr_storage addr;
 	struct khttpd_webapi_property prop_spec;
 	struct khttpd_ctrl_port_data *port_data;
+	struct khttpd_json *address_j;
 	struct khttpd_port *port;
 	const char *detail, *protocol;
 	int protocol_id;
@@ -1652,9 +1734,15 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
+	status = khttpd_webapi_get_object_property(&address_j, "address",
+	    input_prop_spec, input, output, FALSE);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		return (status);
+
+	prop_spec.name = "address";
 	bzero(&addr, sizeof(addr));
 	status = khttpd_webapi_get_sockaddr_properties
-	    ((struct sockaddr *)&addr, sizeof(addr), input_prop_spec, input,
+	    ((struct sockaddr *)&addr, sizeof(addr), &prop_spec, address_j,
 		output);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
@@ -2315,6 +2403,7 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	struct khttpd_webapi_property prop_spec;
 	struct khttpd_location_type *type;
 	struct khttpd_location *location;
+	struct khttpd_ctrl_location_data *location_data;
 	struct khttpd_server *server;
 	const char *path;
 	void *obj;
@@ -2342,10 +2431,13 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 
 	status = type->create(&location, server, path, output, input_prop_spec,
 	    input);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-		return (status);
 
-	*(void **)object_out = location;
+	if (KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		location_data = khttpd_costruct_get(location,
+		    khttpd_ctrl_location_data_key);
+		location_data->type = type;
+		*(void **)object_out = location;
+	}
 
 	return (status);
 }
@@ -2481,6 +2573,9 @@ khttpd_ctrl_rewriter_modify(struct khttpd_rewriter *rewriter,
 	const char *str1;
 	int i, n, status;
 
+	KHTTPD_ENTRY("%s(%p,,%s,%p)", __func__, rewriter, output,
+	    khttpd_webapi_ktr_print_property(input_prop_spec), input);
+
 	prop_spec.link = NULL;
 	prop_spec.name = "rules";
 	rules_j = khttpd_json_object_get(input, "rules");
@@ -2506,9 +2601,6 @@ khttpd_ctrl_rewriter_modify(struct khttpd_rewriter *rewriter,
 				break;
 		}
 		sbuf_delete(&sbuf);
-
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			return (status);
 	}
 
 	status = khttpd_webapi_get_string_property(&str1, "default", NULL,
@@ -2610,6 +2702,9 @@ khttpd_ctrl_clear(void)
 	khttpd_uuid_new(uuid);
 	khttpd_obj_type_show_obj(&khttpd_ctrl_servers,
 	    khttpd_ctrl_server, uuid);
+	khttpd_uuid_new(uuid);
+	khttpd_obj_type_show_obj(&khttpd_ctrl_locations,
+	    khttpd_ctrl_rewriters.node, uuid);
 	khttpd_uuid_new(uuid);
 	khttpd_obj_type_show_obj(&khttpd_ctrl_locations,
 	    khttpd_ctrl_ports.node, uuid);
@@ -2830,7 +2925,7 @@ khttpd_ctrl_register_costruct(void)
 	    khttpd_port_costruct_info, NULL, khttpd_ctrl_port_hide,
 	    khttpd_ctrl_port_acquire, khttpd_ctrl_port_release,
 	    khttpd_ctrl_port_create, khttpd_ctrl_null_obj_fn,
-	    khttpd_ctrl_port_get,
+	    khttpd_ctrl_port_get_index,
 	    khttpd_ctrl_port_get, khttpd_ctrl_port_put);
 
 	khttpd_obj_type_new(&khttpd_ctrl_servers, "server",
@@ -2909,11 +3004,14 @@ khttpd_ctrl_release_all(void)
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
-	khttpd_location_release(khttpd_ctrl_servers.node);
-	khttpd_ctrl_servers.node = NULL;
+	khttpd_location_release(khttpd_ctrl_rewriters.node);
+	khttpd_ctrl_rewriters.node = NULL;
 
 	khttpd_location_release(khttpd_ctrl_ports.node);
 	khttpd_ctrl_ports.node = NULL;
+
+	khttpd_location_release(khttpd_ctrl_servers.node);
+	khttpd_ctrl_servers.node = NULL;
 
 	khttpd_location_release(khttpd_ctrl_locations.node);
 	khttpd_ctrl_locations.node = NULL;
@@ -2932,6 +3030,8 @@ khttpd_ctrl_run(void)
 
 	sx_xlock(&khttpd_ctrl_lock);
 
+	KASSERT(LIST_EMPTY(&khttpd_ctrl_rewriters.leafs),
+	    ("rewriter leak is detected"));
 	KASSERT(LIST_EMPTY(&khttpd_ctrl_ports.leafs),
 	    ("port leak is detected"));
 	KASSERT(LIST_EMPTY(&khttpd_ctrl_servers.leafs),
@@ -2945,6 +3045,11 @@ khttpd_ctrl_run(void)
 		    "(error: %d)", error);
 		goto quit;
 	}
+
+	error = khttpd_obj_type_mount(&khttpd_ctrl_rewriters, server,
+	    KHTTPD_CTRL_PATH_REWRITERS);
+	if (error != 0)
+		goto quit;
 
 	error = khttpd_obj_type_mount(&khttpd_ctrl_ports, server,
 	    KHTTPD_CTRL_PATH_PORTS);

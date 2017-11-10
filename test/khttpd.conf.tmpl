@@ -16,15 +16,18 @@
 	},
 	{
 	    "id": "52a7e22a-b94e-11e7-87c2-08002744012d",
-	    "default": "utf-8"
+	    "rules": [
+	    ]
 	}
     ],
     "ports": [
 	{
 	    "id": "68a09408-b94d-11e7-87c2-08002744012d",
             "protocol": "http",
-	    "family": "inet",
-	    "port": 8080
+	    "address": {
+		"family": "inet",
+		"port": 8080
+	    }
 	}
     ],
     "servers": [
@@ -33,8 +36,8 @@
 	    "name": "192.168.56.3",
 	    "aliases": [
 		{
-			"type": "exact",
-			"alias": "roar"
+		    "type": "exact",
+		    "alias": "roar"
 		}
 	    ],
 	    "hasConfigurator": true,
@@ -56,6 +59,12 @@
 	    "documentRoot": "$PROJECT/docroot",
 	    "mimeTypeRules": "dc880521-b94d-11e7-87c2-08002744012d",
 	    "charsetRules": "52a7e22a-b94e-11e7-87c2-08002744012d"
+	},
+	{
+	    "id": "b46c956b-c0e1-11e7-aa49-080027ad1c5f",
+	    "type": "khttpd_sysctl",
+	    "server": "6e6d5fcf-b94d-11e7-87c2-08002744012d",
+	    "path": "/sys/sysctl/"
 	}
     ]
 }

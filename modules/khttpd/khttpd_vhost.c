@@ -240,6 +240,7 @@ khttpd_vhost_copy_server_name(struct khttpd_server *server)
 				bufp += strlen(bufp) + 1;
 				result->exact_aliases[i] = bufp;
 			}
+			rw_runlock(&khttpd_vhost_lock);
 			break;
 		}
 		rw_runlock(&khttpd_vhost_lock);

@@ -1,12 +1,45 @@
+- ktr flushing should be stopped if write or fdatasync fails.
+
+- access.log should be flushed explicitly with fdatasync().
+
+- Balance between frequent flush and buffering of access logs.
+
+- Move and rename khttpd_ctrl_parse_json to khttpd_webapi.
+
+- Merge overhaul_1 to master.
+
+- Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
+
 - struct khttpd_exchange_ops::{get,put,end} should be renamed.  'end' is not
   the end of the exchange, but the request.  This is difficult to know from the
   name.  Also the meaning of 'get' and 'put' are easily misunderstood as
   opposit.
 
-- Creating a location whose name is identical to an existing location should
-  shadow the existing location.  This is to prevent a slow releasing of a
-  location from affecting the re-initialization of the server.
+- Rewrite khttpd_file so that the file descriptor of the stream is not
+  necessary.
 
-- make khttpd_test multi-module aware.
+- Add support for basic authentication
+
+- make khttpd_test multi-module aware
+
+- configuration dump/restore API
+
+- Server configuration UI
+
+- TLS
+
+- CGI etc.
 
 - More scalable object lifecycle management than reference counting.
+
+- Optimize file/cache serving performance
+
+- Servers should have two locations trees.  One is effective tree and the
+  other is the target of various update.  The effective tree should be
+  rewritten (swapped) by the other tree atomically.  In-fligh sessions
+  should not be affected by the udpate.
+
+- (obsolete) Creating a location whose name is identical to an existing
+  location should shadow the existing location.  This is to prevent a slow
+  releasing of a location from affecting the re-initialization of the
+  server.
