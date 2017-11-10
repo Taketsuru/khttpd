@@ -97,7 +97,7 @@ khttpd_log_choke(struct khttpd_log *log)
 		} else {
 			log->busy = TRUE;
 			mtx_unlock(&log->lock);
-			khttpd_job_schedule(log->job);
+			khttpd_job_schedule(log->job, 0);
 			mtx_lock(&log->lock);
 		}
 
@@ -221,7 +221,7 @@ khttpd_log_timeout(void *arg)
 	mtx_unlock(&log->lock);
 
 	if (need_scheduling)
-		khttpd_job_schedule(log->job);
+		khttpd_job_schedule(log->job, KHTTPD_JOB_FLAGS_NOWAIT);
 }
 
 void
@@ -264,7 +264,7 @@ khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 	mtx_unlock(&log->lock);
 
 	if (need_scheduling)
-		khttpd_job_schedule(log->job);
+		khttpd_job_schedule(log->job, 0);
 }
 
 static void

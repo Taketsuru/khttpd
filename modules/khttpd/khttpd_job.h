@@ -31,11 +31,17 @@
 
 struct khttpd_job;
 
+enum {
+	KHTTPD_JOB_FLAGS_NOWAIT = 1<<0,
+
+	KHTTPD_JOB_FLAGS_MASK = KHTTPD_JOB_FLAGS_NOWAIT
+};
+
 typedef void (*khttpd_job_fn_t)(void *arg);
 
 struct khttpd_job *khttpd_job_new(khttpd_job_fn_t handler, void *arg,
     struct khttpd_job *sibling);
-void khttpd_job_schedule(struct khttpd_job *job);
+void khttpd_job_schedule(struct khttpd_job *job, int flags);
 void khttpd_job_delete(struct khttpd_job *job);
 
 #endif	/* _KERNEL */

@@ -815,7 +815,7 @@ khttpd_socket_handle_timeout(void *arg)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-	khttpd_job_schedule(arg);
+	khttpd_job_schedule(arg, KHTTPD_JOB_FLAGS_NOWAIT);
 }
 
 static void

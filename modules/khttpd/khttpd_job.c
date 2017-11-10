@@ -145,7 +145,7 @@ khttpd_job_spawn_and_unlock(struct khttpd_job_queue *queue)
 }
 
 static void
-khttpd_job_kick_and_unlock(struct khttpd_job_queue *queue)
+khttpd_job_kick_and_unlock(struct khttpd_job_queue *queue, int flags)
 {
 	struct khttpd_job_worker *worker;
 
@@ -159,7 +159,8 @@ khttpd_job_kick_and_unlock(struct khttpd_job_queue *queue)
 	if ((worker = TAILQ_FIRST(&queue->idle_workers)) != NULL)
 		wakeup(worker);
 
-	else if (queue->worker_count < queue->worker_count_max) {
+	else if ((flags & KHTTPD_JOB_FLAGS_NOWAIT) == 0 &&
+	    queue->worker_count < queue->worker_count_max) {
 		khttpd_job_spawn_and_unlock(queue);
 		return;
 	}
@@ -199,7 +200,7 @@ khttpd_job_worker_main(void *arg)
 
 		STAILQ_REMOVE_HEAD(&queue->jobs, link);
 		if (!STAILQ_EMPTY(&queue->jobs))
-			khttpd_job_kick_and_unlock(queue);
+			khttpd_job_kick_and_unlock(queue, 0);
 		else
 			mtx_unlock(&queue->lock);
 
@@ -246,25 +247,23 @@ khttpd_job_new(khttpd_job_fn_t handler, void *arg, struct khttpd_job *sibling)
 	return (job);
 }
 
-/*
- * This function doesn't sleep in it.  This guarantee is necessary because
- * callout functions of khttpd_port calls this function.
- *
- * BUG
- *
- * Even though this function is expected to be non-sleeping, it does sleep
- * when it try to spawn a worker thread.  FIX IT!
- */
+/* This function doesn't sleep if KHTTPD_JOB_FLAGS_NOWAIT is set. */
 void
-khttpd_job_schedule(struct khttpd_job *job)
+khttpd_job_schedule(struct khttpd_job *job, int flags)
 {
 	struct khttpd_job_queue *queue;
+
+	if ((flags & ~KHTTPD_JOB_FLAGS_MASK) != 0) {
+		log(LOG_WARNING, "khttpd: invalid flag %#x was given to %s",
+		    flags, __func__);
+		flags &= KHTTPD_JOB_FLAGS_MASK;
+	}
 
 	queue = job->queue;
 	mtx_lock(&queue->lock);
 
 	STAILQ_INSERT_TAIL(&queue->jobs, job, link);
-	khttpd_job_kick_and_unlock(queue);
+	khttpd_job_kick_and_unlock(queue, flags);
 }
 
 void
