@@ -52,6 +52,7 @@
 #include "khttpd_malloc.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_method.h"
+#include "khttpd_webapi.h"
 
 RB_HEAD(khttpd_location_tree, khttpd_location);
 TAILQ_HEAD(khttpd_location_list, khttpd_location);

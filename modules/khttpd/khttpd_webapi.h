@@ -30,6 +30,7 @@
 #ifdef _KERNEL
 
 #include <sys/types.h>
+#include <machine/stdarg.h>
 #include <netinet/in.h>
 
 struct sbuf;
@@ -77,5 +78,13 @@ int khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 int khttpd_webapi_check_property_whitelist(struct khttpd_mbuf_json *output,
     struct khttpd_webapi_property *property, struct khttpd_json *input,
     const char **names, int num_names);
+
+void khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry);
+void khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry,
+	int severity);
+void khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry,
+    int severity, const char *description_fmt, ...);
+void khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry,
+    int severity, const char *description_fmt, va_list args);
 
 #endif	/* ifdef _KERNEL */

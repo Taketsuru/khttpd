@@ -42,6 +42,7 @@
 
 #include "khttpd_json.h"
 #include "khttpd_ktr.h"
+#include "khttpd_log.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_status_code.h"
 #include "khttpd_string.h"
@@ -682,4 +683,46 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 	}
 
 	return (KHTTPD_STATUS_OK);
+}
+
+
+void
+khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry)
+{
+	struct timeval tv;
+
+	microtime(&tv);
+	khttpd_mbuf_json_property_format(entry, "timestamp",
+		FALSE, "%ld.%06ld", tv.tv_sec, tv.tv_usec);
+}
+
+void
+khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry, int severity)
+{
+
+	khttpd_mbuf_json_property_cstr(entry, "severity", TRUE,
+		khttpd_log_get_severity_label(severity));
+}
+
+void
+khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry, int severity,
+    const char *description_fmt, ...)
+{
+	va_list args;
+
+	va_start(args, description_fmt);
+	khttpd_log_vput_error_properties(entry, severity, description_fmt,
+	    args);
+	va_end(args);
+}
+
+void
+khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry, int severity,
+    const char *description_fmt, va_list args)
+{
+
+	khttpd_log_put_timestamp_property(entry);
+	khttpd_log_put_severity_property(entry, severity);
+	khttpd_mbuf_json_property_format(entry, "description", TRUE,
+	    description_fmt, args);
 }

@@ -28,12 +28,10 @@
 #include "khttpd_log.h"
 
 #include <sys/param.h>
-#include <sys/ctype.h>
-#include <sys/refcount.h>
+#include <sys/limits.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/mbuf.h>
-#include <sys/sbuf.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/kernel.h>
@@ -127,6 +125,9 @@ khttpd_log_new(void)
 	struct khttpd_log *log;
 
 	KHTTPD_ENTRY("%s()", __func__);
+	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
+	    __func__);
+
 	log = khttpd_malloc(sizeof(*log));
 
 	mtx_init(&log->lock, "log", NULL, MTX_DEF | MTX_NEW);
@@ -134,6 +135,7 @@ khttpd_log_new(void)
 	callout_init_mtx(&log->flush_callout, &log->lock,
 	    CALLOUT_RETURNUNLOCKED);
 	log->job = khttpd_job_new(khttpd_log_handle_job, log, NULL);
+	log->name = NULL;
 	log->fd = -1;
 	log->choking = log->busy = FALSE;
 
@@ -145,6 +147,10 @@ khttpd_log_delete(struct khttpd_log *log)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, log);
+
+	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
+	    __func__);
+
 	if (log == NULL)
 		return;
 
@@ -168,6 +174,7 @@ khttpd_log_delete(struct khttpd_log *log)
 
 	mtx_destroy(&log->lock);
 
+	khttpd_free(log->name);
 	khttpd_free(log);
 }
 
@@ -181,6 +188,10 @@ khttpd_log_set_fd(struct khttpd_log *log, int fd)
 	int old_fd;
 
 	KHTTPD_ENTRY("%s(%p,%d)", __func__, log, fd);
+
+	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
+	    __func__);
+
 	khttpd_log_choke(log);
 
 	old_fd = log->fd;
@@ -248,16 +259,14 @@ khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 		return;
 	}
 
-	need_scheduling = !log->busy && 
-	    KHTTPD_LOG_LIMIT <= mbufq_len(&log->queue);
-	if (need_scheduling)
-		log->busy = TRUE;
-
 	mbufq_enqueue(&log->queue, m);
 
-	if (need_scheduling)
+	need_scheduling = !log->busy && 
+	    KHTTPD_LOG_LIMIT <= mbufq_len(&log->queue);
+	if (need_scheduling) {
+		log->busy = TRUE;
 		callout_stop(&log->flush_callout);
-	else
+	} else
 		callout_reset_sbt(&log->flush_callout, khttpd_log_flush_time,
 		    SBT_1S, khttpd_log_timeout, log, 0);
 
@@ -267,9 +276,36 @@ khttpd_log_put(struct khttpd_log *log, struct mbuf *m)
 		khttpd_job_schedule(log->job, 0);
 }
 
+void
+khttpd_log_set_name(struct khttpd_log *log, const char *name)
+{
+	char *old_name, *new_name;
+
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, log, khttpd_ktr_printf("%s", name));
+
+	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s is called",
+	    __func__);
+	new_name = khttpd_strdup(name);
+
+	mtx_lock(&log->lock);
+	old_name = log->name;
+	log->name = new_name;
+	mtx_unlock(&log->lock);
+
+	khttpd_free(old_name);
+}
+
+const char *
+khttpd_log_get_name(struct khttpd_log *log)
+{
+
+	return (log->name);
+}
+
 static void
 khttpd_log_handle_job(void *arg)
 {
+	char namebuf[64];
 	struct iovec iovs[64];
 	struct uio auio;
 	struct bintime bt;
@@ -289,7 +325,7 @@ khttpd_log_handle_job(void *arg)
 
 	mtx_lock(&subject->lock);
 
-	callout_stop(&subject->flush_callout);
+	KASSERT(subject->busy, ("log %p is not busy", log));
 
 	/* khttpd_log::fd doesn't change while the log is busy */
 	fd = subject->fd;
@@ -324,9 +360,7 @@ khttpd_log_handle_job(void *arg)
 			m_freem(m);
 		}
 
-		if (error == 0)
-			error = kern_fsync(td, fd, FALSE);
-		else {
+		if (error != 0) {
 			bintime(&bt);
 			current = bttosbt(bt);
 		}
@@ -347,12 +381,18 @@ khttpd_log_handle_job(void *arg)
 	else if (!subject->silence || subject->silence_till <= current) {
 		warn = subject->silence = TRUE;
 		subject->silence_till = current + khttpd_log_silence_time;
+		strlcpy(namebuf, subject->name == NULL ? "<anon>" :
+		    subject->name, sizeof(namebuf));
 	}
 
 	mtx_unlock(&subject->lock);
 
+	if (error == 0)
+		kern_fsync(td, fd, FALSE);
+
 	if (warn)
-		log(LOG_WARNING, "khttpd: log I/O error (error: %d)", error);
+		log(LOG_WARNING, "khttpd: error on log \"%s\" (error: %d)",
+		    namebuf, error);
 }
 
 const char *
@@ -365,43 +405,3 @@ khttpd_log_get_severity_label(int severity)
 	return (khttpd_log_severities[severity]);
 }
 
-void
-khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry)
-{
-	struct timeval tv;
-
-	microtime(&tv);
-	khttpd_mbuf_json_property_format(entry, "timestamp",
-		FALSE, "%ld.%06ld", tv.tv_sec, tv.tv_usec);
-}
-
-void
-khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry, int severity)
-{
-
-	khttpd_mbuf_json_property_cstr(entry, "severity", TRUE,
-		khttpd_log_get_severity_label(severity));
-}
-
-void
-khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry, int severity,
-    const char *description_fmt, ...)
-{
-	va_list args;
-
-	va_start(args, description_fmt);
-	khttpd_log_vput_error_properties(entry, severity, description_fmt,
-	    args);
-	va_end(args);
-}
-
-void
-khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry, int severity,
-    const char *description_fmt, va_list args)
-{
-
-	khttpd_log_put_timestamp_property(entry);
-	khttpd_log_put_severity_property(entry, severity);
-	khttpd_mbuf_json_property_format(entry, "description", TRUE,
-	    description_fmt, args);
-}

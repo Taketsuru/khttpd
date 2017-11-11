@@ -1628,6 +1628,7 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 
 	log = khttpd_log_new();
 	khttpd_log_set_fd(log, fd);
+	khttpd_log_set_name(log, path_str);
 
 	*log_out = log;
 

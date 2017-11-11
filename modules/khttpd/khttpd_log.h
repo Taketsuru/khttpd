@@ -27,10 +27,11 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/param.h>
-#include <machine/stdarg.h>
 
 struct mbuf;
 struct khttpd_log;
@@ -45,13 +46,3 @@ void khttpd_log_set_name(struct khttpd_log *log, const char *name);
 const char*khttpd_log_get_name(struct khttpd_log *log);
 
 const char *khttpd_log_get_severity_label(int severity);
-
-void khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry);
-void khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry,
-	int severity);
-void khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry,
-    int severity, const char *description_fmt, ...);
-void khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry,
-    int severity, const char *description_fmt, va_list args);
-
-#endif	/* _KERNEL */
