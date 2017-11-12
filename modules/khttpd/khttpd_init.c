@@ -94,6 +94,36 @@ khttpd_init_get_phase(void)
 int
 khttpd_init_run(void (*fn)(int))
 {
+
+	return (khttpd_init_run_focusing(fn, NULL, 0));
+}
+
+static boolean_t
+khttpd_init_may_run(struct khttpd_init *init, const char **files, int nfiles)
+{
+	size_t iflen, flen;
+	int i;
+
+	KHTTPD_ENTRY("%s(%p(%s),%p,%d)", __func__, init, init->file, files,
+	    nfiles);
+
+	if (files == NULL)
+		return (TRUE);
+
+	iflen = strlen(init->file);
+	for (i = 0; i < nfiles; ++i) {
+		flen = strlen(files[i]);
+		if (flen <= iflen &&
+		    memcmp(init->file + iflen - flen, files, flen) == 0)
+			return (TRUE);
+	}
+
+	return (FALSE);
+}
+
+int
+khttpd_init_run_focusing(void (*fn)(int), const char **files, int nfiles)
+{
 	static struct khttpd_init marker = {
 		.name = "<ready>",
 		.phase = INT_MAX
@@ -103,7 +133,7 @@ khttpd_init_run(void (*fn)(int))
 	struct khttpd_init_node **nodes;
 	int error, gen, i;
 
-	KHTTPD_ENTRY("khttpd_init_run(%p)", fn);
+	KHTTPD_ENTRY("khttpd_init_run_focusing(%p,%p,%d)", fn, files, nfiles);
 
 	td = curthread;
 	error = 0;
@@ -128,6 +158,8 @@ khttpd_init_run(void (*fn)(int))
 		init = nodes[i]->init;
 		if (init->init == NULL)
 			continue;
+		if (!khttpd_init_may_run(init, files, nfiles))
+			continue;
 
 		khttpd_init_current = init;
 		sx_xunlock(&khttpd_init_lock);
@@ -151,6 +183,8 @@ khttpd_init_run(void (*fn)(int))
 	for (; 0 < i; --i) {
 		init = nodes[i - 1]->init;
 		if (init->fini == NULL)
+			continue;
+		if (!khttpd_init_may_run(init, files, nfiles))
 			continue;
 
 		khttpd_init_current = init;
@@ -470,7 +504,7 @@ khttpd_init_wait_load_completion(struct module *mod)
 			break;
 
 		sx_sleep(&khttpd_init_files, &khttpd_init_lock, 0, 
-		    "khttpd-load-wait", 0);
+		    "initload", 0);
 	}
 
 	sx_sunlock(&khttpd_init_lock);

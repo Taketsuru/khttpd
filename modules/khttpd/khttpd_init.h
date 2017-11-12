@@ -56,6 +56,7 @@ typedef void (*khttpd_fini_fn_t)(void);
 
 struct khttpd_init {
 	const char		*name;
+	const char		*file;
 	khttpd_init_fn_t	init;
 	khttpd_fini_fn_t	fini;
 	int			phase;
@@ -79,7 +80,7 @@ struct khttpd_init {
 
 #define KHTTPD_INIT(name, init, fini, phase, ...)			\
 	static struct khttpd_init __CONCAT(khttpd_init_, __LINE__) = {	\
-		#name, (init), (fini), (phase), {			\
+		#name, __FILE__, (init), (fini), (phase), {		\
 			__CONCAT(KHTTPD_INIT_DEP_,			\
 			    KHTTPD_INIT_LEN(dum, ##__VA_ARGS__))(__VA_ARGS__) \
 		}							\
@@ -91,6 +92,7 @@ EVENTHANDLER_DECLARE(khttpd_init_shutdown, khttpd_init_shutdown_fn_t);
 
 int khttpd_init_get_phase(void);
 int khttpd_init_run(void (*fn)(int));
+int khttpd_init_run_focusing(void (*fn)(int), const char **files, int nfiles);
 int khttpd_init_quiesce(void);
 void khttpd_init_unload(struct module *);
 void khttpd_init_wait_load_completion(struct module *);
