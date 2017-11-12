@@ -29,6 +29,7 @@
 
 #include <sys/types.h>
 #include <sys/sbuf.h>
+#include <sys/mman.h>
 
 #include <err.h>
 #include <fcntl.h>
@@ -38,29 +39,42 @@
 #include <sysexits.h>
 #include <unistd.h>
 
+#ifndef KHTTPD_TEST_REPORT_PATH
+#define KHTTPD_TEST_REPORT_PATH "report.xml"
+#endif
+
+#ifndef KHTTPD_TEST_REPORT_SIZE_MAX
+#define KHTTPD_TEST_REPORT_SIZE_MAX	(256ul*1024*1024)
+#endif
+
 struct command {
 	const char *name;
-	void (*handler)(int argc, char **argv, int *index);
+	void (*handler)(int argc, char **argv);
 };
 
-static void do_load_command(int argc, char **argv, int *index);
-static void do_stop_command(int argc, char **argv, int *index);
+static void do_load_command(int argc, char **argv);
+static void do_test_command(int argc, char **argv);
+static void do_stop_command(int argc, char **argv);
 
 static struct command command_table[] = {
 	{
-		.name = "load",
-		.handler = do_load_command
-	},
-	{
 		.name = "stop",
 		.handler = do_stop_command
+	},
+	{
+		.name = "test",
+		.handler = do_test_command
+	},
+	{
+		.name = "load",
+		.handler = do_load_command
 	}
 };
 
 static int dev_fd;
 
 static void
-do_load_command(int argc, char **argv, int *index)
+do_load_command(int argc, char **argv)
 {
 	struct sbuf sbuf;
 	struct khttpd_ioctl_start_args ioctl_args;
@@ -70,10 +84,10 @@ do_load_command(int argc, char **argv, int *index)
 	ssize_t rsize;
 	int fd;
 
-	if (argc <= ++*index)
-		err(EX_USAGE, "configuration file name is expected");
+	if (argc <= 1 || 2 < argc)
+		err(EX_USAGE, "usage) %s load file", argv[0]);
 
-	config = argv[*index++];
+	config = argv[2];
 
 	if (strcmp(config, "-") == 0)
 		fd = STDIN_FILENO;
@@ -109,10 +123,60 @@ do_load_command(int argc, char **argv, int *index)
 }
 
 static void
-do_stop_command(int argc, char **argv, int *index)
+do_test_command(int argc, char **argv)
 {
+	struct sbuf sbuf;
+	struct khttpd_ioctl_test_args ioctl_args;
+	void *buf;
+	size_t buf_size;
+	int error, fd, i;
 
-	++*index;
+	sbuf_new(&sbuf, NULL, 0, SBUF_AUTOEXTEND | SBUF_INCLUDENUL);
+	for (i = 2; i < argc; ++i) {
+		if (2 < i)
+			sbuf_putc(&sbuf, ',');
+		sbuf_cat(&sbuf, argv[i]);
+	}
+
+	fd = open(KHTTPD_TEST_REPORT_PATH, O_RDWR | O_TRUNC | O_CREAT, 0666);
+	if (fd == -1)
+		err(EX_CANTCREAT, "failed to create %s",
+		    KHTTPD_TEST_REPORT_PATH);
+
+	error = ftruncate(fd, KHTTPD_TEST_REPORT_SIZE_MAX);
+	if (error == -1)
+		err(EX_IOERR, "failed to write to %s",
+		    KHTTPD_TEST_REPORT_PATH);
+
+	buf = mmap(NULL, KHTTPD_TEST_REPORT_SIZE_MAX, PROT_READ | PROT_WRITE,
+	    MAP_SHARED, fd, 0);
+	if (buf == MAP_FAILED)
+		err(EX_OSERR, "failed to allocate a buffer");
+
+	sbuf_finish(&sbuf);
+	ioctl_args.filter = sbuf_data(&sbuf);
+	ioctl_args.filter_len = sbuf_len(&sbuf);
+	ioctl_args.buf = buf;
+	ioctl_args.buf_size = KHTTPD_TEST_REPORT_SIZE_MAX;
+
+	if (ioctl(dev_fd, KHTTPD_IOC_TEST, &ioctl_args) == -1)
+		err(EX_DATAERR, "failed to run tests");
+
+	sbuf_delete(&sbuf);
+
+	buf_size = ioctl_args.buf_size;
+	if (ioctl_args.buf[buf_size - 1] == '\0')
+		--buf_size;
+
+	munmap(ioctl_args.buf, KHTTPD_TEST_REPORT_SIZE_MAX);
+
+	ftruncate(fd, buf_size);
+	close(fd);
+}
+
+static void
+do_stop_command(int argc, char **argv)
+{
 
 	if (ioctl(dev_fd, KHTTPD_IOC_STOP, 0) == -1)
 		err(EX_DATAERR, "failed to stop the server");
@@ -139,13 +203,11 @@ main(int argc, char **argv)
 	if (dev_fd == -1)
 		err(EX_CONFIG, "Can't find /dev/khttpd.  Is khttpd running?");
 
-	for (i = 1; i < argc; ++i) {
-		cmd = find_command(argv[i]);
-		if (cmd == NULL)
-			err(EX_USAGE, "Unknown command \"%s\"", argv[i]);
+	cmd = find_command(argv[1]);
+	if (cmd == NULL)
+		err(EX_USAGE, "Unknown command \"%s\"", argv[1]);
 
-		cmd->handler(argc, argv, &i);
-	}
+	cmd->handler(argc, argv);
 
 	return (0);
 }

@@ -397,3 +397,12 @@ khttpd_job_deregister_events(void)
 
 KHTTPD_INIT(khttpd_job, khttpd_job_register_events,
     khttpd_job_deregister_events, KHTTPD_INIT_PHASE_REGISTER_EVENTS - 1);
+
+#ifdef KHTTPD_TEST_ENABLE
+
+#ifndef KHTTPD_JOB_TEST_INCLUDED
+#define KHTTPD_JOB_TEST_INCLUDED
+#include "khttpd_job_test.c"
+#endif
+
+#endif

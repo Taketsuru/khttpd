@@ -33,6 +33,8 @@
 #include <sys/queue.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/sbuf.h>
+#include <sys/malloc.h>
 #include <sys/eventhandler.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
@@ -47,8 +49,13 @@
 
 #include "khttpd.h"
 #include "khttpd_init.h"
+#include "khttpd_test.h"
 #include "khttpd_ktr.h"
 #include "khttpd_malloc.h"
+
+#ifndef KHTTPD_MAIN_TEST_FILTER_SIZE_MAX
+#define KHTTPD_MAIN_TEST_FILTER_SIZE_MAX	(1024ul*1024)
+#endif
 
 static int khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td);
@@ -90,6 +97,8 @@ static void
 khttpd_main_command_loop(int error)
 {
 
+	KHTTPD_ENTRY("%s(%d)", __func__, error);
+
 	mtx_lock(&khttpd_main_lock);
 
 	if (error == 0)
@@ -124,6 +133,8 @@ khttpd_main_entrypoint(void *arg)
 	struct thread *td;
 	int error;
 
+	KHTTPD_ENTRY("%s()", __func__);
+
 	td = curthread;
 	khttpd_main_pid = td->td_proc->p_pid;
 	error = khttpd_init_run(khttpd_main_command_loop);
@@ -136,6 +147,8 @@ khttpd_main_shutdown(void *arg)
 {
 	struct proc *p;
 	int state;
+
+	KHTTPD_ENTRY("%s()", __func__);
 
 	mtx_lock(&khttpd_main_lock);
 
@@ -180,6 +193,7 @@ khttpd_main_call(struct khttpd_main_command *cmd)
 	struct proc *p;
 	int error, state;
 
+	KHTTPD_ENTRY("%s(%p)", __func__, cmd);
 	cmd->error = -1;
 
 	mtx_lock(&khttpd_main_lock);
@@ -248,6 +262,8 @@ khttpd_main_register_ioctl(u_long cmd, khttpd_main_ioctl_fn_t handler)
 {
 	struct khttpd_main_ioctl *new_entry, *ptr;
 
+	KHTTPD_ENTRY("%s(%#lx,%p)", __func__, cmd, handler);
+
 	new_entry = khttpd_malloc(sizeof(*new_entry));
 	new_entry->cmd = cmd;
 	new_entry->handler = handler;
@@ -276,6 +292,8 @@ khttpd_main_deregister_ioctl(u_long cmd)
 {
 	struct khttpd_main_ioctl *entry;
 
+	KHTTPD_ENTRY("%s(%#lx)", __func__, cmd);
+
 	mtx_lock(&khttpd_main_lock);
 
 	SLIST_FOREACH(entry, &khttpd_main_ioctls, link)
@@ -295,6 +313,44 @@ khttpd_main_deregister_ioctl(u_long cmd)
 		    cmd);
 }
 
+#ifdef KHTTPD_TEST_ENABLE
+
+static int
+khttpd_main_test(struct khttpd_ioctl_test_args *args)
+{
+	struct sbuf report;
+	char *filter;
+	size_t flen;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, args);
+
+	filter = NULL;
+	sbuf_new(&report, NULL, 0, SBUF_AUTOEXTEND | SBUF_INCLUDENUL);
+
+	flen = MIN(KHTTPD_MAIN_TEST_FILTER_SIZE_MAX, args->filter_len);
+	filter = malloc(flen, M_TEMP, M_WAITOK);
+	error = copyinstr(args->filter, filter, flen, NULL);
+	if (error != 0)
+		goto quit;
+
+	khttpd_test_run(&report, filter);
+
+	sbuf_finish(&report);
+	error = copyout(sbuf_data(&report), args->buf,
+	    MIN(args->buf_size, sbuf_len(&report)));
+
+quit:
+	args->buf_size = sbuf_len(&report);
+
+	free(filter, M_TEMP);
+	sbuf_delete(&report);
+
+	return (error);
+}
+
+#endif	/* ifdef KHTTPD_TEST_ENABLE */
+
 static int
 khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
@@ -302,6 +358,9 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 	struct khttpd_main_ioctl *entry;
 	khttpd_main_ioctl_fn_t fn;
 	static boolean_t loaded;
+	int error;
+
+	KHTTPD_ENTRY("%s(%#lx,%p)", __func__, cmd, data);
 
 	if (!loaded) {
 		khttpd_init_wait_load_completion(khttpd_main_module_self);
@@ -312,8 +371,14 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	case KHTTPD_IOC_STOP:
 		khttpd_main_shutdown(NULL);
-		return (0);
+		error = 0;
+		break;
 
+#ifdef KHTTPD_TEST_ENABLE
+	case KHTTPD_IOC_TEST:
+		error = khttpd_main_test((struct khttpd_ioctl_test_args *)data);
+		break;
+#endif
 	default:
 		mtx_lock(&khttpd_main_lock);
 
@@ -326,14 +391,18 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 		mtx_unlock(&khttpd_main_lock);
 
-		return (fn == NULL ? ENOIOCTL : fn(dev, cmd, data, fflag, td));
+		error = fn == NULL ? ENOIOCTL : fn(dev, cmd, data, fflag, td);
 	}
+
+	return (error);
 }
 
 static int
 khttpd_loader(struct module *m, int what, void *arg)
 {
 	int error;
+
+	KHTTPD_ENTRY("%s(%p,%d,%p)", __func__, m, what, arg);
 
 	switch (what) {
 

@@ -48,25 +48,15 @@
 struct khttpd_test_frame {
 	SLIST_ENTRY(khttpd_test_frame) tf_link;
 	struct _jmp_buf	*tf_jmp_buf;
-	boolean_t	tf_is_target;
 };
 
 SLIST_HEAD(khttpd_test_frame_list, khttpd_test_frame);
 
 struct khttpd_test_thread {
 	struct khttpd_test_frame_list tt_frames;
+	struct khttpd_test_frame tt_bottom;
+	struct khttpd_test_frame *tt_target;
 	struct thread	*tt_thread;
-	int		tt_tid;
-	boolean_t	tt_unwinding;
-};
-
-enum {
-	KHTTPD_TEST_UNSPECIFIED,
-	KHTTPD_TEST_PASS,
-	KHTTPD_TEST_FAIL,
-	KHTTPD_TEST_ERROR,
-	KHTTPD_TEST_SKIP,
-	KHTTPD_TEST_STATUS_END,
 };
 
 struct khttpd_test_result {
@@ -99,8 +89,6 @@ enum {
 
 SET_DECLARE(khttpd_testcase_set, struct khttpd_testcase);
 
-static void khttpd_test_unwind(void) __attribute__ ((noreturn));
-
 static struct sx khttpd_test_lock;
 static struct khttpd_test_result *khttpd_test_results;
 static struct khttpd_test_result *khttpd_test_current;
@@ -120,7 +108,7 @@ static const char *khttpd_test_result_labels[] = {
 
 #ifdef KTR
 static uint64_t khttpd_test_ktr_stime;
-static int khttpd_test_ktr_end;
+static int khttpd_test_ktr_start;
 #endif	/* ifdef KTR */
 
 static int
@@ -170,6 +158,9 @@ khttpd_test_find_thread(struct thread *td)
 	int i, thr_count;
 
 	thr_count = khttpd_test_current->tr_testcase->tc_thr_count;
+	if (thr_count == 0)
+		thr_count = 1;
+
 	for (i = 0; i < thr_count; ++i) {
 		thr = &khttpd_test_threads[i];
 		if (thr->tt_thread == td)
@@ -199,46 +190,24 @@ khttpd_test_dump_ktr(void)
 #ifdef KTR
 	struct ktr_entry entry;
 	struct khttpd_test_thread *tt;
-	uint64_t t, v, d;
-	int end, first, i, n;
-	boolean_t zero_pad;
+	int start, end, i, n;
 
 	n = ktr_entries;
-	first = i = (ktr_idx - 1) & (n - 1);
-	end = khttpd_test_ktr_end;
+	start = i = khttpd_test_ktr_start;
+	end = ktr_idx;
 
-	if (first == end)
-		return;
-
-	do {
+	for (i = start; i != end; i = i == n - 1 ? 0 : i + 1) {
 		entry = ktr_buf[i];
 		if (entry.ktr_desc == NULL)
 			break;
 
-		sbuf_printf(&khttpd_test_current->tr_info, "%d (", i);
 		tt = khttpd_test_find_thread(entry.ktr_thread);
-		if (tt != NULL)
-			sbuf_printf(&khttpd_test_current->tr_info, "%td",
-			    tt - khttpd_test_threads);
-		else
-			sbuf_printf(&khttpd_test_current->tr_info, "%p",
-			    entry.ktr_thread);
-		sbuf_printf(&khttpd_test_current->tr_info, ":%d) ",
-		    entry.ktr_cpu);
 
-		t = entry.ktr_timestamp - khttpd_test_ktr_stime;
-		v = t / 1600;
-		zero_pad = FALSE;
-		for (d = 1000000; 1000 <= d; d /= 1000) {
-			if (v < d)
-				continue;
-			sbuf_printf(&khttpd_test_current->tr_info, 
-			    zero_pad ? "%03ld," : "%ld,", v / d);
-			v %= d;
-			zero_pad = TRUE;
-		}
 		sbuf_printf(&khttpd_test_current->tr_info,
-		    zero_pad ? "%03ld:%04ld " : "%ld:%04ld ", v, t % 1600);
+		    "%d %td %d %d %ld ", i,
+		    tt == NULL ? -1 : tt - khttpd_test_threads,
+		    entry.ktr_thread->td_tid, entry.ktr_cpu,
+		    entry.ktr_timestamp);
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
@@ -249,12 +218,17 @@ khttpd_test_dump_ktr(void)
 #pragma clang diagnostic pop
 
 		sbuf_putc(&khttpd_test_current->tr_info, '\n');
-
-		i = (i - 1) & (n - 1);
-	} while (i != end && i != first);
-
-	khttpd_test_ktr_end = first;
+	}
 #endif	/* ifdef KTR */
+}
+
+struct khttpd_test_frame *
+khttpd_test_current_frame(void)
+{
+	struct khttpd_test_thread *tt;
+
+	tt = khttpd_test_find_curthread();
+	return (SLIST_FIRST(&tt->tt_frames));
 }
 
 void
@@ -262,9 +236,10 @@ khttpd_test_push_frame(struct _jmp_buf *buf)
 {
 	struct khttpd_test_frame *frame;
 
+	KHTTPD_ENTRY("%s()", __func__);
+
 	frame = khttpd_malloc(sizeof(struct khttpd_test_frame));
 	frame->tf_jmp_buf = buf;
-	frame->tf_is_target = FALSE;
 	SLIST_INSERT_HEAD(&khttpd_test_find_curthread()->tt_frames, frame,
 	    tf_link);
 }
@@ -275,52 +250,59 @@ khttpd_test_pop_frame(void)
 	struct khttpd_test_frame *frame;
 	struct khttpd_test_thread *tt;
 
+	KHTTPD_ENTRY("%s()", __func__);
+
 	tt = khttpd_test_find_curthread();
 	frame = SLIST_FIRST(&tt->tt_frames);
 
 	SLIST_REMOVE_HEAD(&tt->tt_frames, tf_link);
 
-	if (tt->tt_unwinding && frame->tf_is_target)
-		tt->tt_unwinding = FALSE;
+	if (tt->tt_target == frame)
+		tt->tt_target = NULL;
 
 	khttpd_free(frame);
-}
-
-static void
-khttpd_test_unwind(void)
-{
-	struct khttpd_test_thread *tt;
-
-	tt = khttpd_test_find_curthread();
-	tt->tt_unwinding = TRUE;
-	longjmp(SLIST_FIRST(&tt->tt_frames)->tf_jmp_buf, 1);
 }
 
 void
 khttpd_test_continue_unwind(void)
 {
-	struct khttpd_test_frame *frame;
 	struct khttpd_test_thread *tt;
 
+	KHTTPD_ENTRY("%s()", __func__);
+
 	tt = khttpd_test_find_curthread();
-	if (!tt->tt_unwinding)
-		return;
+	if (tt->tt_target != NULL)
+		longjmp(SLIST_FIRST(&tt->tt_frames)->tf_jmp_buf, 1);
+}
 
-	frame = SLIST_FIRST(&tt->tt_frames);
-	if (frame == NULL) {
-		tt->tt_unwinding = FALSE;
-		return;
-	}
+void 
+khttpd_test_stop_unwind(void)
+{
+	struct khttpd_test_thread *tt;
 
-	longjmp(frame->tf_jmp_buf, 1);
+	KHTTPD_ENTRY("%s()", __func__);
+	tt = khttpd_test_find_curthread();
+	tt->tt_target = NULL;
 }
 
 void
 khttpd_test_break(struct khttpd_test_frame *target)
 {
+	struct khttpd_test_thread *tt;
 
-	target->tf_is_target = TRUE;
-	khttpd_test_unwind();
+	KHTTPD_ENTRY("%s(%p)", __func__, target);
+
+	tt = khttpd_test_find_curthread();
+
+	if (tt->tt_target != NULL) {
+		target = &tt->tt_bottom;
+		log(LOG_WARNING, "khttpd: khttpd_test_break is called while "
+		    "unwinding is in progress");
+	}
+
+	tt->tt_target = target;
+
+	longjmp(SLIST_FIRST(&tt->tt_frames)->tf_jmp_buf, 1);
 }
 
 static void
@@ -329,6 +311,7 @@ khttpd_test_set_status(int status)
 
 	sx_assert(&khttpd_test_lock, SA_XLOCKED);
 
+	KHTTPD_ENTRY("%s()", __func__);
 	khttpd_test_current->tr_status = status;
 
 	khttpd_test_barrier_counter = 0;
@@ -339,19 +322,21 @@ khttpd_test_set_status(int status)
 void
 khttpd_test_exit(int result, const char *fmt, ...)
 {
+	struct khttpd_test_thread *tt;
 	struct khttpd_test_result *tr;
 	struct stack st;
 	va_list ap;
 	boolean_t first;
 
-	KHTTPD_TR("%s %s", __func__, khttpd_test_result_labels[result]);
+	KHTTPD_ENTRY("%s %s", __func__, khttpd_test_result_labels[result]);
 	stack_save(&st);
 	CTRSTACK(KTR_GEN, &st, 8, 0);
 
 	tr = khttpd_test_current;
+	tt = khttpd_test_find_curthread();
 
 	sx_xlock(&khttpd_test_lock);
-	first = tr->tr_status == KHTTPD_TEST_UNSPECIFIED;
+	first = tr->tr_status == KHTTPD_TEST_RESULT_UNSPECIFIED;
 	if (first)
 		khttpd_test_set_status(result);
 	sx_xunlock(&khttpd_test_lock);
@@ -369,12 +354,13 @@ khttpd_test_exit(int result, const char *fmt, ...)
 		va_end(ap);
 	}
 
-	khttpd_test_unwind();
+	khttpd_test_break(&tt->tt_bottom);
 }
 
 static void
 khttpd_test_fn(void *data)
 {
+	struct _jmp_buf jmp_buf;
 	struct khttpd_testcase *tc;
 	struct khttpd_test_thread *tt;
 	boolean_t leader;
@@ -383,7 +369,12 @@ khttpd_test_fn(void *data)
 	tt = khttpd_test_find_curthread();
 	leader = tt == khttpd_test_threads;
 
-	KHTTPD_TEST_UNWIND_PROTECT_BEGIN {
+	tt->tt_target = NULL;
+	if (setjmp(&jmp_buf) == 0) {
+		tt->tt_bottom.tf_jmp_buf = &jmp_buf;
+		SLIST_INIT(&tt->tt_frames);
+		SLIST_INSERT_HEAD(&tt->tt_frames, &tt->tt_bottom, tf_link);
+
 		/*
 		 * The following barrier is necessary to guarantee that
 		 * tr_status is unspecified when kthread_add fails.
@@ -391,17 +382,30 @@ khttpd_test_fn(void *data)
 		KHTTPD_TEST_BARRIER();
 
 		(tc->tc_fn)();
+	}
 
-	} KHTTPD_TEST_FINALLY {
+	if (SLIST_FIRST(&tt->tt_frames) != &tt->tt_bottom &&
+	    khttpd_test_current->tr_status == KHTTPD_TEST_RESULT_UNSPECIFIED) {
 		sx_xlock(&khttpd_test_lock);
-		if (!leader && --khttpd_test_thr_running == 1)
-			wakeup(&khttpd_test_thr_running);
+		khttpd_test_set_status(KHTTPD_TEST_RESULT_ERROR);
 		sx_xunlock(&khttpd_test_lock);
 
-	} KHTTPD_TEST_UNWIND_PROTECT_END;
+		printf("%s\n", khttpd_test_result_labels
+		    [KHTTPD_TEST_RESULT_ERROR]);
 
-	if (!leader)
-		kthread_exit();
+		sbuf_printf(&khttpd_test_current->tr_message,
+		    "unwind protect begin/end is not paired");
+	}
+
+	if (leader)
+		return;
+
+	sx_xlock(&khttpd_test_lock);
+	if (--khttpd_test_thr_running == 1)
+		wakeup(&khttpd_test_thr_running);
+	sx_xunlock(&khttpd_test_lock);
+
+	kthread_exit();
 }
 
 static void
@@ -413,22 +417,31 @@ khttpd_testcase_run(struct khttpd_test_result *tr, struct khttpd_testcase *tc)
 
 	printf("%s.%s...", tc->tc_subject, tc->tc_name);
 
-	khttpd_test_current = tr;
-	khttpd_test_threads = khttpd_malloc(tc->tc_thr_count *
-	    sizeof(struct khttpd_test_thread));
-	khttpd_test_threads[0].tt_thread = curthread;
-
-#ifdef KTR
-	khttpd_test_ktr_stime = get_cyclecount();
-	khttpd_test_ktr_end = (ktr_idx - 1) & (ktr_entries - 1);
-#endif	/* ifdef KTR */
-
-	bintime(&tr->tr_timestamp);
-
 	p = curproc;
 	nthr = tc->tc_thr_count;
 	if (nthr == 0)
 		nthr = 1;
+
+	khttpd_test_current = tr;
+
+	khttpd_test_threads = khttpd_malloc(nthr *
+	    sizeof(struct khttpd_test_thread));
+
+	bzero(khttpd_test_threads, nthr *
+	    sizeof(struct khttpd_test_thread));
+	for (i = 0; i < nthr; ++i)
+		SLIST_INIT(&khttpd_test_threads[i].tt_frames);
+
+	khttpd_test_threads[0].tt_thread = curthread;
+
+#ifdef KTR
+	khttpd_test_ktr_stime = get_cyclecount();
+	khttpd_test_ktr_start = ktr_idx;
+#endif	/* ifdef KTR */
+
+	bintime(&tr->tr_timestamp);
+
+	error = 0;
 	for (i = 1; i < nthr; ++i) {
 		sx_xlock(&khttpd_test_lock);
 		++khttpd_test_thr_running;
@@ -450,11 +463,11 @@ khttpd_testcase_run(struct khttpd_test_result *tr, struct khttpd_testcase *tc)
 
 	} else {
 		sx_xlock(&khttpd_test_lock);
-		khttpd_test_set_status(KHTTPD_TEST_ERROR);
+		khttpd_test_set_status(KHTTPD_TEST_RESULT_ERROR);
 		sx_xunlock(&khttpd_test_lock);
 
 		printf("%s\n", khttpd_test_result_labels
-		    [KHTTPD_TEST_ERROR]);
+		    [KHTTPD_TEST_RESULT_ERROR]);
 
 		sbuf_printf(&tr->tr_message,
 		    "failed to fork thread (error: %d)", error);
@@ -467,21 +480,20 @@ khttpd_testcase_run(struct khttpd_test_result *tr, struct khttpd_testcase *tc)
 		    "join", 0);
 	khttpd_test_thr_running = 0;
 
-	not_set = tr->tr_status == KHTTPD_TEST_UNSPECIFIED;
-	if (not_set)
-		khttpd_test_set_status(KHTTPD_TEST_PASS);
+	not_set = tr->tr_status == KHTTPD_TEST_RESULT_UNSPECIFIED;
+	if (not_set) {
+		khttpd_test_set_status(KHTTPD_TEST_RESULT_PASS);
+		printf("%s\n", khttpd_test_result_labels[tr->tr_status]);
+	}
 
 	sx_xunlock(&khttpd_test_lock);
 
 	bintime(&tr->tr_time);
 	bintime_sub(&tr->tr_time, &tr->tr_timestamp);
 
-	if (not_set)
-		printf("%s\n", khttpd_test_result_labels[tr->tr_status]);
+	khttpd_test_dump_ktr();
 
 	khttpd_free(khttpd_test_threads);
-
-	khttpd_test_dump_ktr();
 
 	sbuf_finish(&tr->tr_stdout);
 	sbuf_finish(&tr->tr_message);
@@ -503,7 +515,8 @@ khttpd_test_barrier(void)
 
 	sx_xlock(&khttpd_test_lock);
 
-	if (tr->tr_status != KHTTPD_TEST_UNSPECIFIED)
+	if (tr->tr_status != KHTTPD_TEST_RESULT_UNSPECIFIED ||
+		tc->tc_thr_count == 0)
 		goto quit;
 
 	generation = khttpd_test_barrier_generation;
@@ -522,16 +535,17 @@ khttpd_test_barrier(void)
 		    &khttpd_test_lock, 0, "barrier", 10 * hz);
 		if (error != 0) {
 			sx_xunlock(&khttpd_test_lock);
-			khttpd_test_exit(KHTTPD_TEST_ERROR, "barrier timeout");
+			khttpd_test_exit(KHTTPD_TEST_RESULT_ERROR,
+			    "barrier timeout");
 		}
 	} while (generation == khttpd_test_barrier_generation);
 
 quit:
-	interrupted = tr->tr_status != KHTTPD_TEST_UNSPECIFIED;
+	interrupted = tr->tr_status != KHTTPD_TEST_RESULT_UNSPECIFIED;
 	sx_xunlock(&khttpd_test_lock);
 
 	if (interrupted)
-		khttpd_test_unwind();
+		khttpd_test_break(&khttpd_test_find_curthread()->tt_bottom);
 }
 
 static int
@@ -784,17 +798,17 @@ khttpd_test_count(int status, int *total, int *failures, int *errors,
 {
 
 	switch (status) {
-	case KHTTPD_TEST_UNSPECIFIED:
+	case KHTTPD_TEST_RESULT_UNSPECIFIED:
 		return;
-	case KHTTPD_TEST_PASS:
+	case KHTTPD_TEST_RESULT_PASS:
 		break;
-	case KHTTPD_TEST_FAIL:
+	case KHTTPD_TEST_RESULT_FAIL:
 		++*failures;
 		break;
-	case KHTTPD_TEST_ERROR:
+	case KHTTPD_TEST_RESULT_ERROR:
 		++*errors;
 		break;
-	case KHTTPD_TEST_SKIP:
+	case KHTTPD_TEST_RESULT_SKIP:
 		++*skips;
 		break;
 	}
@@ -848,7 +862,7 @@ khttpd_test_report(struct sbuf *report, struct khttpd_test_result *results,
 			time = tr->tr_time;
 			while (++suite_end < n) {
 				etr = &results[suite_end];
-				if (strcmp(etr->tr_testcase->tc_file, name)
+				if (strcmp(etr->tr_testcase->tc_subject, name)
 				    != 0)
 					break;
 
@@ -867,7 +881,7 @@ khttpd_test_report(struct sbuf *report, struct khttpd_test_result *results,
 			    tests, failures, errors, skips);
 		}
 
-		if (tr->tr_status == KHTTPD_TEST_UNSPECIFIED)
+		if (tr->tr_status == KHTTPD_TEST_RESULT_UNSPECIFIED)
 			continue;
 
 		bintime2timeval(&tr->tr_time, &tv);
@@ -876,21 +890,21 @@ khttpd_test_report(struct sbuf *report, struct khttpd_test_result *results,
 		    tc->tc_subject, tc->tc_name, tv.tv_sec, tv.tv_usec);
 
 		switch (tr->tr_status) {
-		case KHTTPD_TEST_PASS:
+		case KHTTPD_TEST_RESULT_PASS:
 			break;
-		case KHTTPD_TEST_FAIL:
+		case KHTTPD_TEST_RESULT_FAIL:
 			sbuf_printf(report,
 			    "<failure message=\"%s\">\n%s</failure>\n",
 			    sbuf_data(&tr->tr_message),
 			    sbuf_data(&tr->tr_info));
 			break;
-		case KHTTPD_TEST_ERROR:
+		case KHTTPD_TEST_RESULT_ERROR:
 			sbuf_printf(report,
 			    "<error message=\"%s\">\n%s</error>\n",
 			    sbuf_data(&tr->tr_message),
 			    sbuf_data(&tr->tr_info));
 			break;
-		case KHTTPD_TEST_SKIP:
+		case KHTTPD_TEST_RESULT_SKIP:
 			sbuf_printf(report, "<skipped/>\n");
 			break;
 		default:
@@ -964,6 +978,7 @@ khttpd_test_run(struct sbuf *report, const char *filter_desc)
 
 quit:
 	for (i = 0; i < n; ++i) {
+		tr = &trs[i];
 		sbuf_delete(&tr->tr_stdout);
 		sbuf_delete(&tr->tr_message);
 		sbuf_delete(&tr->tr_info);
@@ -1011,17 +1026,17 @@ khttpd_test_show_result(struct khttpd_test_result *tr)
 	tc = tr->tr_testcase;
 
 	status = tr->tr_status;
-	status_label = 0 <= status && status < KHTTPD_TEST_STATUS_END ?
+	status_label = 0 <= status && status < KHTTPD_TEST_RESULT_END ?
 	    khttpd_test_result_labels[status] : "unknown";
 	db_iprintf("%s: %s", tc->tc_name, status_label);
 
-	if (tr->tr_status != KHTTPD_TEST_UNSPECIFIED) {
+	if (tr->tr_status != KHTTPD_TEST_RESULT_UNSPECIFIED) {
 		bintime2timeval(&tr->tr_time, &tv);
 		db_printf(" %ld.%06ld[sec]", tv.tv_sec, tv.tv_usec);
 	}
 
-	if (tr->tr_status == KHTTPD_TEST_FAIL ||
-	    tr->tr_status == KHTTPD_TEST_ERROR) {
+	if (tr->tr_status == KHTTPD_TEST_RESULT_FAIL ||
+	    tr->tr_status == KHTTPD_TEST_RESULT_ERROR) {
 		db_printf(" %s\n", sbuf_data(&tr->tr_message));
 		db_indent += 2;
 		db_iprintf("Info:\n");
@@ -1093,7 +1108,7 @@ DB_SHOW_ALL_COMMAND(test, khttpd_test_ddb_show_all_test)
 
 		khttpd_test_show_result(tr);
 
-		if (tr->tr_status == KHTTPD_TEST_UNSPECIFIED)
+		if (tr->tr_status == KHTTPD_TEST_RESULT_UNSPECIFIED)
 			break;
 	}
 
@@ -1101,3 +1116,8 @@ DB_SHOW_ALL_COMMAND(test, khttpd_test_ddb_show_all_test)
 }
 
 #endif /* ifdef DDB */
+
+#if defined(KHTTPD_TEST_ENABLE) &&  !defined(KHTTPD_TEST_TEST_INCLUDED)
+#define KHTTPD_TEST_TEST_INCLUDED
+#include "khttpd_test_test.c"
+#endif

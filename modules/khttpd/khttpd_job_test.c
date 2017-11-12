@@ -15,7 +15,7 @@
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
  * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+ * DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
  * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
  * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
  * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
@@ -25,27 +25,16 @@
  * DAMAGE.
  */
 
-#pragma once
+#ifndef KHTTPD_JOB_TEST_INCLUDED
+#define KHTTPD_JOB_TEST_INCLUDED
+#include "khttpd_job.c"
+#endif
 
-#include <sys/types.h>
-#include <sys/ioccom.h>
+#include "khttpd_test.h"
 
-#define KHTTPD_VERSION	1100000
-
-struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
+static const char *test_init_focus[] = {
+	"khttpd_malloc.c",
+	"khttpd_job.c"
 };
 
-struct khttpd_ioctl_test_args {
-	char		*filter;
-	char		*buf;
-	size_t		filter_len;
-	size_t		buf_size;
-};
-
-#define KHTTPD_IOC 'h'
-
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_TEST _IOWR(KHTTPD_IOC, 1, struct khttpd_ioctl_test_args)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 2, struct khttpd_ioctl_start_args)
+#define TEST_INIT_NFOCUSES (sizeof(test_init_focus) / sizeof(char *))
