@@ -43,7 +43,6 @@
 #include <machine/setjmp.h>
 
 #include "khttpd_ktr.h"
-#include "khttpd_malloc.h"
 
 struct khttpd_test_frame {
 	SLIST_ENTRY(khttpd_test_frame) tf_link;
@@ -238,7 +237,7 @@ khttpd_test_push_frame(struct _jmp_buf *buf)
 
 	KHTTPD_ENTRY("%s()", __func__);
 
-	frame = khttpd_malloc(sizeof(struct khttpd_test_frame));
+	frame = malloc(sizeof(struct khttpd_test_frame), M_TEMP, M_WAITOK);
 	frame->tf_jmp_buf = buf;
 	SLIST_INSERT_HEAD(&khttpd_test_find_curthread()->tt_frames, frame,
 	    tf_link);
@@ -260,7 +259,7 @@ khttpd_test_pop_frame(void)
 	if (tt->tt_target == frame)
 		tt->tt_target = NULL;
 
-	khttpd_free(frame);
+	free(frame, M_TEMP);
 }
 
 void
@@ -424,8 +423,8 @@ khttpd_testcase_run(struct khttpd_test_result *tr, struct khttpd_testcase *tc)
 
 	khttpd_test_current = tr;
 
-	khttpd_test_threads = khttpd_malloc(nthr *
-	    sizeof(struct khttpd_test_thread));
+	khttpd_test_threads = malloc(nthr *
+	    sizeof(struct khttpd_test_thread), M_TEMP, M_WAITOK);
 
 	bzero(khttpd_test_threads, nthr *
 	    sizeof(struct khttpd_test_thread));
@@ -493,7 +492,7 @@ khttpd_testcase_run(struct khttpd_test_result *tr, struct khttpd_testcase *tc)
 
 	khttpd_test_dump_ktr();
 
-	khttpd_free(khttpd_test_threads);
+	free(khttpd_test_threads, M_TEMP);
 
 	sbuf_finish(&tr->tr_stdout);
 	sbuf_finish(&tr->tr_message);
@@ -594,7 +593,7 @@ khttpd_test_get_token(const char **strp, char **token)
 	default:
 		code = KHTTPD_TEST_TOKEN_STRING;
 		n = strcspn(cp, ",.!*");
-		*token = buf = khttpd_malloc(n + 1);
+		*token = buf = malloc(n + 1, M_TEMP, M_WAITOK);
 		strlcpy(buf, cp, n + 1);
 		cp += n;
 	}
@@ -676,7 +675,7 @@ khttpd_test_parse_test_id(const char **readp,
 	name = code == KHTTPD_TEST_TOKEN_STRING ? token : NULL;
 	token = NULL;
 
-	elm = khttpd_malloc(sizeof(*elm));
+	elm = malloc(sizeof(*elm), M_TEMP, M_WAITOK);
 	elm->subject = subject;
 	elm->name = name;
 	elm->negative = FALSE;
@@ -687,9 +686,9 @@ khttpd_test_parse_test_id(const char **readp,
 error:
 	khttpd_test_unexpected_token(code, token);
 
-	khttpd_free(token);
-	khttpd_free(subject);
-	khttpd_free(name);
+	free(token, M_TEMP);
+	free(subject, M_TEMP);
+	free(name, M_TEMP);
 
 	return (EINVAL);
 }
@@ -725,7 +724,7 @@ khttpd_test_parse_filter(const char **readp,
 	}
 
  quit:
-	khttpd_free(token);
+	free(token, M_TEMP);
 
 	return (error);
 }
@@ -762,7 +761,7 @@ khttpd_test_parse_filter_list(const char **readp,
 		error = khttpd_test_parse_filter(readp, list);
 	}
 	
-	khttpd_free(token);
+	free(token, M_TEMP);
 
 	return (error);
 }
@@ -937,13 +936,13 @@ khttpd_test_run(struct sbuf *report, const char *filter_desc)
 	td = curthread;
 
 	tcssize = sizeof(struct khttpd_testcase *) * n;
-	tcs = khttpd_malloc(tcssize);
+	tcs = malloc(tcssize, M_TEMP, M_WAITOK);
 	bcopy(SET_BEGIN(khttpd_testcase_set), tcs, tcssize);
 	qsort(tcs, n, sizeof(struct khttpd_testcase *), khttpd_testcase_cmp);
 
 	trssize = sizeof(struct khttpd_test_result) *
 	    SET_COUNT(khttpd_testcase_set);
-	khttpd_test_results = trs = khttpd_malloc(trssize);
+	khttpd_test_results = trs = malloc(trssize, M_TEMP, M_WAITOK);
 	khttpd_test_results_count = SET_COUNT(khttpd_testcase_set);
 	bzero(trs, trssize);
 	for (i = 0; i < n; ++i) {
@@ -971,7 +970,7 @@ khttpd_test_run(struct sbuf *report, const char *filter_desc)
 
 	while ((elm = STAILQ_FIRST(&filters)) != NULL) {
 		STAILQ_REMOVE_HEAD(&filters, list);
-		khttpd_free(elm);
+		free(elm, M_TEMP);
 	}
 
 	khttpd_test_report(report, trs, n);
@@ -983,10 +982,10 @@ quit:
 		sbuf_delete(&tr->tr_message);
 		sbuf_delete(&tr->tr_info);
 	}
-	khttpd_free(trs);
+	free(trs, M_TEMP);
 	khttpd_test_results = NULL;
 	khttpd_test_results_count = 0;
-	khttpd_free(tcs);
+	free(tcs, M_TEMP);
 
 	return (0);
 }

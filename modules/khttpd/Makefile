@@ -23,7 +23,7 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-SRCS = khttpd_ktr.c khttpd_malloc.c khttpd_test.c khttpd_init.c khttpd_main.c
+SRCS = khttpd_ktr.c khttpd_test.c khttpd_malloc.c khttpd_init.c khttpd_main.c
 SRCS +=	khttpd_costruct.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
 SRCS += khttpd_uuid.c khttpd_strtab.c khttpd_method.c khttpd_rewriter.c
 SRCS += khttpd_webapi.c
