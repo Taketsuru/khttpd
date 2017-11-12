@@ -84,8 +84,10 @@ do_load_command(int argc, char **argv)
 	ssize_t rsize;
 	int fd;
 
-	if (argc <= 1 || 2 < argc)
-		err(EX_USAGE, "usage) %s load file", argv[0]);
+	if (argc != 3) {
+		fprintf(stderr, "usage) %s load file\n", argv[0]);
+		exit(EX_USAGE);
+	}
 
 	config = argv[2];
 
@@ -197,15 +199,16 @@ int
 main(int argc, char **argv)
 {
 	struct command *cmd;
-	int i;
 
 	dev_fd = open("/dev/khttpd", O_RDWR);
 	if (dev_fd == -1)
 		err(EX_CONFIG, "Can't find /dev/khttpd.  Is khttpd running?");
 
 	cmd = find_command(argv[1]);
-	if (cmd == NULL)
-		err(EX_USAGE, "Unknown command \"%s\"", argv[1]);
+	if (cmd == NULL) {
+		fprintf(stderr, "Unknown command \"%s\"\n", argv[1]);
+		exit(EX_USAGE);
+	}
 
 	cmd->handler(argc, argv);
 
