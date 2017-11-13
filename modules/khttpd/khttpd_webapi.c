@@ -427,10 +427,14 @@ khttpd_webapi_set_problem_property(struct khttpd_mbuf_json *output,
 
 void
 khttpd_webapi_set_problem_detail(struct khttpd_mbuf_json *output,
-    const char *detail)
+    const char *fmt, ...)
 {
+	va_list args;
 
-	khttpd_mbuf_json_property_format(output, "detail", TRUE, "%s", detail);
+	va_start(args, fmt);
+	khttpd_mbuf_json_property(output, "detail");
+	khttpd_mbuf_json_vformat(output, TRUE, fmt, args);
+	va_end(args);
 }
 
 void khttpd_webapi_set_problem_errno(struct khttpd_mbuf_json *output,

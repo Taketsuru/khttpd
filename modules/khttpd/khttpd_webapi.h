@@ -56,7 +56,7 @@ void khttpd_webapi_set_problem(struct khttpd_mbuf_json *output, int status,
 void khttpd_webapi_set_problem_property(struct khttpd_mbuf_json *output,
     struct khttpd_webapi_property *property);
 void khttpd_webapi_set_problem_detail(struct khttpd_mbuf_json *output,
-    const char *detail);
+    const char *fmt, ...);
 void khttpd_webapi_set_problem_errno(struct khttpd_mbuf_json *output,
     int error);
 void khttpd_webapi_set_no_value_problem(struct khttpd_mbuf_json *output);
