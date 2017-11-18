@@ -1443,3 +1443,12 @@ khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *v)
 	v->is_first = FALSE;
 }
 
+void
+khttpd_mbuf_json_now(struct khttpd_mbuf_json *entry)
+{
+	struct timeval tv;
+
+	microtime(&tv);
+	khttpd_mbuf_json_format(entry, FALSE, "%ld.%06ld",
+	    tv.tv_sec, tv.tv_usec);
+}

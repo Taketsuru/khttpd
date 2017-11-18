@@ -141,3 +141,4 @@ void khttpd_mbuf_json_property_object_begin(struct khttpd_mbuf_json *v,
     const char *name);
 void khttpd_mbuf_json_array_begin(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *v);
+void khttpd_mbuf_json_now(struct khttpd_mbuf_json *v);
