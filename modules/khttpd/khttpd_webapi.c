@@ -44,437 +44,17 @@
 #include "khttpd_ktr.h"
 #include "khttpd_log.h"
 #include "khttpd_mbuf.h"
+#include "khttpd_problem.h"
 #include "khttpd_status_code.h"
 #include "khttpd_string.h"
 #include "khttpd_strtab.h"
 
-#ifndef KHTTPD_WEBAPI_PROBLEM_URL
-#define KHTTPD_WEBAPI_PROBLEM_URL	"http://example.com/khttpd/problems"
-#endif
-
-struct khttpd_webapi_known_code {
-	SLIST_ENTRY(khttpd_webapi_known_code) link;
-	int		status;
-	const char	*title;
-};
-
-SLIST_HEAD(khttpd_webapi_known_code_slist, khttpd_webapi_known_code);
-
-static struct khttpd_webapi_known_code khttpd_webapi_known_codes[] = {
-	{
-		.status = KHTTPD_STATUS_CONTINUE,
-		.title = "Continue"
-	},
-	{
-		.status = KHTTPD_STATUS_SWITCHING_PROTOCOLS,
-		.title = "Switching Protocols"
-	},
-	{
-		.status = KHTTPD_STATUS_OK,
-		.title = "OK"
-	},
-	{
-		.status = KHTTPD_STATUS_CREATED,
-		.title = "Created"
-	},
-	{
-		.status = KHTTPD_STATUS_ACCEPTED,
-		.title = "Accepted"
-	},
-	{
-		.status = KHTTPD_STATUS_NON_AUTHORITATIVE_INFORMATION,
-		.title = "Non-Authoritative Information"
-	},
-	{
-		.status = KHTTPD_STATUS_NO_CONTENT,
-		.title = "No Content"
-	},
-	{
-		.status = KHTTPD_STATUS_RESET_CONTENT,
-		.title = "Reset Content"
-	},
-	{
-		.status = KHTTPD_STATUS_PARTIAL_CONTENT,
-		.title = "Partial Content"
-	},
-	{
-		.status = KHTTPD_STATUS_MULTIPLE_CHOICES,
-		.title = "Multiple Choices"
-	},
-	{
-		.status = KHTTPD_STATUS_MOVED_PERMANENTLY,
-		.title = "Moved Permanently"
-	},
-	{
-		.status = KHTTPD_STATUS_FOUND,
-		.title = "Found"
-	},
-	{
-		.status = KHTTPD_STATUS_SEE_OTHER,
-		.title = "See Other"
-	},
-	{
-		.status = KHTTPD_STATUS_NOT_MODIFIED,
-		.title = "Not Modified"
-	},
-	{
-		.status = KHTTPD_STATUS_USE_PROXY,
-		.title = "Use Proxy"
-	},
-	{
-		.status = KHTTPD_STATUS_TEMPORARY_REDIRECT,
-		.title = "Temporary Redirect"
-	},
-	{
-		.status = KHTTPD_STATUS_BAD_REQUEST,
-		.title = "Bad Request"
-	},
-	{
-		.status = KHTTPD_STATUS_UNAUTHORIZED,
-		.title = "Unauthorized"
-	},
-	{
-		.status = KHTTPD_STATUS_PAYMENT_REQUIRED,
-		.title = "Payment Required"
-	},
-	{
-		.status = KHTTPD_STATUS_FORBIDDEN,
-		.title = "Forbidden"
-	},
-	{
-		.status = KHTTPD_STATUS_NOT_FOUND,
-		.title = "Not Found"
-	},
-	{
-		.status = KHTTPD_STATUS_METHOD_NOT_ALLOWED,
-		.title = "Method Not Allowed"
-	},
-	{
-		.status = KHTTPD_STATUS_NOT_ACCEPTABLE,
-		.title = "Not Acceptable"
-	},
-	{
-		.status = KHTTPD_STATUS_PROXY_AUTHENTICATION_REQUIRED,
-		.title = "Proxy Authentication Required"
-	},
-	{
-		.status = KHTTPD_STATUS_REQUEST_TIMEOUT,
-		.title = "Request Timeout"
-	},
-	{
-		.status = KHTTPD_STATUS_CONFLICT,
-		.title = "Conflict"
-	},
-	{
-		.status = KHTTPD_STATUS_GONE,
-		.title = "Gone"
-	},
-	{
-		.status = KHTTPD_STATUS_LENGTH_REQUIRED,
-		.title = "Length Required"
-	},
-	{
-		.status = KHTTPD_STATUS_PRECONDITION_FAILED,
-		.title = "Precondition Failed"
-	},
-	{
-		.status = KHTTPD_STATUS_REQUEST_ENTITY_TOO_LARGE,
-		.title = "Request Entity Too Large"
-	},
-	{
-		.status = KHTTPD_STATUS_REQUEST_URI_TOO_LONG,
-		.title = "Request-URI Too Long"
-	},
-	{
-		.status = KHTTPD_STATUS_UNSUPPORTED_MEDIA_TYPE,
-		.title = "Unsupported Media Type"
-	},
-	{
-		.status = KHTTPD_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE,
-		.title = "Requested Range Not Satisfiable"
-	},
-	{
-		.status = KHTTPD_STATUS_EXPECTATION_FAILED,
-		.title = "Expectation Failed"
-	},
-	{
-		.status = KHTTPD_STATUS_UPGRADE_REQUIRED,
-		.title = "Upgrade Required"
-	},
-	{
-		.status = KHTTPD_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE,
-		.title = "Request Header Fields Too Large"
-	},
-	{
-		.status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR,
-		.title = "Internal Server Error"
-	},
-	{
-		.status = KHTTPD_STATUS_NOT_IMPLEMENTED,
-		.title = "Not Implemented"
-	},
-	{
-		.status = KHTTPD_STATUS_BAD_GATEWAY,
-		.title = "Bad Gateway"
-	},
-	{
-		.status = KHTTPD_STATUS_SERVICE_UNAVAILABLE,
-		.title = "Service Unavailable"
-	},
-	{
-		.status = KHTTPD_STATUS_GATEWAY_TIMEOUT,
-		.title = "Gateway Timeout"
-	},
-	{
-		.status = KHTTPD_STATUS_HTTP_VERSION_NOT_SUPPORTED,
-		.title = "HTTP Version Not Supported"
-	},
-};
-
-#define KHTTPD_WEBAPI_CODE_HASH_TABLE_SIZE				\
-	(KHTTPD_STRTAB_POW2_CEIL(sizeof(khttpd_webapi_known_codes) /	\
-	    sizeof(khttpd_webapi_known_codes[0])))
-
-static struct khttpd_webapi_known_code_slist 
-    khttpd_webapi_code_table[KHTTPD_WEBAPI_CODE_HASH_TABLE_SIZE];
-
-static struct khttpd_webapi_known_code_slist *
-khttpd_webapi_known_code_slist_head(int code)
-{
-	uint32_t codebuf, h;
-
-	codebuf = code;
-	h = murmur3_32_hash32(&codebuf, 1, 0xdeadbeef) &
-	    (KHTTPD_WEBAPI_CODE_HASH_TABLE_SIZE - 1);
-
-	return (khttpd_webapi_code_table + h);
-}
-
-static void
-khttpd_webapi_init(void *arg)
-{
-	struct khttpd_webapi_known_code_slist *head;
-	struct khttpd_webapi_known_code *ptr;
-	int i;
-
-	for (i = 0; i < sizeof(khttpd_webapi_known_codes) /
-		 sizeof(khttpd_webapi_known_codes[0]); ++i) {
-		ptr = &khttpd_webapi_known_codes[i];
-		head = khttpd_webapi_known_code_slist_head(ptr->status);
-		SLIST_INSERT_HEAD(head, ptr, link);
-	}
-}
-
-SYSINIT(khttpd_webapi_init, SI_SUB_TUNABLES, SI_ORDER_FIRST,
-    khttpd_webapi_init, NULL);
-
-void
-khttpd_webapi_property_specifier_to_string(struct sbuf *output,
-    struct khttpd_webapi_property *prop_spec)
-{
-	struct khttpd_webapi_property *ptr, *top, *next, *prev;
-
-	if (prop_spec == NULL)
-		return;
-
-	ptr = top = prop_spec;
-
-	/* reverse the chain */
-
-	prev = NULL;
-	while (ptr != NULL) {
-		next = ptr->link;
-		ptr->link = prev;
-		prev = ptr;
-		ptr = next;
-	}
-
-	/*
-	 * Put the name of each prop_spec and reverse the chain simultaneously.
-	 */
-
-	ptr = prev;
-	prev = NULL;
-	while (ptr != NULL) {
-		if (prev != NULL) {
-			if (ptr->name[0] != '[')
-				sbuf_putc(output, '.');
-			prev->link = ptr;
-		}
-		sbuf_cat(output, ptr->name);
-
-		prev = ptr;
-		ptr = ptr->link;
-	}
-	if (prev != NULL)
-		prev->link = NULL;
-}
-
-#ifdef KHTTPD_KTR_LOGGING
-
-const char *
-khttpd_webapi_ktr_print_property(struct khttpd_webapi_property *prop_spec)
-{
-	struct khttpd_webapi_property *ptr, *top, *next, *prev;
-	char *buf, *cp, *end;
-	size_t len;
-	int bufsiz;
-
-	if (prop_spec == NULL)
-		return ("<empty>");
-
-	buf = khttpd_ktr_newbuf(&bufsiz);
-	if (buf == NULL)
-		return ("<buffer full>");
-
-	ptr = top = prop_spec;
-
-	/* reverse the chain */
-
-	prev = NULL;
-	while (ptr != NULL) {
-		next = ptr->link;
-		ptr->link = prev;
-		prev = ptr;
-		ptr = next;
-	}
-
-	/*
-	 * Put the name of each prop_spec and reverse the chain simultaneously.
-	 */
-
-	cp = buf;
-	end = buf + bufsiz - 1;
-	ptr = prev;
-	prev = NULL;
-	while (ptr != NULL) {
-		if (prev != NULL) {
-			if (ptr->name[0] != '[' && cp < end)
-				*cp++ = '.';
-			prev->link = ptr;
-		}
-		len = MIN(strlen(ptr->name), end - cp);
-		bcopy(ptr->name, cp, len);
-		cp += len;
-
-		prev = ptr;
-		ptr = ptr->link;
-	}
-	if (prev != NULL)
-		prev->link = NULL;
-
-	*cp++ = '\0';
-
-	return (buf);
-}
-
-#endif
-
-void
-khttpd_webapi_set_problem(struct khttpd_mbuf_json *output, int status,
-    const char *type, const char *title)
-{
-	struct khttpd_webapi_known_code *codep;
-	struct khttpd_webapi_known_code_slist *head;
-
-	KHTTPD_ENTRY("%s(%p,%d,%s,%s)", __func__, output, status,
-	    type == NULL ? "<null>" : type, title == NULL ? "<null>" : title);
-#ifdef KHTTPD_TRACE_BRANCH
-	struct stack st;
-	stack_save(&st);
-	CTRSTACK(KTR_GEN, &st, 16, 0);
-#endif
-
-	khttpd_mbuf_json_delete(output);
-	khttpd_mbuf_json_new(output);
-	khttpd_mbuf_json_object_begin(output);
-	if (type != NULL) {
-		khttpd_mbuf_json_property_format(output, "type", TRUE,
-		    "%s/%s", KHTTPD_WEBAPI_PROBLEM_URL, type);
-	} else if (title == NULL) {
-		head = khttpd_webapi_known_code_slist_head(status);
-		SLIST_FOREACH(codep, head, link)
-		    if (codep->status == status) {
-			    title = codep->title;
-			    break;
-		    }
-	}
-
-	if (title != NULL)
-		khttpd_mbuf_json_property_format(output, "title", TRUE,
-		    "%s", title);
-	khttpd_mbuf_json_property_format(output, "status", FALSE, "%d",
-	    status);
-}
-
-void
-khttpd_webapi_set_problem_property(struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *prop_spec)
-{
-	char buf[32];
-	struct sbuf sbuf;
-
-	if (prop_spec == NULL)
-		return;
-
-	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	khttpd_webapi_property_specifier_to_string(&sbuf, prop_spec);
-	sbuf_finish(&sbuf);
-	khttpd_mbuf_json_property_format(output, "property", TRUE,
-	    "%s", sbuf_data(&sbuf));
-	sbuf_delete(&sbuf);
-}
-
-void
-khttpd_webapi_set_problem_detail(struct khttpd_mbuf_json *output,
-    const char *fmt, ...)
-{
-	va_list args;
-
-	va_start(args, fmt);
-	khttpd_mbuf_json_property(output, "detail");
-	khttpd_mbuf_json_vformat(output, TRUE, fmt, args);
-	va_end(args);
-}
-
-void khttpd_webapi_set_problem_errno(struct khttpd_mbuf_json *output,
-    int error)
-{
-	if (error != 0)
-		khttpd_mbuf_json_property_format(output, "errno", FALSE, "%d",
-		    error);
-}
-
-void
-khttpd_webapi_set_no_value_problem(struct khttpd_mbuf_json *output)
-{
-
-	khttpd_webapi_set_problem(output, KHTTPD_STATUS_BAD_REQUEST,
-	    "no_value", "no value");
-}
-
-void
-khttpd_webapi_set_wrong_type_problem(struct khttpd_mbuf_json *output)
-{
-
-	khttpd_webapi_set_problem(output, KHTTPD_STATUS_BAD_REQUEST,
-	    "wrong_type", "wrong type");
-}
-
-void
-khttpd_webapi_set_invalid_value_problem(struct khttpd_mbuf_json *output)
-{
-
-	khttpd_webapi_set_problem(output, KHTTPD_STATUS_BAD_REQUEST,
-	    "invalid_value", "invalid value");
-}
-
 int
 khttpd_webapi_get_string_property(const char **value_out, const char *name,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
     struct khttpd_mbuf_json *output, boolean_t may_not_exist)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *value_j;
 
 	KASSERT(khttpd_json_type(input) == KHTTPD_JSON_OBJECT,
@@ -488,14 +68,14 @@ khttpd_webapi_get_string_property(const char **value_out, const char *name,
 			*value_out = NULL;
 			return (KHTTPD_STATUS_NO_CONTENT);
 		}
-		khttpd_webapi_set_no_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
 	if (khttpd_json_type(value_j) != KHTTPD_JSON_STRING) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -506,10 +86,10 @@ khttpd_webapi_get_string_property(const char **value_out, const char *name,
 
 int
 khttpd_webapi_get_integer_property(int64_t *value_out, const char *name,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
     struct khttpd_mbuf_json *output, boolean_t may_not_exist)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *value_j;
 
 	KASSERT(khttpd_json_type(input) == KHTTPD_JSON_OBJECT,
@@ -523,14 +103,14 @@ khttpd_webapi_get_integer_property(int64_t *value_out, const char *name,
 			*value_out = 0;
 			return (KHTTPD_STATUS_NO_CONTENT);
 		}
-		khttpd_webapi_set_no_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
 	if (khttpd_json_type(value_j) != KHTTPD_JSON_INTEGER) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -542,10 +122,10 @@ khttpd_webapi_get_integer_property(int64_t *value_out, const char *name,
 int
 khttpd_webapi_get_object_property(struct khttpd_json **value_out,
     const char *name,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
     struct khttpd_mbuf_json *output, boolean_t may_not_exist)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *value_j;
 
 	KASSERT(khttpd_json_type(input) == KHTTPD_JSON_OBJECT,
@@ -559,14 +139,14 @@ khttpd_webapi_get_object_property(struct khttpd_json **value_out,
 			*value_out = 0;
 			return (KHTTPD_STATUS_NO_CONTENT);
 		}
-		khttpd_webapi_set_no_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
 	if (khttpd_json_type(value_j) != KHTTPD_JSON_OBJECT) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -577,10 +157,10 @@ khttpd_webapi_get_object_property(struct khttpd_json **value_out,
 
 int
 khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
     struct khttpd_mbuf_json *output)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct sockaddr_un *un;
 	struct sockaddr_in *in;
 	struct sockaddr_in6 *in6;
@@ -607,16 +187,16 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 
 	if (strcmp(family, "unix") == 0) {
 		if (address == NULL) {
-			khttpd_webapi_set_no_value_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_no_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
 		if (address[0] != '/') {
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_detail(output,
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_detail(output, 
 			    "absolute path only");
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -624,9 +204,9 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 		alen = offsetof(struct sockaddr_un, sun_path) + strlen(address)
 		    + 1;
 		if (len < MIN(sizeof(struct sockaddr_un), alen)) {
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
-			khttpd_webapi_set_problem_detail(output, "too long");
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_detail(output, "too long");
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 		un->sun_len = alen;
@@ -643,8 +223,8 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 			in->sin_addr.s_addr = INADDR_ANY;
 		} else if (khttpd_parse_ip_addresss(&in->sin_addr.s_addr, 
 			address) != 0) {
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -658,15 +238,15 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 			in6->sin6_addr = in6addr_any;
 		} else if (khttpd_parse_ipv6_address(in6->sin6_addr.s6_addr,
 			address) != 0) {
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
 	} else {
 		prop_spec.name = "family";
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -678,8 +258,8 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 
 		if (port < 1 || IPPORT_MAX < port) {
 			prop_spec.name = "port";
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -687,46 +267,4 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 	}
 
 	return (KHTTPD_STATUS_OK);
-}
-
-
-void
-khttpd_log_put_timestamp_property(struct khttpd_mbuf_json *entry)
-{
-	struct timeval tv;
-
-	microtime(&tv);
-	khttpd_mbuf_json_property_format(entry, "timestamp",
-		FALSE, "%ld.%06ld", tv.tv_sec, tv.tv_usec);
-}
-
-void
-khttpd_log_put_severity_property(struct khttpd_mbuf_json *entry, int severity)
-{
-
-	khttpd_mbuf_json_property_cstr(entry, "severity", TRUE,
-		khttpd_log_get_severity_label(severity));
-}
-
-void
-khttpd_log_put_error_properties(struct khttpd_mbuf_json *entry, int severity,
-    const char *description_fmt, ...)
-{
-	va_list args;
-
-	va_start(args, description_fmt);
-	khttpd_log_vput_error_properties(entry, severity, description_fmt,
-	    args);
-	va_end(args);
-}
-
-void
-khttpd_log_vput_error_properties(struct khttpd_mbuf_json *entry, int severity,
-    const char *description_fmt, va_list args)
-{
-
-	khttpd_log_put_timestamp_property(entry);
-	khttpd_log_put_severity_property(entry, severity);
-	khttpd_mbuf_json_property_format(entry, "description", TRUE,
-	    description_fmt, args);
 }

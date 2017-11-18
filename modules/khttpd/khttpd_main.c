@@ -160,8 +160,7 @@ khttpd_main_shutdown(void *arg)
 		     state == KHTTPD_MAIN_DORMANT))
 			break;
 
-		mtx_sleep(&khttpd_main_state, &khttpd_main_lock, 0,
-		    "khttpd-state", 0);
+		mtx_sleep(&khttpd_main_state, &khttpd_main_lock, 0, "main", 0);
 	}
 
 	if (state == KHTTPD_MAIN_DORMANT) {

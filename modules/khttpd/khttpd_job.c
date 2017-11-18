@@ -129,8 +129,6 @@ khttpd_job_spawn_and_unlock(struct khttpd_job_queue *queue)
 	worker_id = queue->worker_count++;
 	mtx_unlock(&queue->lock);
 
-	KHTTPD_TR("%s spawn %d", __func__, worker_id);
-
 	error = kthread_add(khttpd_job_worker_main, queue, curproc, NULL, 0,
 	    0, "worker%d-%d", queue->id, worker_id);
 	if (error != 0)
@@ -149,7 +147,7 @@ khttpd_job_kick_and_unlock(struct khttpd_job_queue *queue, int flags)
 {
 	struct khttpd_job_worker *worker;
 
-	KHTTPD_TR("%s(%d)", __func__, queue->id);
+	KHTTPD_ENTRY("%s(%d)", __func__, queue->id);
 
 	mtx_assert(&queue->lock, MA_OWNED);
 	KASSERT(0 < queue->worker_count_max,
@@ -196,8 +194,6 @@ khttpd_job_worker_main(void *arg)
 			continue;
 		}
 
-		KHTTPD_TR("%s %d job job=%p", __func__, queue->id, job);
-
 		STAILQ_REMOVE_HEAD(&queue->jobs, link);
 		if (!STAILQ_EMPTY(&queue->jobs))
 			khttpd_job_kick_and_unlock(queue, 0);
@@ -210,7 +206,6 @@ khttpd_job_worker_main(void *arg)
 
 	mtx_unlock(&queue->lock);
 
-	KHTTPD_TR("%s %d exiting", __func__, queue->id);
 	khttpd_job_decrement_worker_count(queue);
 
 	kthread_exit();
@@ -293,7 +288,7 @@ khttpd_job_terminate(void)
 	struct khttpd_job_worker *worker;
 	int i, n;
 
-	KHTTPD_TR("%s", __func__);
+	KHTTPD_ENTRY("%s", __func__);
 
 	mtx_lock(&khttpd_job_lock);
 	khttpd_job_exiting = TRUE;
@@ -316,8 +311,6 @@ khttpd_job_terminate(void)
 		mtx_sleep(&khttpd_job_active_queue_count, &khttpd_job_lock, 0,
 		    "trmjob", 0);
 	mtx_unlock(&khttpd_job_lock);
-
-	KHTTPD_TR("%s terminate finished", __func__);
 }
 
 static int

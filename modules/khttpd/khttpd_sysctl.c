@@ -43,6 +43,7 @@
 #include "khttpd_json.h"
 #include "khttpd_malloc.h"
 #include "khttpd_mbuf.h"
+#include "khttpd_problem.h"
 #include "khttpd_server.h"
 #include "khttpd_status_code.h"
 #include "khttpd_string.h"
@@ -152,19 +153,19 @@ khttpd_sysctl_set_problem(struct khttpd_exchange *exchange,
 		 * send "Not Found" response.
 		 */
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
 		break;
 
 	case EISDIR:
 	case ENOTDIR:
 	case ENOENT:
 		status = KHTTPD_STATUS_NOT_FOUND;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
 		break;
 
 	case EPERM:
 		status = KHTTPD_STATUS_METHOD_NOT_ALLOWED;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
 
 		khttpd_exchange_add_response_field(exchange, "Allow",
 		    "OPTIONS, HEAD, GET");
@@ -172,7 +173,7 @@ khttpd_sysctl_set_problem(struct khttpd_exchange *exchange,
 
 	default:
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
 	}
 
 	return (status);
@@ -389,7 +390,6 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 		error = kernel_sysctl(td, next_oid + 2,
 		    next_oidlen / sizeof(int), NULL, 0, NULL, 0, &len, 0);
 		if (error == 0) {
-			KHTTPD_TR("%s %u error %d", __func__, __LINE__, error);
 			if (valbuflen < len) {
 				valbuf = khttpd_realloc(valbuf, len);
 				valbuflen = len;
@@ -397,7 +397,6 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 			error = kernel_sysctl(td, next_oid + 2,
 			    next_oidlen / sizeof(int), valbuf, &valbuflen,
 			    NULL, 0, NULL, 0);
-			KHTTPD_TR("%s %u error %d", __func__, __LINE__, error);
 			if (error == 0) {
 				khttpd_mbuf_json_property(&body, "value");
 				khttpd_sysctl_value_in_json(&body,
@@ -597,12 +596,12 @@ khttpd_sysctl_put_data_put(struct khttpd_exchange *exchange,
 		khttpd_mbuf_json_new(&problem);
 
 		status = KHTTPD_STATUS_REQUEST_ENTITY_TOO_LARGE;
-		khttpd_webapi_set_problem(&problem, status, NULL, NULL);
+		khttpd_problem_response_begin(&problem, status, NULL, NULL);
 
 		snprintf(buf, sizeof(buf),
 		    "The maximum request body size for a sysctl is %d bytes",
 		    KHTTPD_SYSCTL_PUT_MAX);
-		khttpd_webapi_set_problem_detail(&problem, buf);
+		khttpd_problem_set_detail(&problem, buf);
 
 		khttpd_exchange_set_error_response_body(exchange, status,
 		    &problem);
@@ -709,7 +708,7 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 
 	if ((kind & CTLTYPE) == CTLTYPE_STRING) {
 		if (khttpd_json_type(value) != KHTTPD_JSON_STRING) {
-			khttpd_webapi_set_wrong_type_problem(&problem);
+			khttpd_problem_wrong_type_response_begin(&problem);
 			goto respond;
 		}
 		error = kernel_sysctl(td, oid, oidlen, NULL, 0,
@@ -720,7 +719,7 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 	}
 
 	if (khttpd_json_type(value) != KHTTPD_JSON_INTEGER) {
-		khttpd_webapi_set_wrong_type_problem(&problem);
+		khttpd_problem_wrong_type_response_begin(&problem);
 		goto respond;
 	}
 
@@ -733,7 +732,7 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 		    NULL, 0, &jival, sizeof(jival), NULL, 0);
 
 	} else if (jival < traits->min || traits->max < jival) {
-		khttpd_webapi_set_invalid_value_problem(&problem);
+		khttpd_problem_invalid_value_response_begin(&problem);
 		goto respond;
 
 	} else {
@@ -884,7 +883,7 @@ static int
 khttpd_sysctl_location_create(struct khttpd_location **location_out,
     struct khttpd_server *server, const char *path,
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input)
 {
 

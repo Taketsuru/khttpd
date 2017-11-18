@@ -41,7 +41,7 @@ struct khttpd_location_ops;
 struct khttpd_mbuf_json;
 struct khttpd_obj_type;
 struct khttpd_server;
-struct khttpd_webapi_property;
+struct khttpd_problem_property;
 
 extern struct khttpd_obj_type khttpd_ctrl_rewriters;
 extern struct khttpd_obj_type khttpd_ctrl_ports;
@@ -55,25 +55,25 @@ void khttpd_obj_type_get_id(struct khttpd_obj_type *type,
     void *object, struct sbuf *output);
 int khttpd_obj_type_get_obj_from_property(struct khttpd_obj_type *type,
     void **obj_out, const char *name, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input, boolean_t may_not_exist);
 
 typedef int (*khttpd_ctrl_location_create_fn_t)
     (struct khttpd_location **location_out, struct khttpd_server *server,
      const char *path, struct khttpd_mbuf_json *output,
-     struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input);
+     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input);
 typedef int (*khttpd_ctrl_location_delete_fn_t)
     (struct khttpd_location *location, struct khttpd_mbuf_json *output);
 typedef void (*khttpd_ctrl_location_get_fn_t)
     (struct khttpd_location *location, struct khttpd_mbuf_json *output);
 typedef int (*khttpd_ctrl_location_put_fn_t)
     (struct khttpd_location *location, struct khttpd_mbuf_json *output,
-     struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input);
+     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input);
 
 int khttpd_location_type_create_location(struct khttpd_location **location_out,
     struct khttpd_server *server, const char *path,
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input, struct khttpd_location_ops *ops, void *arg);
 void khttpd_location_type_register(const char *name, 
     khttpd_ctrl_location_create_fn_t create, 

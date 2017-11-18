@@ -64,9 +64,6 @@ struct khttpd_log {
 	unsigned	silence:1;
 };
 
-static const char *khttpd_log_severities[] = {
-	"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"
-};
 static sbintime_t khttpd_log_silence_time = 10 * SBT_1S;
 static sbintime_t khttpd_log_flush_time = SBT_1S;
 
@@ -394,14 +391,3 @@ khttpd_log_handle_job(void *arg)
 		log(LOG_WARNING, "khttpd: error on log \"%s\" (error: %d)",
 		    namebuf, error);
 }
-
-const char *
-khttpd_log_get_severity_label(int severity)
-{
-
-	KASSERT(LOG_EMERG <= severity && severity <= LOG_DEBUG,
-	    ("unknown severity: %d", severity));
-
-	return (khttpd_log_severities[severity]);
-}
-

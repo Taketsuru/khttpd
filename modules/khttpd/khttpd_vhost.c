@@ -404,7 +404,6 @@ khttpd_vhost_set_port_list(struct khttpd_server *server,
 		tie->server = server;
 		tie->port = port;
 
-		KHTTPD_TR("port %p", port);
 		port_data = khttpd_costruct_get(port, khttpd_vhost_port_key);
 
 		LIST_INSERT_HEAD(&port_data->ties, tie, port_link);
@@ -520,10 +519,6 @@ khttpd_vhost_find_server(struct khttpd_port *port, const char *host)
 		server_data = khttpd_costruct_get(server,
 		    khttpd_vhost_server_key);
 
-		KHTTPD_TR("server %p, canonical %s", server,
-		    khttpd_ktr_printf("%s", 
-			server_data->name->canonical_name));
-
 		/*
 		 * Check whether the canonical server name matches the given
 		 * host name.
@@ -541,15 +536,11 @@ khttpd_vhost_find_server(struct khttpd_port *port, const char *host)
 		 */
 		exact_alias_count = server_data->name->exact_alias_count;
 		exact_aliases = server_data->name->exact_aliases;
-		for (i = 0; i < exact_alias_count; ++i) {
-			KHTTPD_TR("alias %s", khttpd_ktr_printf("%s", 
-				exact_aliases[i]));
-
+		for (i = 0; i < exact_alias_count; ++i)
 			if (strcmp(host, exact_aliases[i]) == 0) {
 				khttpd_server_acquire(server);
 				goto found;
 			}
-		}
 	}
 	server = NULL;
  found:

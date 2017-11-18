@@ -35,13 +35,6 @@
 #include "khttpd_method.h"
 #include "khttpd_refcount.h"
 
-enum khttpd_server_log_id {
-	KHTTPD_SERVER_LOG_ERROR,
-	KHTTPD_SERVER_LOG_ACCESS,
-
-	KHTTPD_SERVER_LOG_END
-};
-
 struct khttpd_costruct_info;
 struct khttpd_exchange;
 struct khttpd_json;
@@ -76,16 +69,6 @@ struct khttpd_location_ops *khttpd_location_get_ops
     (struct khttpd_location *location);
 void *khttpd_location_data(struct khttpd_location *location);
 void *khttpd_location_set_data(struct khttpd_location *location, void *data);
-struct khttpd_log *khttpd_location_get_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id);
-void khttpd_location_set_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id, struct khttpd_log *log);
-void khttpd_location_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id, struct mbuf *entry);
-void khttpd_location_error(struct khttpd_location *location, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, ...);
-void khttpd_location_verror(struct khttpd_location *location, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, va_list args);
 const char *khttpd_location_get_path(struct khttpd_location *location);
 struct khttpd_server * khttpd_location_get_server
     (struct khttpd_location *);
@@ -103,14 +86,6 @@ struct khttpd_location *khttpd_server_first_location
     (struct khttpd_server *server);
 struct khttpd_location *khttpd_server_next_location
     (struct khttpd_server *server, struct khttpd_location *);
-void khttpd_server_set_log(struct khttpd_server *server,
-    enum khttpd_server_log_id log_id, struct khttpd_log *log);
-struct khttpd_log *khttpd_server_get_log(struct khttpd_server *server,
-    enum khttpd_server_log_id log_id);
-void khttpd_server_error(struct khttpd_server *server, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, ...);
-void khttpd_server_verror(struct khttpd_server *server, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, va_list args);
 
 int khttpd_location_check_invariants(struct khttpd_location *location,
     struct khttpd_server *server);

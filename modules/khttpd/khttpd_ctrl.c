@@ -54,6 +54,7 @@
 #include "khttpd_malloc.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_port.h"
+#include "khttpd_problem.h"
 #include "khttpd_rewriter.h"
 #include "khttpd_server.h"
 #include "khttpd_status_code.h"
@@ -98,7 +99,7 @@ SLIST_HEAD(khttpd_ctrl_leaf_slist, khttpd_ctrl_leaf);
 
 typedef void (*khttpd_ctrl_obj_fn_t)(void *);
 typedef int (*khttpd_ctrl_json_io_t)(void *, struct khttpd_mbuf_json *,
-    struct khttpd_webapi_property *, struct khttpd_json *);
+    struct khttpd_problem_property *, struct khttpd_json *);
 typedef int (*khttpd_ctrl_json_out_t)(void *, struct khttpd_mbuf_json *);
 
 struct khttpd_obj_type {
@@ -225,7 +226,7 @@ struct khttpd_obj_type khttpd_ctrl_ports;
 struct khttpd_obj_type khttpd_ctrl_servers;
 struct khttpd_obj_type khttpd_ctrl_locations;
 
-SX_SYSINIT(khttpd_ctrl_lock, &khttpd_ctrl_lock, "khttpd-ctrl");
+SX_SYSINIT(khttpd_ctrl_lock, &khttpd_ctrl_lock, "ctrl");
 
 static void
 khttpd_ctrl_options_asterisc(struct khttpd_exchange *exchange)
@@ -263,10 +264,10 @@ khttpd_ctrl_parse_json(struct khttpd_json **value_out,
 		return (KHTTPD_STATUS_OK);
 
 	status = KHTTPD_STATUS_BAD_REQUEST;
-	khttpd_webapi_set_problem(response, status, diag.type, diag.title);
+	khttpd_problem_response_begin(response, status, diag.type, diag.title);
 
 	if (diag.detail != NULL) {
-		khttpd_webapi_set_problem_detail(response,
+		khttpd_problem_set_detail(response, "%s", 
 		    sbuf_data(diag.detail));
 		sbuf_delete(diag.detail);
 	}
@@ -692,10 +693,10 @@ khttpd_obj_type_clear(struct khttpd_obj_type *type)
 int
 khttpd_obj_type_get_obj_from_property(struct khttpd_obj_type *type,
     void **obj_out, const char *name, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input, boolean_t may_not_exist)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	const char *str;
 	void *value;
 	int status;
@@ -714,8 +715,8 @@ khttpd_obj_type_get_obj_from_property(struct khttpd_obj_type *type,
 	if (value == NULL) {
 		prop_spec.link = input_prop_spec;
 		prop_spec.name = name;
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -727,12 +728,12 @@ khttpd_obj_type_get_obj_from_property(struct khttpd_obj_type *type,
 static int
 khttpd_obj_type_load(struct khttpd_obj_type *type, 
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	char uuid[KHTTPD_UUID_SIZE];
 	char buf[16];
 	struct sbuf sbuf;
-	struct khttpd_webapi_property prop_specs[2];
+	struct khttpd_problem_property prop_specs[2];
 	struct khttpd_json *obj_j, *id_j;
 	void *obj;
 	int i, n, status;
@@ -741,8 +742,8 @@ khttpd_obj_type_load(struct khttpd_obj_type *type,
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
 	if (khttpd_json_type(input) != KHTTPD_JSON_ARRAY) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, input_prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -763,17 +764,15 @@ khttpd_obj_type_load(struct khttpd_obj_type *type,
 		obj_j = khttpd_json_array_get(input, i);
 		if (obj_j == NULL) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_no_value_problem(output);
-			khttpd_webapi_set_problem_property(output, 
-			    &prop_specs[0]);
+			khttpd_problem_no_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_specs[0]);
 			goto quit;
 		}
 
 		if (khttpd_json_type(obj_j) != KHTTPD_JSON_OBJECT) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_wrong_type_problem(output);
-			khttpd_webapi_set_problem_property(output, 
-			    &prop_specs[0]);
+			khttpd_problem_wrong_type_response_begin(output);
+			khttpd_problem_set_property(output, &prop_specs[0]);
 			goto quit;
 		}
 
@@ -784,24 +783,22 @@ khttpd_obj_type_load(struct khttpd_obj_type *type,
 
 		else if (khttpd_json_type(id_j) != KHTTPD_JSON_STRING) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_wrong_type_problem(output);
-			khttpd_webapi_set_problem_property(output, 
-			    &prop_specs[1]);
+			khttpd_problem_wrong_type_response_begin(output);
+			khttpd_problem_set_property(output, &prop_specs[1]);
 			goto quit;
 
 		} else if (khttpd_uuid_parse(khttpd_json_string_data(id_j),
 			uuid) != 0) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_invalid_value_problem(output);
-			khttpd_webapi_set_problem_property(output,
-			    &prop_specs[1]);
+			khttpd_problem_invalid_value_response_begin(output);
+			khttpd_problem_set_property(output, &prop_specs[1]);
 			goto quit;
 
 		} else if (khttpd_obj_type_lookup(type, uuid) != NULL) {
 			status = KHTTPD_STATUS_CONFLICT;
-			khttpd_webapi_set_problem(output, status, NULL, NULL);
-			khttpd_webapi_set_problem_property(output,
-			    &prop_specs[1]);
+			khttpd_problem_response_begin(output, status,
+			    NULL, NULL);
+			khttpd_problem_set_property(output, &prop_specs[1]);
 			goto quit;
 		}
 
@@ -1031,7 +1028,7 @@ khttpd_ctrl_json_io_end(struct khttpd_exchange *exchange, void *arg)
 {
 	u_char uuid[KHTTPD_UUID_SIZE];
 	struct khttpd_mbuf_json response;
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *post_data, *id_j;
 	struct khttpd_location *node;
 	struct khttpd_obj_type *type;
@@ -1072,7 +1069,7 @@ khttpd_ctrl_json_io_end(struct khttpd_exchange *exchange, void *arg)
 
 	if (khttpd_json_type(post_data) != KHTTPD_JSON_OBJECT) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_wrong_type_problem(&response);
+		khttpd_problem_wrong_type_response_begin(&response);
 		goto respond;
 	}
 
@@ -1083,26 +1080,24 @@ khttpd_ctrl_json_io_end(struct khttpd_exchange *exchange, void *arg)
 
 		if (khttpd_json_type(id_j) != KHTTPD_JSON_STRING) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_wrong_type_problem(&response);
-			khttpd_webapi_set_problem_property(&response,
-			    &prop_spec);
+			khttpd_problem_wrong_type_response_begin(&response);
+			khttpd_problem_set_property(&response, &prop_spec);
 			goto respond;
 		}
 
 		if (khttpd_uuid_parse(khttpd_json_string_data(id_j), uuid)
 		    != 0) {
 			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_webapi_set_invalid_value_problem(&response);
-			khttpd_webapi_set_problem_property(&response,
-			    &prop_spec);
+			khttpd_problem_invalid_value_response_begin(&response);
+			khttpd_problem_set_property(&response, &prop_spec);
 			goto respond;
 		}
 
 		if (memcmp(uuid, leaf->uuid, sizeof(uuid)) != 0) {
 			status = KHTTPD_STATUS_CONFLICT;
-			khttpd_webapi_set_problem(&response, status, NULL, NULL);
-			khttpd_webapi_set_problem_property(&response,
-			    &prop_spec);
+			khttpd_problem_response_begin(&response, status,
+			    NULL, NULL);
+			khttpd_problem_set_property(&response, &prop_spec);
 			goto respond;
 		}
 	}
@@ -1182,7 +1177,7 @@ khttpd_ctrl_post_end(struct khttpd_exchange *exchange, void *arg)
 	char uuid[KHTTPD_UUID_SIZE];
 	char buf[64];
 	struct sbuf sbuf;
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *post_data;
 	struct khttpd_mbuf_json response;
 	struct khttpd_location *node;
@@ -1206,23 +1201,23 @@ khttpd_ctrl_post_end(struct khttpd_exchange *exchange, void *arg)
 
 	if (post_data == NULL) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_no_value_problem(&response);
+		khttpd_problem_no_value_response_begin(&response);
 		goto error;
 	}
 
 	if (khttpd_json_type(post_data) != KHTTPD_JSON_OBJECT) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_wrong_type_problem(&response);
+		khttpd_problem_wrong_type_response_begin(&response);
 		goto error;
 	}
 
 	if (khttpd_json_object_get(post_data, "id") != NULL) {
 		status = KHTTPD_STATUS_CONFLICT;
-		khttpd_webapi_set_problem(&response, status, NULL, NULL);
+		khttpd_problem_response_begin(&response, status, NULL, NULL);
 		prop_spec.link = NULL;
 		prop_spec.name = "id";
-		khttpd_webapi_set_problem_property(&response, &prop_spec);
-		khttpd_webapi_set_problem_detail(&response,
+		khttpd_problem_set_property(&response, &prop_spec);
+		khttpd_problem_set_detail(&response,
 		    "POST method can't specify \"id\" property.");
 		goto error;
 	}
@@ -1302,7 +1297,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 	suffix = khttpd_exchange_suffix(exchange);
 	if (suffix[0] == '\0') {
 		status = KHTTPD_STATUS_METHOD_NOT_ALLOWED;
-		khttpd_webapi_set_problem(&response, status, NULL, NULL);
+		khttpd_problem_response_begin(&response, status, NULL, NULL);
 		khttpd_exchange_add_response_field(exchange, "Allow", "%s",
 		    sbuf_data(&type->allowed_node_methods));
 		goto respond;
@@ -1310,7 +1305,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 
 	if (type->delete == NULL) {
 		status = KHTTPD_STATUS_METHOD_NOT_ALLOWED;
-		khttpd_webapi_set_problem(&response, status, NULL, NULL);
+		khttpd_problem_response_begin(&response, status, NULL, NULL);
 		khttpd_exchange_add_response_field(exchange, "Allow", "%s",
 		    sbuf_data(&type->allowed_leaf_methods));
 		goto respond;
@@ -1320,7 +1315,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 	if (error != 0) {
 		KHTTPD_BRANCH("%s khttpd_uuid_parse %d", __func__, error);
 		status = KHTTPD_STATUS_NOT_FOUND;
-		khttpd_webapi_set_problem(&response, status, NULL, NULL);
+		khttpd_problem_response_begin(&response, status, NULL, NULL);
 		goto respond;
 	}
 
@@ -1331,7 +1326,7 @@ khttpd_ctrl_delete(struct khttpd_exchange *exchange)
 		KHTTPD_BRANCH("%s leaf==NULL", __func__);
 		sx_xunlock(&khttpd_ctrl_lock);
 		status = KHTTPD_STATUS_NOT_FOUND;
-		khttpd_webapi_set_problem(&response, status, NULL, NULL);
+		khttpd_problem_response_begin(&response, status, NULL, NULL);
 		goto respond;
 	}
 
@@ -1402,7 +1397,7 @@ int
 khttpd_location_type_create_location(struct khttpd_location **location_out,
     struct khttpd_server *server, const char *path,
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input, struct khttpd_location_ops *ops, void *arg)
 {
 	struct khttpd_location *location;
@@ -1415,11 +1410,10 @@ khttpd_location_type_create_location(struct khttpd_location **location_out,
 		*location_out = location;
 	} else {
 		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_errno(output, error);
-		khttpd_webapi_set_problem_detail(output,
-		    "location routing failure");
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_errno(output, error);
+		khttpd_problem_set_detail(output, "location routing failure");
+		khttpd_problem_set_property(output, input_prop_spec);
 	}
 
 	return (status);
@@ -1442,7 +1436,7 @@ khttpd_location_type_default_get(struct khttpd_location *location,
 static int
 khttpd_location_type_default_put(struct khttpd_location *location,
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 
 	return (KHTTPD_STATUS_OK);
@@ -1536,9 +1530,9 @@ khttpd_location_type_deregister(const char *name)
 static int
 khttpd_location_type_get_from_property(struct khttpd_location_type **type_out,
     const char *name, struct khttpd_mbuf_json *output, 
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_location_type *type;
 	const char *type_str;
 	int status;
@@ -1554,8 +1548,8 @@ khttpd_location_type_get_from_property(struct khttpd_location_type **type_out,
 	if (type == NULL) {
 		prop_spec.link = input_prop_spec;
 		prop_spec.name = "type";
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -1567,20 +1561,20 @@ khttpd_location_type_get_from_property(struct khttpd_location_type **type_out,
 static int
 khttpd_ctrl_log_new(struct khttpd_log **log_out, 
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct thread *td;
 	struct khttpd_log *log;
 	const char *type_str, *path_str;
 	int error, fd, status;
 
 	KHTTPD_ENTRY("%s(,%p,%s,%p)", __func__, output,
-	    khttpd_webapi_ktr_print_property(input_prop_spec), input);
+	    khttpd_problem_ktr_print_property(input_prop_spec), input);
 
 	if (khttpd_json_type(input) != KHTTPD_JSON_OBJECT) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, input_prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -1593,8 +1587,8 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 
 	if (strcmp(type_str, "file") != 0) {
 		prop_spec.name = "type";
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -1606,9 +1600,9 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 	prop_spec.name = "path";
 
 	if (path_str[0] != '/') {
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
-		khttpd_webapi_set_problem_detail(output,
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output,
 		    "absolute path name is expected.");
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
@@ -1618,10 +1612,10 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 	    O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (error != 0) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
-		khttpd_webapi_set_problem_detail(output, "file open error");
-		khttpd_webapi_set_problem_errno(output, error);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output, "file open error");
+		khttpd_problem_set_errno(output, error);
 		return (status);
 	}
 	fd = td->td_retval[0];
@@ -1702,10 +1696,10 @@ khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
 
 static int
 khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct sockaddr_storage addr;
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_ctrl_port_data *port_data;
 	struct khttpd_json *address_j;
 	struct khttpd_port *port;
@@ -1730,8 +1724,8 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	protocol_id = khttpd_ctrl_protocol_for_name(protocol);
 	if (protocol_id == KHTTPD_CTRL_PROTOCOL_UNKNOWN ||
 	    protocol_id == KHTTPD_CTRL_PROTOCOL_HTTPS) {
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -1762,19 +1756,19 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	error = khttpd_port_start(port, (struct sockaddr *)&port_data->addr,
 	    khttpd_ctrl_accept_fns[protocol_id], &detail);
 	if (error == EADDRNOTAVAIL || error == EADDRINUSE) {
-		khttpd_webapi_set_problem(output, KHTTPD_STATUS_CONFLICT,
+		khttpd_problem_response_begin(output, KHTTPD_STATUS_CONFLICT,
 		    NULL, NULL);
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
-		khttpd_webapi_set_problem_errno(output, error);
+		khttpd_problem_set_property(output, input_prop_spec);
+		khttpd_problem_set_errno(output, error);
 		if (detail != NULL)
-			khttpd_webapi_set_problem_detail(output, detail);
+			khttpd_problem_set_detail(output, detail);
 
 	} else if (error != 0) {
-		khttpd_webapi_set_problem(output, 
+		khttpd_problem_response_begin(output, 
 		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL);
-		khttpd_webapi_set_problem_errno(output, error);
+		khttpd_problem_set_errno(output, error);
 		if (detail != NULL)
-			khttpd_webapi_set_problem_detail(output, detail);
+			khttpd_problem_set_detail(output, detail);
 	}
 
 	return (status);
@@ -1782,7 +1776,7 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 
 static int
 khttpd_ctrl_port_create(void *object_out, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct khttpd_port *port;
 	int error, status;
@@ -1790,11 +1784,10 @@ khttpd_ctrl_port_create(void *object_out, struct khttpd_mbuf_json *output,
 	error = khttpd_port_new(&port);
 	if (error != 0) {
 		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_detail(output,
-		    "failed to create a port");
-		khttpd_webapi_set_problem_errno(output, error);
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_detail(output, "failed to create a port");
+		khttpd_problem_set_errno(output, error);
+		khttpd_problem_set_property(output, input_prop_spec);
 		return (status);
 	}
 
@@ -1817,12 +1810,12 @@ khttpd_ctrl_port_hide(void *object)
 
 static int
 khttpd_ctrl_parse_server_name(struct khttpd_server_name *name,
-    struct khttpd_webapi_property *input_prop_spec,
+    struct khttpd_problem_property *input_prop_spec,
     struct khttpd_json *input, struct khttpd_mbuf_json *output)
 {
 	char buf[32];
 	struct sbuf spec_buf;
-	struct khttpd_webapi_property *prop_spec, prop_spec1;
+	struct khttpd_problem_property *prop_spec, prop_spec1;
 	struct khttpd_json *alias_j, *aliases_j;
 	const char **exact_aliases, *name_str, *type_str;
 	int i, n, status;
@@ -1834,8 +1827,8 @@ khttpd_ctrl_parse_server_name(struct khttpd_server_name *name,
 	sbuf_new(&spec_buf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 
 	if (khttpd_json_type(input) != KHTTPD_JSON_OBJECT) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, input_prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, input_prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -1892,14 +1885,14 @@ khttpd_ctrl_parse_server_name(struct khttpd_server_name *name,
 	goto quit;
 
  invalid_value:
-	khttpd_webapi_set_invalid_value_problem(output);
+	khttpd_problem_invalid_value_response_begin(output);
 	goto bad_request;
 
  wrong_type:
-	khttpd_webapi_set_wrong_type_problem(output);
+	khttpd_problem_wrong_type_response_begin(output);
 
  bad_request:
-	khttpd_webapi_set_problem_property(output, prop_spec);
+	khttpd_problem_set_property(output, prop_spec);
 	status = KHTTPD_STATUS_BAD_REQUEST;
 
  quit:
@@ -1911,11 +1904,11 @@ khttpd_ctrl_parse_server_name(struct khttpd_server_name *name,
 
 static int
 khttpd_ctrl_parse_ports(struct khttpd_port ***ports_out, int *port_count_out,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
     struct khttpd_mbuf_json *output)
 {
 	char buf[16];
-	struct khttpd_webapi_property *prop_spec, prop_spec1;
+	struct khttpd_problem_property *prop_spec, prop_spec1;
 	struct sbuf spec_buf;
 	struct khttpd_json *port_j;
 	struct khttpd_port *port, **ports;
@@ -1958,14 +1951,14 @@ khttpd_ctrl_parse_ports(struct khttpd_port ***ports_out, int *port_count_out,
 	goto quit;
 
  invalid_value:
-	khttpd_webapi_set_invalid_value_problem(output);
+	khttpd_problem_invalid_value_response_begin(output);
 	goto bad_request;
 
  wrong_type:
-	khttpd_webapi_set_wrong_type_problem(output);
+	khttpd_problem_wrong_type_response_begin(output);
 
  bad_request:
-	khttpd_webapi_set_problem_property(output, prop_spec);
+	khttpd_problem_set_property(output, prop_spec);
 	status = KHTTPD_STATUS_BAD_REQUEST;
 	khttpd_free(ports);
 
@@ -2072,15 +2065,13 @@ khttpd_ctrl_server_get(void *object, struct khttpd_mbuf_json *output)
 
 static int
 khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property *prop_spec, prop_spec1;
+	struct khttpd_problem_property *prop_spec, prop_spec1;
 	struct khttpd_port **ports;
 	struct khttpd_server *server;
 	struct khttpd_server_name *name;
-	struct khttpd_json *access_log_j, *error_log_j;
 	struct khttpd_json *has_config_j, *ports_j;
-	struct khttpd_log *access_log, *error_log;
 	int port_count, status;
 	boolean_t has_config;
 
@@ -2089,7 +2080,6 @@ khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
 	server = object;
 	ports = NULL;
 	port_count = 0;
-	access_log = error_log = NULL;
 
 	name = khttpd_vhost_server_name_new();
 	status = khttpd_ctrl_parse_server_name(name, input_prop_spec, input,
@@ -2104,8 +2094,8 @@ khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
 	has_config_j = khttpd_json_object_get(input, "hasConfigurator");
 	if (has_config_j != NULL && 
 	    khttpd_json_type(has_config_j) != KHTTPD_JSON_BOOL) {
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, prop_spec);
 		status = KHTTPD_STATUS_BAD_REQUEST;
 		goto quit;
 	}
@@ -2113,27 +2103,9 @@ khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
 	    khttpd_json_integer_value(has_config_j) != 0;
 	if (has_config != (server == khttpd_ctrl_server)) {
 		status = KHTTPD_STATUS_CONFLICT;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_property(output, prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, prop_spec);
 		goto quit;
-	}
-
-	prop_spec1.name = "accessLog";
-	access_log_j = khttpd_json_object_get(input, "accessLog");
-	if (access_log_j != NULL) {
-		status = khttpd_ctrl_log_new(&access_log, output, &prop_spec1,
-		    access_log_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
-	}
-
-	prop_spec1.name = "errorLog";
-	error_log_j = khttpd_json_object_get(input, "errorLog");
-	if (error_log_j != NULL) {
-		status = khttpd_ctrl_log_new(&error_log, output, prop_spec,
-		    error_log_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
 	}
 
 	prop_spec1.name = "ports";
@@ -2147,17 +2119,11 @@ khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
 
 	khttpd_vhost_set_server_name(server, name);
 	name = NULL;
-	khttpd_server_set_log(server, KHTTPD_SERVER_LOG_ERROR, error_log);
-	error_log = NULL;
-	khttpd_server_set_log(server, KHTTPD_SERVER_LOG_ACCESS, access_log);
-	access_log = NULL;
 	khttpd_vhost_set_port_list(server, ports, port_count);
 	status = KHTTPD_STATUS_OK;
 
  quit:
 	khttpd_free(ports);
-	khttpd_log_delete(access_log);
-	khttpd_log_delete(error_log);
 	khttpd_vhost_server_name_delete(name);
 
 	return (status);
@@ -2165,10 +2131,10 @@ khttpd_ctrl_server_put(void *object, struct khttpd_mbuf_json *output,
 
 static int
 khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	char uuid[KHTTPD_UUID_SIZE];
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_server *server;
 	struct khttpd_json *has_config_j;
 	struct khttpd_location *location;
@@ -2183,8 +2149,8 @@ khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
 		has_config = FALSE;
 	else if (khttpd_json_type(has_config_j) != KHTTPD_JSON_BOOL) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_webapi_set_wrong_type_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (status);
 	} else
 		has_config = khttpd_json_integer_value(has_config_j);
@@ -2193,8 +2159,8 @@ khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
 		if ((khttpd_obj_type_get_leaf(&khttpd_ctrl_servers,
 			    khttpd_ctrl_server) != NULL)) {
 			status = KHTTPD_STATUS_CONFLICT;
-			khttpd_webapi_set_wrong_type_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_wrong_type_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (status);
 		}
 
@@ -2203,11 +2169,11 @@ khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
 	} else {
 		server = khttpd_server_new(&error);
 		if (server == NULL) {
-			khttpd_webapi_set_problem(output,
+			khttpd_problem_response_begin(output,
 			    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL);
-			khttpd_webapi_set_problem_detail(output, 
+			khttpd_problem_set_detail(output, 
 			    "server construction failed");
-			khttpd_webapi_set_problem_errno(output, error);
+			khttpd_problem_set_errno(output, error);
 			return (KHTTPD_STATUS_INTERNAL_SERVER_ERROR);
 		}
 	}
@@ -2337,9 +2303,9 @@ khttpd_ctrl_location_get(void *object, struct khttpd_mbuf_json *output)
 
 static int
 khttpd_ctrl_location_put(void *object, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_location *location;
 	struct khttpd_ctrl_location_data *location_data;
 	struct khttpd_location_type *type;
@@ -2363,8 +2329,8 @@ khttpd_ctrl_location_put(void *object, struct khttpd_mbuf_json *output,
 	if (type != location_data->type) {
 		prop_spec.name = "type";
 		status = KHTTPD_STATUS_CONFLICT;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (status);
 	}
 
@@ -2376,8 +2342,8 @@ khttpd_ctrl_location_put(void *object, struct khttpd_mbuf_json *output,
 	if (strcmp(path, khttpd_location_get_path(location)) != 0) {
 		prop_spec.name = "path";
 		status = KHTTPD_STATUS_CONFLICT;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (status);
 	}
 
@@ -2389,8 +2355,8 @@ khttpd_ctrl_location_put(void *object, struct khttpd_mbuf_json *output,
 	if (obj != khttpd_location_get_server(location)) {
 		prop_spec.name = "server";
 		status = KHTTPD_STATUS_CONFLICT;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (status);
 	}
 
@@ -2399,9 +2365,9 @@ khttpd_ctrl_location_put(void *object, struct khttpd_mbuf_json *output,
 
 static int
 khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_location_type *type;
 	struct khttpd_location *location;
 	struct khttpd_ctrl_location_data *location_data;
@@ -2526,9 +2492,9 @@ khttpd_ctrl_rewriter_get(void *object, struct khttpd_mbuf_json *output)
 static int
 khttpd_ctrl_rewriter_add_rule_from_propery(struct khttpd_rewriter *rewriter,
     struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	const char *type, *pattern, *result;
 	int status;
 
@@ -2542,8 +2508,8 @@ khttpd_ctrl_rewriter_add_rule_from_propery(struct khttpd_rewriter *rewriter,
 	if (strcmp(type, "suffix") != 0) {
 		prop_spec.link = input_prop_spec;
 		prop_spec.name = "type";
-		khttpd_webapi_set_invalid_value_problem(output);
-		khttpd_webapi_set_problem_property(output, &prop_spec);
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
@@ -2565,25 +2531,25 @@ khttpd_ctrl_rewriter_add_rule_from_propery(struct khttpd_rewriter *rewriter,
 static int
 khttpd_ctrl_rewriter_modify(struct khttpd_rewriter *rewriter,
     struct khttpd_mbuf_json *output, 
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	char buf[64];
 	struct sbuf sbuf;
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_json *rules_j, *rule_j;
 	const char *str1;
 	int i, n, status;
 
 	KHTTPD_ENTRY("%s(%p,,%s,%p)", __func__, rewriter, output,
-	    khttpd_webapi_ktr_print_property(input_prop_spec), input);
+	    khttpd_problem_ktr_print_property(input_prop_spec), input);
 
 	prop_spec.link = NULL;
 	prop_spec.name = "rules";
 	rules_j = khttpd_json_object_get(input, "rules");
 	if (rules_j != NULL) {
 		if (khttpd_json_type(rules_j) != KHTTPD_JSON_ARRAY) {
-			khttpd_webapi_set_wrong_type_problem(output);
-			khttpd_webapi_set_problem_property(output, &prop_spec);
+			khttpd_problem_wrong_type_response_begin(output);
+			khttpd_problem_set_property(output, &prop_spec);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -2616,7 +2582,7 @@ khttpd_ctrl_rewriter_modify(struct khttpd_rewriter *rewriter,
 
 static int
 khttpd_ctrl_rewriter_put(void *object, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct khttpd_rewriter *rewriter, *tmp_rewriter;
 	int error, status;
@@ -2627,9 +2593,9 @@ khttpd_ctrl_rewriter_put(void *object, struct khttpd_mbuf_json *output,
 	error = khttpd_rewriter_new(&tmp_rewriter);
 	if (error != 0) {
 		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_errno(output, error);
-		khttpd_webapi_set_problem_detail(output,
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_errno(output, error);
+		khttpd_problem_set_detail(output, 
 		    "failed to construct a rewriter");
 		return (status);
 	}
@@ -2647,7 +2613,7 @@ khttpd_ctrl_rewriter_put(void *object, struct khttpd_mbuf_json *output,
 
 static int
 khttpd_ctrl_rewriter_create(void *object_out, struct khttpd_mbuf_json *output,
-    struct khttpd_webapi_property *input_prop_spec, struct khttpd_json *input)
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct khttpd_rewriter *rewriter;
 	int error, status;
@@ -2657,9 +2623,9 @@ khttpd_ctrl_rewriter_create(void *object_out, struct khttpd_mbuf_json *output,
 	error = khttpd_rewriter_new(&rewriter);
 	if (error != 0) {
 		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_webapi_set_problem(output, status, NULL, NULL);
-		khttpd_webapi_set_problem_errno(output, error);
-		khttpd_webapi_set_problem_detail(output,
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_errno(output, error);
+		khttpd_problem_set_detail(output,
 		    "failed to construct a rewriter");
 		return (status);
 	}
@@ -2724,11 +2690,13 @@ khttpd_ctrl_start(void *arg)
 {
 	char buf[128];
 	struct khttpd_mbuf_json output;
-	struct khttpd_webapi_property prop_spec;
+	struct khttpd_problem_property prop_spec;
 	struct sbuf sbuf;
 	struct khttpd_main_start_command *cmd;
 	struct khttpd_json *args_j, *rewriters_j, *ports_j;
 	struct khttpd_json *servers_j, *locations_j;
+	struct khttpd_json *access_log_j, *error_log_j;
+	struct khttpd_log *access_log, *error_log;
 	struct mbuf *data, *mb, *tmb;
 	int status;
 
@@ -2739,16 +2707,35 @@ khttpd_ctrl_start(void *arg)
 	prop_spec.link = NULL;
 	khttpd_mbuf_json_new(&output);
 	args_j = NULL;
+	access_log = error_log = NULL;
 
 	status = khttpd_ctrl_parse_json(&args_j, &output, data);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		goto quit;
 
 	if (khttpd_json_type(args_j) != KHTTPD_JSON_OBJECT) {
-		khttpd_webapi_set_wrong_type_problem(&output);
-		khttpd_webapi_set_problem_property(&output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(&output);
+		khttpd_problem_set_property(&output, &prop_spec);
 		status = KHTTPD_STATUS_BAD_REQUEST;
 		goto quit;
+	}
+
+	prop_spec.name = "accessLog";
+	access_log_j = khttpd_json_object_get(args_j, "accessLog");
+	if (access_log_j != NULL) {
+		status = khttpd_ctrl_log_new(&access_log, &output, &prop_spec,
+		    access_log_j);
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+			goto quit;
+	}
+
+	prop_spec.name = "errorLog";
+	error_log_j = khttpd_json_object_get(args_j, "errorLog");
+	if (error_log_j != NULL) {
+		status = khttpd_ctrl_log_new(&error_log, &output, &prop_spec,
+		    error_log_j);
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+			goto quit;
 	}
 
 	prop_spec.name = "rewriters";
@@ -2776,29 +2763,37 @@ khttpd_ctrl_start(void *arg)
 		status = khttpd_obj_type_load(&khttpd_ctrl_rewriters, &output,
 		    &prop_spec, rewriters_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
+			goto unlock;
 	}
 
 	if (ports_j != NULL) {
 		status = khttpd_obj_type_load(&khttpd_ctrl_ports, &output,
 		    &prop_spec, ports_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
+			goto unlock;
 	}
 
 	if (servers_j != NULL) {
 		status = khttpd_obj_type_load(&khttpd_ctrl_servers, &output,
 		    &prop_spec, servers_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
+			goto unlock;
 	}
 
 	if (locations_j != NULL)
 		status = khttpd_obj_type_load(&khttpd_ctrl_locations, &output,
 		    &prop_spec, locations_j);
 
- quit:
+	khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, access_log);
+	khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, error_log);
+	access_log = error_log = NULL;
+
+ unlock:
 	sx_xunlock(&khttpd_ctrl_lock);
+
+ quit:
+	khttpd_log_delete(access_log);
+	khttpd_log_delete(error_log);
 
 	khttpd_json_delete(args_j);
 
@@ -3083,6 +3078,8 @@ khttpd_ctrl_exit(void)
 	KHTTPD_ENTRY("khttpd_ctrl_exit()");
 
 	sx_xlock(&khttpd_ctrl_lock);
+	khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, NULL);
+	khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, NULL);
 	khttpd_obj_type_clear(&khttpd_ctrl_rewriters);
 	khttpd_obj_type_clear(&khttpd_ctrl_locations);
 	khttpd_obj_type_clear(&khttpd_ctrl_servers);

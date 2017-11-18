@@ -182,24 +182,15 @@ khttpd_event_main(void *arg)
 		if (error != 0)
 			break;
 
-		KHTTPD_TR("%s %d dispatch", __func__, queue->id);
-
-		for (i = 0; i < nevents; ++i) {
-			event = events[i].udata;
-			KHTTPD_TR("%s event %d, filt=%d, ident=%ld, "
-			    "event=%p", __func__, i, events[i].filter,
-			    events[i].ident, event);
-			if (event != NULL)
+		for (i = 0; i < nevents; ++i)
+			if ((event = events[i].udata) != NULL)
 				event->handler(event->arg);
-		}
 	}
 
 	if (error != 0)
 		log(LOG_ERR, "khttpd: kevent() failed "
 		    "(error: %d, file: %s, line: %u)",
 		    error, __FILE__, __LINE__);
-
-	KHTTPD_TR("%s %d exiting", __func__, queue->id);
 
 	sx_xlock(&khttpd_event_lock);
 	if (--khttpd_event_thread_count == 0)
@@ -243,7 +234,6 @@ khttpd_event_new(khttpd_event_fn_t handler, void *arg, uintptr_t ident,
 	strcpy(event->tmsg, "<unknown>");
 
 	if ((flags & EV_ENABLE) != 0 && queue->owner == curthread) {
-		KHTTPD_TR("%s insert %p into %p", __func__, event, queue);
 		SLIST_INSERT_HEAD(&queue->changes, event, link);
 		return (event);
 	}
@@ -370,7 +360,6 @@ khttpd_event_enable(struct khttpd_event *event)
 	error = 0;
 	event->kevent.flags = EV_ENABLE;
 	if (queue->owner == curthread) {
-		KHTTPD_TR("%s insert %p into %p", __func__, event, queue);
 		SLIST_INSERT_HEAD(&queue->changes, event, link);
 		return;
 	}

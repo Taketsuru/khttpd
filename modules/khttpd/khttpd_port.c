@@ -125,6 +125,8 @@ static void khttpd_socket_stream_continue_receiving(struct khttpd_stream *);
 static void khttpd_socket_stream_shutdown_receiver(struct khttpd_stream *);
 static boolean_t khttpd_socket_stream_send(struct khttpd_stream *,
     struct mbuf *, int);
+static void khttpd_socket_stream_send_bufstat(struct khttpd_stream *,
+    size_t *, size_t *, size_t *);
 static void khttpd_socket_stream_notify_of_drain(struct khttpd_stream *);
 static void khttpd_socket_stream_destroy(struct khttpd_stream *);
 
@@ -138,6 +140,7 @@ struct khttpd_stream_down_ops khttpd_socket_ops = {
 	.continue_receiving = khttpd_socket_stream_continue_receiving,
 	.shutdown_receiver = khttpd_socket_stream_shutdown_receiver,
 	.send = khttpd_socket_stream_send,
+	.send_bufstat = khttpd_socket_stream_send_bufstat,
 	.notify_of_drain = khttpd_socket_stream_notify_of_drain,
 	.destroy = khttpd_socket_stream_destroy
 };
@@ -244,7 +247,8 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 	struct socket_args socket_args;
 	struct thread *td;
 	const char *detail;
-	int error, fd, soval;
+	socklen_t sovallen;
+	int error, fd, soval, lowat;
 	boolean_t is_tcp;
 
 	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, port, addr, accept_handler);
@@ -288,6 +292,22 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 	    UIO_SYSSPACE, sizeof(soval));
 	if (error != 0) {
 		detail = "setsockopt(SO_REUSEADDR) failed";
+		goto error;
+	}
+
+	sovallen = sizeof(soval);
+	error = kern_getsockopt(td, fd, SOL_SOCKET, SO_SNDBUF, &soval,
+	    UIO_SYSSPACE, &sovallen);
+	if (error != 0) {
+		detail = "getsockopt(SO_SNDBUF) failed";
+		goto error;
+	}
+	
+	lowat = MAX(PAGE_SIZE, soval / 2);
+	error = kern_setsockopt(td, fd, SOL_SOCKET, SO_SNDLOWAT, &lowat,
+	    UIO_SYSSPACE, sizeof(lowat));
+	if (error != 0) {
+		detail = "setsockopt(SO_SNDLOWAT) failed";
 		goto error;
 	}
 
@@ -764,6 +784,27 @@ khttpd_socket_stream_send(struct khttpd_stream *stream, struct mbuf *m,
 }
 
 static void
+khttpd_socket_stream_send_bufstat(struct khttpd_stream *stream, size_t *hiwat,
+    size_t *lowat, size_t *space)
+{
+	struct khttpd_socket *socket;
+	struct socket *so;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, stream);
+
+	socket = stream->down;
+	so = socket->fp->f_data;
+	SOCKBUF_LOCK(&so->so_snd);
+	if (hiwat != NULL)
+		*hiwat = so->so_snd.sb_hiwat;
+	if (lowat != NULL)
+		*lowat = so->so_snd.sb_lowat;
+	if (space != NULL)
+		*space = sbspace(&so->so_snd);
+	SOCKBUF_UNLOCK(&so->so_snd);
+}
+
+static void
 khttpd_socket_stream_notify_of_drain(struct khttpd_stream *stream)
 {
 	struct khttpd_socket *socket;
@@ -838,7 +879,9 @@ khttpd_socket_handle_read_event(void *arg)
 static void
 khttpd_socket_handle_write_event(void *arg)
 {
+	struct socket *so;
 	struct khttpd_socket *socket;
+	ssize_t space;
 	boolean_t need_scheduling, notify;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
@@ -852,7 +895,12 @@ khttpd_socket_handle_write_event(void *arg)
 
 	if (socket->xmit_buf != NULL) {
 		need_scheduling = khttpd_socket_send(socket);
-		notify = FALSE;
+		if (socket->xmit_buf != NULL)
+			notify = FALSE;
+		else {
+			notify = socket->xmit_notification_requested;
+			socket->xmit_notification_requested = FALSE;
+		}
 	} else {
 		notify = socket->xmit_notification_requested;
 		need_scheduling = FALSE;
@@ -863,8 +911,15 @@ khttpd_socket_handle_write_event(void *arg)
 
 	if (need_scheduling)
 		khttpd_event_enable(socket->write_event);
-	else if (notify)
-		khttpd_stream_clear_to_send(socket->stream);
+
+	if (notify) {
+		so = socket->fp->f_data;
+		SOCKBUF_LOCK(&so->so_snd);
+		space = sbspace(&so->so_snd);
+		SOCKBUF_UNLOCK(&so->so_snd);
+
+		khttpd_stream_clear_to_send(socket->stream, space);
+	}
 }
 
 const struct sockaddr *

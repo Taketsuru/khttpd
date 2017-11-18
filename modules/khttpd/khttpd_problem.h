@@ -25,33 +25,44 @@
  * DAMAGE.
  */
 
-#include "khttpd_stream.h"
+#pragma once
 
-extern int
-khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid, 
-    struct mbuf **m_out);
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
-extern void
-khttpd_stream_continue_receiving(struct khttpd_stream *stream);
+#include <sys/types.h>
+#include <machine/stdarg.h>
 
-extern void
-khttpd_stream_shutdown_receiver(struct khttpd_stream *stream);
+struct sbuf;
 
-extern boolean_t
-khttpd_stream_send(struct khttpd_stream *stream, struct mbuf *m, int flags);
+struct khttpd_json;
+struct khttpd_mbuf_json;
 
-extern void
-khttpd_stream_notify_of_drain(struct khttpd_stream *stream);
+struct khttpd_problem_property {
+	struct khttpd_problem_property *link;
+	const char	*name;
+};
 
-extern void
-khttpd_stream_destroy(struct khttpd_stream *stream);
+void khttpd_problem_property_specifier_to_string(struct sbuf *output,
+    struct khttpd_problem_property *prop_spec);
 
-extern void
-khttpd_stream_send_bufstat(struct khttpd_stream *stream, size_t *, size_t *,
-    size_t *);
+#ifdef KHTTPD_KTR_LOGGING
+const char *khttpd_problem_ktr_print_property
+    (struct khttpd_problem_property *prop_spec);
+#endif
 
-extern void
-khttpd_stream_data_is_available(struct khttpd_stream *stream);
-
-extern void
-khttpd_stream_clear_to_send(struct khttpd_stream *stream, ssize_t);
+void khttpd_problem_response_begin(struct khttpd_mbuf_json *output, int status,
+    const char *type, const char *title);
+void khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
+    const char *type, const char *title);
+void khttpd_problem_set_property(struct khttpd_mbuf_json *output,
+    struct khttpd_problem_property *property);
+void khttpd_problem_set_detail(struct khttpd_mbuf_json *output,
+    const char *fmt, ...);
+void khttpd_problem_set_errno(struct khttpd_mbuf_json *output,
+    int error);
+void khttpd_problem_no_value_response_begin(struct khttpd_mbuf_json *);
+void khttpd_problem_wrong_type_response_begin(struct khttpd_mbuf_json *);
+void khttpd_problem_invalid_value_response_begin(struct khttpd_mbuf_json *);
+const char *khttpd_problem_get_severity_label(int severity);

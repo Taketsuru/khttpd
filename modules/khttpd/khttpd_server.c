@@ -47,7 +47,6 @@
 #include "khttpd_costruct.h"
 #include "khttpd_init.h"
 #include "khttpd_ktr.h"
-#include "khttpd_log.h"
 #include "khttpd_refcount.h"
 #include "khttpd_malloc.h"
 #include "khttpd_mbuf.h"
@@ -74,7 +73,6 @@ struct khttpd_location {
 
 #define khttpd_location_zctor_begin parent
 	struct khttpd_location *parent;
-	struct khttpd_log *logs[KHTTPD_SERVER_LOG_END];
 	unsigned	costructs_ready:1;
 
 #define khttpd_location_zctor_end refcount
@@ -180,9 +178,8 @@ khttpd_location_dtor(struct khttpd_location *location)
 	struct khttpd_location_ops *ops;
 	struct khttpd_server *server;
 	khttpd_location_fn_t dtor;
-	int i, nlogs;
 
-	KHTTPD_TR("%s(%p)", __func__, location);
+	KHTTPD_ENTRY("%s(%p)", __func__, location);
 
 	ops = location->ops;
 	dtor = ops->dtor;
@@ -198,10 +195,6 @@ khttpd_location_dtor(struct khttpd_location *location)
 		khttpd_location_unlink(location);
 		khttpd_server_release(server);
 	}
-
-	nlogs = sizeof(location->logs) / sizeof(location->logs[0]);
-	for (i = 0; i < nlogs; ++i)
-		khttpd_log_delete(location->logs[i]);
 }
 
 struct khttpd_location_ops *
@@ -209,80 +202,6 @@ khttpd_location_get_ops(struct khttpd_location *location)
 {
 
 	return (location->ops);
-}
-
-struct khttpd_log *
-khttpd_location_get_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id)
-{
-	struct khttpd_log *log;
-	struct khttpd_location *loc;
-
-	KASSERT(0 <= log_id && log_id < KHTTPD_SERVER_LOG_END,
-	    ("invalid log id %d", log_id));
-
-	log = NULL;
-	for (loc = location; loc != NULL; loc = loc->parent) {
-		log = loc->logs[log_id];
-		if (log != NULL)
-			return (log);
-	}
-
-	return (NULL);
-}
-
-void
-khttpd_location_set_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id, struct khttpd_log *log)
-{
-
-	KASSERT(0 <= log_id && log_id < KHTTPD_SERVER_LOG_END,
-	    ("invalid log id %d", log_id));
-
-	khttpd_log_delete(location->logs[log_id]);
-	location->logs[log_id] = log;
-}
-
-void
-khttpd_location_log(struct khttpd_location *location,
-    enum khttpd_server_log_id log_id, struct mbuf *entry)
-{
-	struct khttpd_log *log;
-
-	log = khttpd_location_get_log(location, log_id);
-	if (log == NULL && log_id != KHTTPD_SERVER_LOG_ERROR)
-		return;
-
-	khttpd_log_put(log, entry);
-}
-
-void
-khttpd_location_error(struct khttpd_location *location, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, ...)
-{
-	va_list args;
-
-	va_start(args, desc_fmt);
-	khttpd_location_verror(location, severity, entry, desc_fmt, args);
-	va_end(args);
-}
-
-void
-khttpd_location_verror(struct khttpd_location *location, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, va_list args)
-{
-	struct khttpd_mbuf_json new_entry;
-
-	if (entry == NULL) {
-		entry = &new_entry;
-		khttpd_mbuf_json_new(entry);
-		khttpd_mbuf_json_object_begin(entry);
-	}
-
-	khttpd_log_vput_error_properties(entry, severity, desc_fmt, args);
-	khttpd_mbuf_json_object_end(entry);
-	khttpd_location_log(location, KHTTPD_SERVER_LOG_ERROR,
-	    khttpd_mbuf_json_move(entry));
 }
 
 const char *
@@ -400,11 +319,6 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	oldloc = NULL;
 	parent = server->root;
 	for (;;) {
-		KHTTPD_TR("%s %s, len=%d", __func__,
-		    khttpd_ktr_printf("parent=%p(%s), [lbegin,lend)=%*s",
-			parent, parent->path, (int)(lend - lbegin), lbegin),
-			lend - lbegin);
-
 		/*
 		 * Find the location that might be the previous element in the
 		 * list.  Let 'ptr' point to it.
@@ -598,7 +512,6 @@ khttpd_server_adopt_successors(struct khttpd_location *parent,
 	     ptr != NULL && len <= ptr->key_len &&
 		 memcmp(ptr->key, lbegin, len) == 0;
 	     ptr = next) {
-		KHTTPD_TR("%s move %p(%s)", __func__, ptr, ptr->path);
 		next = TAILQ_NEXT(ptr, children_link);
 
 		RB_REMOVE(khttpd_location_tree, &parent->children_tree, ptr);
@@ -638,17 +551,6 @@ khttpd_server_find_location(struct khttpd_server *server,
 
 	parent = root = server->root;
 	while (!RB_EMPTY(&parent->children_tree)) {
-		KHTTPD_TR("%s find %s", __func__,
-		    khttpd_ktr_printf("parent %s, target %*s",
-			parent->path, (int)(end - cp), cp));
-
-		TAILQ_FOREACH(ptr, &parent->children_list, children_link)
-			KHTTPD_TR("%s list child %s", __func__,
-			    khttpd_ktr_printf("%s", ptr->path));
-		RB_FOREACH(ptr, khttpd_location_tree, &parent->children_tree)
-			KHTTPD_TR("%s tree child %s", __func__,
-			    khttpd_ktr_printf("%s", ptr->path));
-
 		key.key = cp;
 		key.key_len = end - cp;
 		ptr = RB_NFIND(khttpd_location_tree, &parent->children_tree,
@@ -690,10 +592,6 @@ khttpd_server_find_location(struct khttpd_server *server,
 
 	rw_runlock(&server->lock);
 
-	KHTTPD_TR("%s result %s", __func__,
-	    khttpd_ktr_printf("location \"%s\", suffix \"%s\"", parent->path,
-		    cp));
-
 	*suffix_out = cp;
 
 	return (parent);
@@ -711,31 +609,24 @@ khttpd_server_next_location_locked(struct khttpd_server *server,
 {
 	struct khttpd_location *result;
 
-	KHTTPD_TR("%s %p", __func__, ptr);
+	KHTTPD_ENTRY("%s %p", __func__, ptr);
 
 	if ((result = TAILQ_FIRST(&ptr->children_list)) != NULL)
-		/* If 'ptr' has a child, it's the result. */
-		KHTTPD_TR("%s child %p", __func__, result);
+		; /* If 'ptr' has a child, it's the result. */
 	else if ((result = TAILQ_NEXT(ptr, children_link)) != NULL)
-		/* If 'ptr' has a next sibling, it's the result. */
-		KHTTPD_TR("%s sibling %p", __func__, result);
+		; /* If 'ptr' has a next sibling, it's the result. */
 	else
 		/*
 		 * Find the first ancestor which has the next sibling.  The
 		 * sibling is the result.
 		 */
 		do {
-			KHTTPD_TR("%s parent %p -> %p", __func__, ptr,
-			    ptr->parent);
 			ptr = ptr->parent;
-			if (ptr->parent == NULL) {
-				KHTTPD_TR("%s finish", __func__);
+			if (ptr->parent == NULL)
 				return (NULL);
-			}
 			result = TAILQ_NEXT(ptr, children_link);
 		} while (result == NULL);
 
-	KHTTPD_TR("%s acquire %p", __func__, result);
 	khttpd_location_acquire(result);
 
 	return (result);
@@ -790,41 +681,6 @@ khttpd_location_set_data(struct khttpd_location *location, void *data)
 	rw_wunlock(&location->server->lock);
 
 	return (old_data);
-}
-
-struct khttpd_log *
-khttpd_server_get_log(struct khttpd_server *server,
-    enum khttpd_server_log_id log_id)
-{
-
-	return (khttpd_location_get_log(server->root, log_id));
-}
-
-void
-khttpd_server_set_log(struct khttpd_server *server,
-    enum khttpd_server_log_id log_id, struct khttpd_log *log)
-{
-
-	khttpd_location_set_log(server->root, log_id, log);
-}
-
-void
-khttpd_server_error(struct khttpd_server *server, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, ...)
-{
-	va_list args;
-
-	va_start(args, desc_fmt);
-	khttpd_server_verror(server, severity, entry, desc_fmt, args);
-	va_end(args);
-}
-
-void
-khttpd_server_verror(struct khttpd_server *server, int severity,
-    struct khttpd_mbuf_json *entry, const char *desc_fmt, va_list args)
-{
-
-	khttpd_location_verror(server->root, severity, entry, desc_fmt, args);
 }
 
 static int

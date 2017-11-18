@@ -24,7 +24,8 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 SRCS = khttpd_ktr.c khttpd_test.c khttpd_malloc.c khttpd_init.c khttpd_main.c
-SRCS +=	khttpd_costruct.c khttpd_string.c khttpd_mbuf.c khttpd_json.c
+SRCS +=	khttpd_string.c khttpd_mbuf.c khttpd_problem.c khttpd_json.c
+SRCS += khttpd_costruct.c
 SRCS += khttpd_uuid.c khttpd_strtab.c khttpd_method.c khttpd_rewriter.c
 SRCS += khttpd_webapi.c
 SRCS += khttpd_job.c khttpd_log.c khttpd_event.c
@@ -38,19 +39,25 @@ KMOD = khttpd
 
 .if !defined(KERNBUILDDIR)
 
-beforedepend: ddb crypto
-beforebuild: ddb crypto
+beforedepend: ddb crypto vnode_if_newproto.h vnode_if_typedef.h vnode_if.h
+beforebuild: ddb crypto vnode_if_newproto.h vnode_if_typedef.h vnode_if.h
 ddb:
 	ln -fhs `(cd ${SYSDIR}/ddb && /bin/pwd)` ddb
 crypto:
 	ln -fhs `(cd ${SYSDIR}/crypto && /bin/pwd)` crypto
-CLEANFILES += ddb crypto
+vnode_if_newproto.h:
+	awk -f ${SYSDIR}/tools/vnode_if.awk ${SYSDIR}/kern/vnode_if.src -p
+vnode_if_typedef.h:
+	awk -f ${SYSDIR}/tools/vnode_if.awk ${SYSDIR}/kern/vnode_if.src -q
+vnode_if.h:
+	awk -f ${SYSDIR}/tools/vnode_if.awk ${SYSDIR}/kern/vnode_if.src -h
+CLEANFILES += ddb crypto vnode_if.h
 
 .endif
 
 .include <bsd.kmod.mk>
 
-CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1
+CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1 -DDEBUG_LOCKS
 CFLAGS += -DKHTTPD_KTR_LOGGING \
 	-DKHTTPD_KTR_FILE=\"$(.CURDIR)/../../test/ktr.txt\"
 CFLAGS += -DKHTTPD_TRACE_MALLOC

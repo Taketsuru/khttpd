@@ -66,6 +66,7 @@
 #include "khttpd_malloc.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_port.h"
+#include "khttpd_problem.h"
 #include "khttpd_refcount.h"
 #include "khttpd_server.h"
 #include "khttpd_status_code.h"
@@ -73,7 +74,6 @@
 #include "khttpd_string.h"
 #include "khttpd_strtab.h"
 #include "khttpd_vhost.h"
-#include "khttpd_webapi.h"
 
 enum {
 	KHTTPD_FIELD_UNKNOWN = -1,
@@ -91,7 +91,9 @@ struct khttpd_session;
 
 struct khttpd_exchange {
 	struct sbuf		target;
+	struct khttpd_mbuf_json	log_entry;
 	struct timeval		arrival_time;
+	struct job		*io_job;
 	struct khttpd_exchange_ops *ops;
 	void			*arg;
 
@@ -190,8 +192,8 @@ static int khttpd_session_receive_body(struct khttpd_session *);
 static int khttpd_session_receive_header_or_trailer(struct khttpd_session *);
 static int khttpd_session_receive_request_line(struct khttpd_session *);
 static void khttpd_session_data_is_available(struct khttpd_stream *);
-static void khttpd_session_clear_to_send(struct khttpd_stream *);
-static void khttpd_session_transmit(struct khttpd_session *session);
+static void khttpd_session_clear_to_send(struct khttpd_stream *, ssize_t);
+static void khttpd_session_transmit(struct khttpd_session *session, ssize_t);
 
 /* --------------------------------------------------- variable definitions */
 
@@ -218,6 +220,7 @@ static const char khttpd_crlf[] = { '\r', '\n' };
 static struct khttpd_strtab_entry_slist khttpd_field_hash_table[16];
 static size_t khttpd_message_size_limit = 16384;
 static uma_zone_t khttpd_http_client_zone;
+static struct khttpd_log * volatile khttpd_http_logs[KHTTPD_HTTP_LOG_END];
 
 static struct khttpd_stream_up_ops khttpd_session_ops = {
 	.data_is_available = khttpd_session_data_is_available,
@@ -225,6 +228,23 @@ static struct khttpd_stream_up_ops khttpd_session_ops = {
 };
 
 static struct khttpd_exchange_ops khttpd_exchange_null_ops;
+
+void
+khttpd_http_set_log(enum khttpd_http_log_id id, struct khttpd_log *log)
+{
+	struct khttpd_log *old;
+
+	old = (struct khttpd_log *)atomic_swap_ptr
+	    ((volatile uintptr_t *)&khttpd_http_logs[id], (uintptr_t)log);
+	khttpd_log_delete(old);
+}
+
+struct khttpd_log *
+khttpd_http_get_log(enum khttpd_http_log_id id)
+{
+
+	return (khttpd_http_logs[id]);
+}
 
 static int
 khttpd_field_find(const char *begin, const char *end)
@@ -250,48 +270,56 @@ static void
 khttpd_exchange_access(struct khttpd_exchange *exchange)
 {
 	struct timeval tv;
-	struct khttpd_mbuf_json entry;
+	struct khttpd_log *log;
 	struct khttpd_session *session;
 	struct khttpd_location *location;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
+	log = khttpd_http_logs[KHTTPD_HTTP_LOG_ACCESS];
+	if (log == NULL)
+		return;
+
 	session = khttpd_exchange_get_session(exchange);
 	location = exchange->location;
 	microtime(&tv);
 
-	khttpd_mbuf_json_new(&entry);
-	khttpd_mbuf_json_object_begin(&entry);
+	khttpd_mbuf_json_property(&exchange->log_entry, "arrivalTime");
+	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ld.%06ld",
+	    exchange->arrival_time.tv_sec, exchange->arrival_time.tv_usec);
 
-	khttpd_mbuf_json_property_format(&entry, "arrivalTimestamp",
-	    FALSE, "%ld.%06ld", exchange->arrival_time.tv_sec,
-	    exchange->arrival_time.tv_usec);
+	khttpd_mbuf_json_property(&exchange->log_entry, "completionTime");
+	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ld.%06ld",
+	    tv.tv_sec, tv.tv_usec);
 
-	khttpd_mbuf_json_property_format(&entry, "responseTimestamp",
-	    FALSE, "%ld.%06ld", tv.tv_sec, tv.tv_usec);
-
-	khttpd_mbuf_json_property_format(&entry, "status", FALSE, "%d",
+	khttpd_mbuf_json_property(&exchange->log_entry, "status");
+	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%d",
 	    exchange->status);
 
-	khttpd_mbuf_json_property(&entry, "peer");
-	khttpd_mbuf_json_sockaddr(&entry, 
+	khttpd_mbuf_json_property(&exchange->log_entry, "peer");
+	khttpd_mbuf_json_sockaddr(&exchange->log_entry, 
 	    khttpd_socket_peer_address(session->socket));
 
-	khttpd_mbuf_json_property_mbuf_1st_line(&entry, "request",
+	khttpd_mbuf_json_property_mbuf_1st_line(&exchange->log_entry, "request",
 	    exchange->request_line);
 
-	if (exchange->request_payload_size != 0)
-		khttpd_mbuf_json_property_format(&entry, "requestPayloadSize",
-		    FALSE, "%ju", (uintmax_t)exchange->request_payload_size);
+	if (exchange->request_payload_size != 0) {
+		khttpd_mbuf_json_property(&exchange->log_entry,
+		    "requestPayloadSize");
+		khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ju",
+		    (uintmax_t)exchange->request_payload_size);
+	}
 
-	if (exchange->response_payload_size != 0)
-		khttpd_mbuf_json_property_format(&entry, "responsePayloadSize",
-		    FALSE, "%ju", (uintmax_t)exchange->response_payload_size);
+	if (exchange->response_payload_size != 0) {
+		khttpd_mbuf_json_property(&exchange->log_entry,
+		    "responsePayloadSize");
+		khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ju",
+		    (uintmax_t)exchange->response_payload_size);
+	}
 
-	khttpd_mbuf_json_object_end(&entry);
+	khttpd_mbuf_json_object_end(&exchange->log_entry);
 	
-	khttpd_location_log(location, KHTTPD_SERVER_LOG_ACCESS,
-	    khttpd_mbuf_json_move(&entry));
+	khttpd_log_put(log, khttpd_mbuf_json_move(&exchange->log_entry));
 }
 
 static void
@@ -405,7 +433,7 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 		khttpd_session_transmit_finish(session, m);
 	else {
 		khttpd_stream_send(&session->stream, m, 0);
-		khttpd_session_transmit(session);
+		khttpd_session_transmit(session, SSIZE_MAX);
 	}
 }
 
@@ -418,7 +446,7 @@ khttpd_exchange_continue_sending(struct khttpd_exchange *exchange)
 	KASSERT(session->receive == NULL,
 	    ("invalid state.  session->receive=%p", session->receive));
 
-	khttpd_session_transmit(khttpd_exchange_get_session(exchange));
+	khttpd_stream_notify_of_drain(&session->stream);
 }
 
 void
@@ -432,6 +460,13 @@ khttpd_exchange_continue_receiving(struct khttpd_exchange *exchange)
 
 	session->recv_paused = FALSE;
 	khttpd_session_data_is_available(&session->stream);
+}
+
+struct khttpd_stream *
+khttpd_exchange_get_stream(struct khttpd_exchange *exchange)
+{
+
+	return (&khttpd_exchange_get_session(exchange)->stream);
 }
 
 static void
@@ -478,6 +513,40 @@ khttpd_exchange_location(struct khttpd_exchange *exchange)
 {
 
 	return (exchange->location);
+}
+
+void
+khttpd_exchange_error(struct khttpd_exchange *exchange,
+    struct khttpd_mbuf_json *entry)
+{
+	struct khttpd_session *session;
+	struct khttpd_log *log;
+
+	session = khttpd_exchange_get_session(exchange);
+
+	log = khttpd_http_logs[KHTTPD_HTTP_LOG_ERROR];
+	if (log == NULL) {
+		m_freem(khttpd_mbuf_json_move(entry));
+		return;
+	}
+
+	khttpd_mbuf_json_property(entry, "timestamp");
+	khttpd_mbuf_json_now(entry);
+
+	if (sbuf_done(&session->host)) {
+		khttpd_mbuf_json_property(entry, "host");
+		khttpd_mbuf_json_format(entry, TRUE, "%s",
+		    sbuf_data(&session->host));
+	}
+
+	khttpd_mbuf_json_property(entry, "peer");
+	khttpd_mbuf_json_sockaddr(entry, 
+	    khttpd_socket_peer_address(session->socket));
+
+	khttpd_mbuf_json_property_mbuf_1st_line(entry, "request",
+		exchange->request_line);
+
+	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
 }
 
 const char *
@@ -558,22 +627,29 @@ void
 khttpd_exchange_vadd_response_field(struct khttpd_exchange *exchange,
     const char *field, const char *value_fmt, va_list vl)
 {
+	struct khttpd_mbuf_json problem;
 	struct mbuf *m;
 
 	if (exchange->response_header_closed) {
-		if (!exchange->response_chunked)
-			khttpd_exchange_error(exchange, LOG_ERR,
+		if (!exchange->response_chunked) {
+			khttpd_problem_log_new(&problem, LOG_ERR,
+			    "server_internal_error", "server internal error");
+			khttpd_problem_set_detail(&problem,
 			    "Field %s is added to a response but "
 			    "the payload transfer has been started.", field);
+			khttpd_exchange_error(exchange, &problem);
+		}
 		m = exchange->response_trailer;
-		if (m == NULL)
+		if (m == NULL) {
 			exchange->response_trailer = m = 
 			    m_gethdr(M_WAITOK, MT_DATA);
+		}
 	} else {
 		m = exchange->response_header;
-		if (m == NULL)
+		if (m == NULL) {
 			exchange->response_header = m =
 			    m_gethdr(M_WAITOK, MT_DATA);
+		}
 	}
 
 	khttpd_mbuf_printf(m, "%s: ", field);
@@ -662,8 +738,7 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 	if (response == NULL) {
 		response = &new_resp;
 		khttpd_mbuf_json_new(response);
-		khttpd_mbuf_json_object_begin(response);
-		khttpd_webapi_set_problem(response, status, NULL, NULL);
+		khttpd_problem_response_begin(response, status, NULL, NULL);
 	}
 
 	khttpd_mbuf_json_object_end(response);
@@ -756,45 +831,6 @@ end:
 	return (FALSE);
 }
 
-void
-khttpd_exchange_error(struct khttpd_exchange *exchange, int severity,
-    const char *fmt, ...)
-{
-	va_list ap;
-
-	KHTTPD_ENTRY("%s(%p,%d)", __func__, exchange, severity);
-
-	va_start(ap, fmt);
-	khttpd_exchange_verror(exchange, severity, fmt, ap);
-	va_end(ap);
-}
-
-void
-khttpd_exchange_verror(struct khttpd_exchange *exchange, int severity,
-    const char *fmt, va_list ap)
-{
-	struct khttpd_mbuf_json entry;
-	struct khttpd_session *session;
-	struct khttpd_location *location;
-
-	KHTTPD_ENTRY("%s(%p,%d)", __func__, exchange, severity);
-
-	session = khttpd_exchange_get_session(exchange);
-	location = exchange->location;
-
-	khttpd_mbuf_json_new(&entry);
-	khttpd_mbuf_json_object_begin(&entry);
-	khttpd_mbuf_json_property_object_begin(&entry, "peer");
-	khttpd_mbuf_json_sockaddr(&entry, 
-	    khttpd_socket_peer_address(session->socket));
-	khttpd_mbuf_json_object_end(&entry);
-	khttpd_mbuf_json_property_mbuf_1st_line(&entry, "request",
-		exchange->request_line);
-
-	if (location != NULL)
-		khttpd_location_verror(location, severity, &entry, fmt, ap);
-}
-
 static void
 khttpd_exchange_default_options_handler(struct khttpd_exchange *exchange)
 {
@@ -817,10 +853,12 @@ static void
 khttpd_exchange_check_leftovers(struct khttpd_exchange *exchange,
     const char *name, struct mbuf *m)
 {
+	struct khttpd_session *session;
 	struct mbuf *ptr;
 
+	session = khttpd_exchange_get_session(exchange);
 	for (; m != NULL; m = m->m_next)
-		for (ptr = khttpd_exchange_get_session(exchange)->recv_leftovers;
+		for (ptr = session->recv_leftovers;
 		     ptr != NULL; ptr = ptr->m_next)
 			if (m == ptr)
 				panic("mbuf %p in %s is also in "
@@ -940,8 +978,9 @@ khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 }
 
 static void
-khttpd_session_transmit(struct khttpd_session *session)
+khttpd_session_transmit(struct khttpd_session *session, ssize_t space)
 {
+	struct khttpd_mbuf_json logent;
 	struct mbuf *head, *m;
 	struct khttpd_exchange *exchange;
 	size_t sent;
@@ -950,95 +989,76 @@ khttpd_session_transmit(struct khttpd_session *session)
 
 	exchange = &session->exchange;
 
-	if (exchange->ops->get != NULL) {
-		head = NULL;
-		error = exchange->ops->get(exchange, exchange->arg, &head,
-		    &pause);
-		if (error == ENOMSG && exchange->response_chunked) {
-			if (pause)
-				khttpd_exchange_error(exchange, LOG_ERR, 
-				    "exchange_ops::get for \"//%s/%s\" try to "
-				    "pause the server but the transfer has "
-				    "been completed");
-
-			head = m_gethdr(M_WAITOK, MT_DATA);
-			khttpd_mbuf_printf(head, "0\r\n");
-			m_cat(head, exchange->response_trailer);
-			exchange->response_trailer = NULL;
-			khttpd_mbuf_printf(head, "\r\n");
-			khttpd_session_transmit_finish(session, head);
-
-			return;
-		}
-
-		if (error != 0)
-			return;
-
-		sent = m_length(head, NULL);
-		exchange->response_payload_size += sent;
-
-		if (exchange->response_chunked) {
-			m = m_gethdr(M_WAITOK, MT_DATA);
-			khttpd_mbuf_printf(m, "%jx\r\n", (uintmax_t)sent);
-			m_cat(m, head);
-			khttpd_mbuf_printf(m, "\r\n");
-			head = m;
-			khttpd_stream_send(&session->stream, head, 0);
-			if (!pause)
-				khttpd_stream_notify_of_drain(&session->stream);
-
-		} else if (exchange->response_payload_size <
-		    exchange->response_content_length) {
-			khttpd_stream_send(&session->stream, head, 0);
-			if (!pause)
-				khttpd_stream_notify_of_drain(&session->stream);
-
-		} else if (pause)
-			khttpd_exchange_error(exchange, LOG_ERR, 
-			    "exchange_ops::get for \"//%s/%s\" try to pause the "
-			    "server but the transfer has been completed");
-
-		else
-			khttpd_session_transmit_finish(session, head);
-
-	} else if (exchange->ops->send != NULL) {
-
-		sent = 0;
-		error = exchange->ops->send(exchange, exchange->arg,
-		    &session->stream, &sent);
-		if (error != 0 && error != EWOULDBLOCK)
-			return;
-
-		if (exchange->response_content_length - 
-		    exchange->response_payload_size < sent) {
-			khttpd_exchange_error(exchange, LOG_ERR, "khttpd: "
-			    "exchange_ops->get for \"%s\" has been sent more "
-			    "than the residual. "
-			    "(sent: %zu, residual: %zu)",
-			    sbuf_data(&exchange->target),
-			    sent, exchange->response_content_length - 
-			    exchange->response_payload_size);
-			khttpd_session_abort(session);
-			khttpd_session_transmit_finish(session, NULL);
-			return;
-		}
-
-		exchange->response_payload_size += sent;
-
-		if (exchange->response_content_length <=
-		    exchange->response_payload_size)
-			khttpd_session_transmit_finish(session, NULL);
-
-		if (error == EWOULDBLOCK)
-			khttpd_stream_notify_of_drain(&session->stream);
-
-	} else {
+	if (exchange->ops->get == NULL) {
 		log(LOG_ERR, "khttpd: exchange op for target \"%s\""
 		    "doesn't have neither get nor send method",
 		    sbuf_data(&exchange->target));
 
 		exchange->close = TRUE;
 		khttpd_session_transmit_finish(session, NULL);
+		return;
+	}
+
+	head = NULL;
+	pause = FALSE;
+	error = exchange->ops->get(exchange, exchange->arg, space, &head,
+	    &pause);
+	if (error == ENOMSG && exchange->response_chunked) {
+		if (pause) {
+			khttpd_problem_log_new(&logent, LOG_WARNING,
+			    "server_internal_error", 
+			    "server internal error");
+			khttpd_problem_set_detail(&logent, 
+			    "exchange_ops::get try to pause the server"
+			    "but the transfer has been completed");
+			khttpd_exchange_error(exchange, &logent);
+		}
+
+		head = m_gethdr(M_WAITOK, MT_DATA);
+		khttpd_mbuf_printf(head, "0\r\n");
+		m_cat(head, exchange->response_trailer);
+		exchange->response_trailer = NULL;
+		khttpd_mbuf_printf(head, "\r\n");
+		khttpd_session_transmit_finish(session, head);
+
+		return;
+	}
+
+	if (error != 0) {
+		exchange->close = TRUE;
+		khttpd_session_transmit_finish(session, NULL);
+		return;
+	}
+
+	sent = m_length(head, NULL);
+	exchange->response_payload_size += sent;
+
+	if (exchange->response_chunked) {
+		m = m_gethdr(M_WAITOK, MT_DATA);
+		khttpd_mbuf_printf(m, "%jx\r\n", (uintmax_t)sent);
+		m_cat(m, head);
+		khttpd_mbuf_printf(m, "\r\n");
+		head = m;
+		khttpd_stream_send(&session->stream, head, 0);
+		if (!pause)
+			khttpd_stream_notify_of_drain(&session->stream);
+
+	} else if (exchange->response_payload_size <
+	    exchange->response_content_length) {
+		khttpd_stream_send(&session->stream, head, 0);
+		if (!pause)
+			khttpd_stream_notify_of_drain(&session->stream);
+
+	} else if (!pause)
+		khttpd_session_transmit_finish(session, head);
+
+	else {
+		khttpd_problem_log_new(&logent, LOG_ERR,
+		    "server_internal_error", "server internal error");
+		khttpd_problem_set_detail(&logent,
+		    "exchange_ops::get try to pause the server but "
+		    "the transfer has been completed");
+		khttpd_exchange_error(exchange, &logent);
 	}
 }
 
@@ -1358,6 +1378,7 @@ khttpd_session_receive_chunk_terminator(struct khttpd_session *session)
 static int
 khttpd_session_receive_body(struct khttpd_session *session)
 {
+	struct khttpd_mbuf_json logent;
 	off_t resid;
 	struct khttpd_exchange *exchange;
 	struct thread *td;
@@ -1417,12 +1438,14 @@ khttpd_session_receive_body(struct khttpd_session *session)
 			exchange->ops->put(exchange, exchange->arg, m, &pause);
 	}
 
-	if (pause)
-		khttpd_exchange_error(exchange, LOG_ERR,
-		    "exchange_ops::put for \"//%s/%s\" try to pause but "
-		    "the request body has already been transfered "
-		    "completely.", sbuf_data(&session->host), 
-		    sbuf_data(&exchange->target));
+	if (pause) {
+		khttpd_problem_log_new(&logent, LOG_ERR,
+		    "server_internal_error", "server internal error");
+		khttpd_problem_set_detail(&logent,
+		    "exchange_ops::put try to pause but the request body has "
+		    "already been transfered completely.");
+		khttpd_exchange_error(exchange, &logent);
+	}
 
 	if (session->recv_in_chunk_or_trailer) {
 		khttpd_session_set_receive_limit(session,
@@ -1746,9 +1769,9 @@ khttpd_session_receive_transfer_encoding_field(struct khttpd_session *session,
 			status = KHTTPD_STATUS_NOT_IMPLEMENTED;
 
 			khttpd_mbuf_json_new(&diag);
-			khttpd_mbuf_json_object_begin(&diag);
-			khttpd_webapi_set_problem(&diag, status, NULL, NULL);
-			khttpd_webapi_set_problem_detail(&diag, "transfer "
+			khttpd_problem_response_begin(&diag, status, NULL,
+			    NULL);
+			khttpd_problem_set_detail(&diag, "transfer "
 			    "encoding other than 'chunked' is specified");
 			khttpd_exchange_set_error_response_body(exchange,
 			    status, &diag);
@@ -2012,6 +2035,9 @@ khttpd_session_receive_request_line(struct khttpd_session *session)
 	exchange = &session->exchange;
 	microtime(&exchange->arrival_time);
 
+	khttpd_mbuf_json_new(&exchange->log_entry);
+	khttpd_mbuf_json_object_begin(&exchange->log_entry);
+
 	/* 
 	 * If the request line is longer than khttpd_message_size_limit
 	 * (ENOBUFS case) or is terminated prematurely (ENOMSG case), send 'Bad
@@ -2137,7 +2163,7 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 }
 
 static void
-khttpd_session_clear_to_send(struct khttpd_stream *stream)
+khttpd_session_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 {
 	struct khttpd_session *session;
 
@@ -2146,7 +2172,7 @@ khttpd_session_clear_to_send(struct khttpd_stream *stream)
 		session->xmit_waiting_for_drain = FALSE;
 		khttpd_session_next(session);
 	} else
-		khttpd_session_transmit(session);
+		khttpd_session_transmit(session, space);
 }
 
 static int

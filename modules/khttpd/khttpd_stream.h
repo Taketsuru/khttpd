@@ -42,21 +42,25 @@ enum {
 typedef int (*khttpd_stream_receive_fn_t)
     (struct khttpd_stream *, ssize_t *, struct mbuf **);
 typedef void (*khttpd_stream_fn_t)(struct khttpd_stream *);
+typedef void (*khttpd_stream_cts_fn_t)(struct khttpd_stream *, ssize_t);
 typedef boolean_t (*khttpd_stream_send_fn_t)
     (struct khttpd_stream *, struct mbuf *, int);
+typedef void (*khttpd_stream_bufstat_fn_t)(struct khttpd_stream *, size_t *,
+    size_t *, size_t *);
 
 struct khttpd_stream_down_ops {
 	khttpd_stream_receive_fn_t	receive;
 	khttpd_stream_fn_t		continue_receiving;
 	khttpd_stream_fn_t		shutdown_receiver;
 	khttpd_stream_send_fn_t		send;
+	khttpd_stream_bufstat_fn_t	send_bufstat;
 	khttpd_stream_fn_t		notify_of_drain;
 	khttpd_stream_fn_t		destroy;
 };
 
 struct khttpd_stream_up_ops {
 	khttpd_stream_fn_t	data_is_available;
-	khttpd_stream_fn_t	clear_to_send;
+	khttpd_stream_cts_fn_t	clear_to_send;
 };
 
 struct khttpd_stream {
@@ -113,6 +117,14 @@ khttpd_stream_destroy(struct khttpd_stream *stream)
 }
 
 inline void
+khttpd_stream_send_bufstat(struct khttpd_stream *stream, size_t *hiwat,
+    size_t *lowat, size_t *space)
+{
+
+	return (stream->down_ops->send_bufstat(stream, hiwat, lowat, space));
+}
+
+inline void
 khttpd_stream_data_is_available(struct khttpd_stream *stream)
 {
 
@@ -120,10 +132,10 @@ khttpd_stream_data_is_available(struct khttpd_stream *stream)
 }
 
 inline void
-khttpd_stream_clear_to_send(struct khttpd_stream *stream)
+khttpd_stream_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 {
 
-	stream->up_ops->clear_to_send(stream);
+	stream->up_ops->clear_to_send(stream, space);
 }
 
 #endif	/* _KERNEL */

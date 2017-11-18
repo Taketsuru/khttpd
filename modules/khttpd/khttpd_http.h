@@ -36,25 +36,39 @@ struct mbuf;
 struct sbuf;
 
 struct khttpd_exchange;
+struct khttpd_log;
 struct khttpd_mbuf_json;
 struct khttpd_port;
+enum khttpd_server_log_id;
 struct khttpd_stream;
+
+enum khttpd_http_log_id {
+	KHTTPD_HTTP_LOG_ERROR,
+	KHTTPD_HTTP_LOG_ACCESS,
+
+	KHTTPD_HTTP_LOG_END
+};
 
 struct khttpd_exchange_ops {
 	void (*dtor)(struct khttpd_exchange *, void *);
 	int  (*send)(struct khttpd_exchange *, void *, struct khttpd_stream *,
 	    size_t *);
-	int  (*get)(struct khttpd_exchange *, void *, struct mbuf **,
+	int  (*get)(struct khttpd_exchange *, void *, ssize_t, struct mbuf **,
 	    boolean_t *);
 	void (*put)(struct khttpd_exchange *, void *, struct mbuf *,
 	    boolean_t *);
 	void (*end)(struct khttpd_exchange *, void *);
 };
 
+void khttpd_http_set_log(enum khttpd_http_log_id, struct khttpd_log *);
+struct khttpd_log *khttpd_http_get_log(enum khttpd_http_log_id);
+
 struct khttpd_port *khttpd_exchange_get_port(struct khttpd_exchange *exchange);
 void khttpd_exchange_set_ops(struct khttpd_exchange *exchange,
     struct khttpd_exchange_ops *ops, void *arg);
 struct khttpd_location *khttpd_exchange_location(struct khttpd_exchange *);
+void khttpd_exchange_error(struct khttpd_exchange *, 
+    struct khttpd_mbuf_json *);
 const char *khttpd_exchange_suffix(struct khttpd_exchange *exchange);
 const char *khttpd_exchange_get_target(struct khttpd_exchange *exchange);
 int khttpd_exchange_method(struct khttpd_exchange *exchange);
@@ -82,14 +96,11 @@ void khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 void khttpd_exchange_respond(struct khttpd_exchange *exchange, int status);
 void khttpd_exchange_continue_sending(struct khttpd_exchange *);
 void khttpd_exchange_continue_receiving(struct khttpd_exchange *);
+struct khttpd_stream *khttpd_exchange_get_stream(struct khttpd_exchange *);
 
 void khttpd_http_accept_http_client(void *port);
 void khttpd_http_accept_https_client(void *port);
 
 void khttpd_exchange_check_invariants(struct khttpd_exchange *exchange);
-void khttpd_exchange_error(struct khttpd_exchange *exchange, int severity,
-    const char *fmt, ...);
-void khttpd_exchange_verror(struct khttpd_exchange *exchange, int severity,
-    const char *fmt, va_list ap);
 
 #endif	/* _KERNEL */

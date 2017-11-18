@@ -1,5 +1,7 @@
 - Idle connections must be closed on server shutdown.
 
+- Utilize nitems macro defined in <sys/param.h>.
+
 - ktr flushing should be stopped if write or fdatasync fails.
 
 - Move and rename khttpd_ctrl_parse_json to khttpd_webapi.
@@ -10,9 +12,6 @@
   the end of the exchange, but the request.  This is difficult to know from the
   name.  Also the meaning of 'get' and 'put' are easily misunderstood as
   opposit.
-
-- Rewrite khttpd_file so that the file descriptor of the stream is not
-  necessary.
 
 - Add support for basic authentication
 
@@ -26,8 +25,19 @@
 
 - CGI etc.
 
+- Optimize file/cache serving performance
+
+- Optimize the setting of SO_SNDLOWAT value.
+
+- the kernel should restrict the time waiting the client to close the
+  connection after it sends a response with 'Connection: close' (nginx's
+  lingering_timeout feature).
+
+- Set SO_LINGER option with timeout = 0 when the server aborts a connection.
+
 - More scalable object lifecycle management than reference counting.
 
-- Optimize file/cache serving performance
+- See whether running jobs of khttpd_file on the same CPU as the caller of
+  khttpd_file_get performs better than random CPU assignment.
 
 - Atomic server reconfiguration.
