@@ -181,7 +181,7 @@ again:
 				break;
 		}
 
-		segend = khttpd_find_ch(src, '/');
+		segend = strchr(src, '/');
 		if (segend == NULL)
 			/* XXX Is this repeated call of strlen() redundant? */
 			segend = src + strlen(src); 

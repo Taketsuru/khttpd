@@ -27,28 +27,23 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/types.h>
-#include <netinet/in.h>
 
 struct sbuf;
-struct khttpd_json;
 
-char *khttpd_find_ch(const char *begin, char search);
 char *khttpd_find_ch_in(const char *begin, const char *end, char ch);
 char *khttpd_find_2ch_in(const char *begin, const char *end,
     char ch1, char ch2);
 char *khttpd_skip_ws(const char *ptr);
 char *khttpd_rtrim_ws(const char *begin, const char *end);
-char *khttpd_find_ws(const char *ptr, const char *end);
-uint32_t khttpd_hash32_buf_ci(const void *begin, const void *end,
+uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end,
     uint32_t hash);
-uint32_t khttpd_hash32_str_ci(const void *str, uint32_t hash);
+uint32_t khttpd_hash32_str_ci(const char *str, uint32_t hash);
 int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
 int khttpd_parse_ipv6_address(u_char *out, const char *value);
 void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
 boolean_t khttpd_is_json_media_type(const char *input);
-boolean_t khttpd_is_valid_host_name(const char *host);
-
-#endif	/* ifdef _KERNEL */

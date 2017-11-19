@@ -37,19 +37,6 @@
 #include "khttpd_malloc.h"
 
 char *
-khttpd_find_ch(const char *begin, char search)
-{
-	const char *ptr;
-	char ch;
-
-	for (ptr = begin; (ch = *ptr) != '\0'; ++ptr)
-		if (ch == search)
-			return ((char *)ptr);
-
-	return (NULL);
-}
-
-char *
 khttpd_find_ch_in(const char *begin, const char *end, char ch)
 {
 	const char *ptr;
@@ -95,39 +82,43 @@ khttpd_rtrim_ws(const char *begin, const char *end)
 	return ((char *)cp);
 }
 
-char *
-khttpd_find_ws(const char *ptr, const char *end)
-{
-	const char *cp;
-
-	for (cp = ptr; cp < end && (*cp != ' ' && *cp != '\t'); ++cp)
-		; /* nothing */
-
-	return ((char *)cp);
-}
-
 uint32_t
-khttpd_hash32_buf_ci(const void *begin, const void *end, uint32_t hash)
+khttpd_hash32_buf_ci(const char *begin, const char *end, uint32_t hash)
 {
-	const char *bp;
-	unsigned char ch;
+	char buf[128];
+	char *bp;
+	size_t len;
+	uint32_t result;
+	int i;
 
-	for (bp = begin; bp < (const char *)end; ++bp) {
-		ch = *bp;
-		hash = HASHSTEP(hash, tolower(ch));
-	}
+	len = (const char *)end - (const char *)begin;
+	bp = len <= sizeof(buf) ? buf : khttpd_malloc(len);
+	for (i = 0; i < len; ++i)
+		bp[i] = tolower(begin[i]);
+	result = murmur3_32_hash(bp, len, hash);
+	if (sizeof(buf) < len)
+		khttpd_free(bp);
 
 	return (hash);
 }
 
 uint32_t
-khttpd_hash32_str_ci(const void *str, uint32_t hash)
+khttpd_hash32_str_ci(const char *str, uint32_t hash)
 {
-	const char *bp;
+	char buf[128];
+	const char *srcp;
+	char *bp, *dstp;
+	size_t len;
+	uint32_t result;
 	char ch;
 
-	for (bp = str; ((ch = *bp) != '\0'); ++bp)
-		hash = HASHSTEP(hash, tolower(ch));
+	len = strlen(str);
+	bp = len <= sizeof(buf) ? buf : khttpd_malloc(len);
+	for (srcp = str, dstp = bp; ((ch = *srcp) != '\0'); ++srcp, ++dstp)
+		*dstp = tolower(ch);
+	result = murmur3_32_hash(bp, len, hash);
+	if (sizeof(buf) < len)
+		khttpd_free(bp);
 
 	return (hash);
 }
@@ -302,11 +293,13 @@ boolean_t
 khttpd_is_json_media_type(const char *input)
 {
 	const char *begin, *cp;
+	size_t len;
 
 	begin = khttpd_skip_ws(input);
-	cp = strchr(begin, ';');
+	len = strlen(begin);
+	cp = memchr(begin, ';', len);
 	if (cp == NULL)
-		return (strcmp(begin, "application/json") == 0);
+		cp = begin + len;
 	cp = khttpd_rtrim_ws(begin, cp);
 	return (strncmp(begin, "application/json", cp - begin) == 0);
 }
