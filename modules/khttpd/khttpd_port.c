@@ -929,19 +929,6 @@ khttpd_socket_peer_address(struct khttpd_socket *socket)
 	return ((struct sockaddr *)&socket->peer_address);
 }
 
-int
-khttpd_stream_get_fd(struct khttpd_stream *stream)
-{
-	struct khttpd_socket *socket;
-
-	KASSERT(stream->down_ops == &khttpd_socket_ops,
-	    ("the given stream %p is not attached to a socket", stream));
-
-	socket = stream->down;
-
-	return (socket->fd);
-}
-
 static void
 khttpd_port_sysinit(void)
 {

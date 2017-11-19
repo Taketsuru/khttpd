@@ -61,10 +61,4 @@ int khttpd_socket_start(struct khttpd_socket *socket,
 const struct sockaddr *khttpd_socket_peer_address
     (struct khttpd_socket *socket);
 
-/*
- * XXX This is a tentative hack.  This function assumes the down side of the
- * stream is a socket.
- */
-int khttpd_stream_get_fd(struct khttpd_stream *stream);
-
 #endif	/* _KERNEL */
