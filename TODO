@@ -1,8 +1,6 @@
 - Utilize nitems macro defined in <sys/param.h>.
 
-- ktr flushing should be stopped if write or fdatasync fails.
-
-- Move and rename khttpd_ctrl_parse_json to khttpd_webapi.
+- Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
 
 - Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
 
@@ -11,17 +9,13 @@
   name.  Also the meaning of 'get' and 'put' are easily misunderstood as
   opposit.
 
-- Add support for basic authentication
-
-- make khttpd_test multi-module aware
-
-- configuration dump/restore API
-
-- Server configuration UI
-
 - TLS
 
 - CGI etc.
+
+- Add support for basic authentication
+
+- make khttpd_test multi-module aware
 
 - Optimize file/cache serving performance
 
@@ -40,5 +34,9 @@
 
 - See whether running jobs of khttpd_file on the same CPU as the caller of
   khttpd_file_get performs better than random CPU assignment.
+
+- configuration dump/restore API
+
+- Server configuration UI
 
 - Atomic server reconfiguration.

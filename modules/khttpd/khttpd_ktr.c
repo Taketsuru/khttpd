@@ -140,7 +140,7 @@ khttpd_ktr_printf(const char *fmt, ...)
 	return (result);
 }
 
-static void
+static int
 khttpd_ktr_flush(void)
 {
 	struct uio auio;
@@ -158,8 +158,9 @@ khttpd_ktr_flush(void)
 
 	n = end < khttpd_ktr_idx ? end + ktr_entries - khttpd_ktr_idx :
 	    end - khttpd_ktr_idx;
-	sbuf_printf(&khttpd_ktr_sbuf,
-	    "# index: %d, entries: %d\n", khttpd_ktr_idx, n);
+	if (0 < n)
+		sbuf_printf(&khttpd_ktr_sbuf,
+		    "# index: %d, entries: %d\n", khttpd_ktr_idx, n);
 
 	n = ktr_entries;
 	for (i = khttpd_ktr_idx; i != end; i = i == n - 1 ? 0 : i + 1) {
@@ -204,16 +205,16 @@ khttpd_ktr_flush(void)
 		    "\") failed (error: %d)", error);
 
 	sbuf_clear(&khttpd_ktr_sbuf);
+
+	return (error);
 }
 
 static void
 khttpd_ktr_main(void *arg)
 {
 
-	while (!khttpd_ktr_shutdown) {
-		khttpd_ktr_flush();
+	while (!khttpd_ktr_shutdown && khttpd_ktr_flush() == 0)
 		pause("ktrflush", hz / 10);
-	}
 
 	khttpd_ktr_thread = NULL;
 	kthread_exit();
