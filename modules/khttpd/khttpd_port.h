@@ -53,6 +53,7 @@ int khttpd_port_new(struct khttpd_port **port_out);
 int khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
     khttpd_event_fn_t accept_handler, const char **detail_out);
 void khttpd_port_stop(struct khttpd_port *port);
+void khttpd_port_shutdown(struct khttpd_port *port);
 
 struct khttpd_socket *khttpd_socket_new(void);
 int khttpd_socket_start(struct khttpd_socket *socket,

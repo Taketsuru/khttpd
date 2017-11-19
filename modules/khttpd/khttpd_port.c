@@ -70,7 +70,7 @@
 #endif
 
 struct khttpd_socket {
-	TAILQ_ENTRY(khttpd_socket) link;
+	LIST_ENTRY(khttpd_socket) link;
 	struct mtx		lock;
 	struct callout		recv_callout;
 	struct callout		xmit_callout;
@@ -82,6 +82,7 @@ struct khttpd_socket {
 #define khttpd_socket_zero_begin read_event
 	struct khttpd_event	*read_event;
 	struct khttpd_event	*write_event;
+	struct khttpd_port	*port;
 	struct file		*fp;
 	struct mbuf		*xmit_buf;
 	u_int			recv_timeout;
@@ -98,10 +99,11 @@ struct khttpd_socket {
 	int			fd;
 };
 
-TAILQ_HEAD(khttpd_socket_tq, khttpd_socket);
+LIST_HEAD(khttpd_socket_list, khttpd_socket);
 
 struct khttpd_port {
 	struct mtx		lock;
+	struct khttpd_socket_list sockets;
 	khttpd_event_fn_t	arrival_fn;
 
 #define khttpd_port_zctor_begin	arrival_event
@@ -189,6 +191,7 @@ khttpd_port_new(struct khttpd_port **port_out)
 	    (khttpd_port_costruct_info));
 
 	mtx_init(&port->lock, "port", NULL, MTX_DEF | MTX_NEW);
+	LIST_INIT(&port->sockets);
 	bzero((char *)port + 
 	    offsetof(struct khttpd_port, khttpd_port_zctor_begin),
 	    offsetof(struct khttpd_port, khttpd_port_zctor_end) -
@@ -213,6 +216,8 @@ khttpd_port_dtor(struct khttpd_port *port)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
+
+	KASSERT(LIST_EMPTY(&port->sockets), ("port->sockets not empty"));
 
 	if (port->costructs_ready)
 		khttpd_costruct_call_dtors(khttpd_port_costruct_info, port);
@@ -353,13 +358,26 @@ khttpd_port_stop(struct khttpd_port *port)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
-	if (port->fd != -1) {
-		khttpd_event_delete(port->arrival_event);
-		kern_close(curthread, port->fd);
-		port->fd = -1;
-	}
+	if (port->fd == -1)
+		return;
 
+	khttpd_event_delete(port->arrival_event);
 	port->arrival_event = NULL;
+	kern_close(curthread, port->fd);
+	port->fd = -1;
+}
+
+void
+khttpd_port_shutdown(struct khttpd_port *port)
+{
+	struct khttpd_socket *socket;
+
+	mtx_lock(&port->lock);
+	LIST_FOREACH(socket, &port->sockets, link)
+		khttpd_socket_shutdown(socket);
+	while (!LIST_EMPTY(&port->sockets))
+		mtx_sleep(&port->sockets, &port->lock, 0, "sockcls", 0);
+	mtx_unlock(&port->lock);
 }
 
 struct khttpd_socket *
@@ -414,6 +432,7 @@ khttpd_socket_fini(void *mem, int size)
 static void
 khttpd_socket_dtor(void *mem, int size, void *arg)
 {
+	struct khttpd_port *port;
 	struct khttpd_socket *socket;
 	struct thread *td;
 	struct mbuf *m;
@@ -423,6 +442,7 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 
 	td = curthread;
 	socket = mem;
+	port = socket->port;
 
 	mtx_lock(&socket->lock);
 
@@ -448,6 +468,14 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 
 	khttpd_event_delete(socket->read_event);
 	khttpd_event_delete(socket->write_event);
+
+	if (port != NULL) {
+		mtx_lock(&port->lock);
+		LIST_REMOVE(socket, link);
+		if (LIST_EMPTY(&port->sockets))
+			wakeup(&port->sockets);
+		mtx_unlock(&port->lock);
+	}
 
 	kern_close(td, fd);
 	fdrop(socket->fp, td);
@@ -545,6 +573,13 @@ khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
 	socket->write_event = khttpd_event_new_write
 	    (khttpd_socket_handle_write_event, socket, socket->fd, FALSE,
 		read_event);
+
+	mtx_lock(&port->lock);
+	KASSERT(socket->port == NULL,
+	    ("socket=%p, socket->port=%p", socket, socket->port));
+	socket->port = port;
+	LIST_INSERT_HEAD(&port->sockets, socket, link);
+	mtx_unlock(&port->lock);
 
 	khttpd_socket_schedule_read_event(socket);
 

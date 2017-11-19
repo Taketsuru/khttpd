@@ -3085,10 +3085,18 @@ khttpd_ctrl_run(void)
 static void
 khttpd_ctrl_exit(void)
 {
+	struct khttpd_ctrl_leaf *leaf;
+	struct khttpd_port *port;
 
 	KHTTPD_ENTRY("khttpd_ctrl_exit()");
 
 	sx_xlock(&khttpd_ctrl_lock);
+
+	LIST_FOREACH(leaf, &khttpd_ctrl_ports.leafs, link) {
+		port = leaf->object;
+		khttpd_port_shutdown(port);
+	}
+
 	khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, NULL);
 	khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, NULL);
 	khttpd_obj_type_clear(&khttpd_ctrl_rewriters);

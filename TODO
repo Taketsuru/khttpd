@@ -1,5 +1,3 @@
-- Idle connections must be closed on server shutdown.
-
 - Utilize nitems macro defined in <sys/param.h>.
 
 - ktr flushing should be stopped if write or fdatasync fails.
@@ -26,6 +24,9 @@
 - CGI etc.
 
 - Optimize file/cache serving performance
+
+- Currently, khttpd_file_get_exchange_get() limits io_size to MAXPHYS.
+  See whether this is necessary or not.
 
 - Optimize the setting of SO_SNDLOWAT value.
 
