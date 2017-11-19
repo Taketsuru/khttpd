@@ -300,7 +300,8 @@ khttpd_exchange_access(struct khttpd_exchange *exchange)
 	khttpd_mbuf_json_sockaddr(&exchange->log_entry, 
 	    khttpd_socket_peer_address(session->socket));
 
-	khttpd_mbuf_json_property_mbuf_1st_line(&exchange->log_entry, "request",
+	khttpd_mbuf_json_property(&exchange->log_entry, "request");
+	khttpd_mbuf_json_mbuf_1st_line(&exchange->log_entry,
 	    exchange->request_line);
 
 	if (exchange->request_payload_size != 0) {
@@ -535,16 +536,15 @@ khttpd_exchange_error(struct khttpd_exchange *exchange,
 
 	if (sbuf_done(&session->host)) {
 		khttpd_mbuf_json_property(entry, "host");
-		khttpd_mbuf_json_format(entry, TRUE, "%s",
-		    sbuf_data(&session->host));
+		khttpd_mbuf_json_cstr(entry, TRUE, sbuf_data(&session->host));
 	}
 
 	khttpd_mbuf_json_property(entry, "peer");
 	khttpd_mbuf_json_sockaddr(entry, 
 	    khttpd_socket_peer_address(session->socket));
 
-	khttpd_mbuf_json_property_mbuf_1st_line(entry, "request",
-		exchange->request_line);
+	khttpd_mbuf_json_property(entry, "request");
+	khttpd_mbuf_json_mbuf_1st_line(entry, exchange->request_line);
 
 	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
 }

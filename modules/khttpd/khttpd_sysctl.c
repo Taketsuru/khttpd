@@ -275,13 +275,15 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 	khttpd_mbuf_json_new(&body);
 
 	khttpd_mbuf_json_object_begin(&body);
-	khttpd_mbuf_json_property_array_begin(&body, "flags");
+	khttpd_mbuf_json_property(&body, "flags");
+	khttpd_mbuf_json_array_begin(&body);
 	for (i = 0; i < khttpd_sysctl_flags_count; ++i)
-		khttpd_mbuf_json_format(&body, TRUE, "%s",
+		khttpd_mbuf_json_cstr(&body, TRUE,
 		    khttpd_sysctl_flags[i].field_name);
 	khttpd_mbuf_json_array_end(&body);
 
-	khttpd_mbuf_json_property_array_begin(&body, "items");
+	khttpd_mbuf_json_property(&body, "items");
+	khttpd_mbuf_json_array_begin(&body);
 	last_oid[0] = 1;
 	last_oidlen = sizeof(int);
 	next_oidlen = 0;
@@ -343,31 +345,34 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 		khttpd_sysctl_print_oid(&sbuf, next_oid + 2,
 		    next_oidlen / sizeof(int));
 		sbuf_finish(&sbuf);
-		khttpd_mbuf_json_property_format(&body, "href", TRUE,
-		    sbuf_data(&sbuf));
+		khttpd_mbuf_json_property(&body, "href");
+		khttpd_mbuf_json_cstr(&body, TRUE, sbuf_data(&sbuf));
 		sbuf_clear(&sbuf);
 
 		/* Print "name" property */
-		khttpd_mbuf_json_property_format(&body, "name", TRUE, "%s",
-		    namebuf);
+		khttpd_mbuf_json_property(&body, "name");
+		khttpd_mbuf_json_cstr(&body, TRUE, namebuf);
 
-		khttpd_mbuf_json_property_array_begin(&body, "flags");
+		khttpd_mbuf_json_property(&body, "flags");
+		khttpd_mbuf_json_array_begin(&body);
 		for (i = 0; i < khttpd_sysctl_flags_count; ++i)
 			if ((kind & khttpd_sysctl_flags[i].flag) != 0)
-				khttpd_mbuf_json_format(&body, TRUE, "%s",
+				khttpd_mbuf_json_cstr(&body, TRUE,
 				    khttpd_sysctl_flags[i].field_name);
 		khttpd_mbuf_json_array_end(&body);
 
-		if ((kind & CTLFLAG_SECURE) != 0)
-			khttpd_mbuf_json_property_format(&body, "securelevel",
-			    FALSE, "%d",
+		if ((kind & CTLFLAG_SECURE) != 0) {
+			khttpd_mbuf_json_property(&body, "securelevel");
+			khttpd_mbuf_json_format(&body, FALSE, "%d",
 			    (kind & CTLMASK_SECURE) >> CTLSHIFT_SECURE);
+		}
 
-		khttpd_mbuf_json_property_format(&body, "type", TRUE, "%s",
-			    khttpd_sysctl_types[type - 1]);
+		khttpd_mbuf_json_property(&body, "type");
+		khttpd_mbuf_json_cstr(&body, TRUE,
+		    khttpd_sysctl_types[type - 1]);
 
-		khttpd_mbuf_json_property_format(&body, "format", TRUE, "%s",
-		    kindbuf + sizeof(kind));
+		khttpd_mbuf_json_property(&body, "format");
+		khttpd_mbuf_json_cstr(&body, TRUE, kindbuf + sizeof(kind));
 
 		/* Get the description of the next entry. */
 		next_oid[1] = 5; /* oiddescr */
@@ -381,9 +386,11 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 			error = kernel_sysctl(td, next_oid,
 			    next_oidlen / sizeof(int) + 2, descbuf,
 			    &descbuflen, NULL, 0, NULL, 0);
-			if (error == 0 && 0 < len && descbuf[0] != '\0')
-				khttpd_mbuf_json_property_format(&body,
-				    "description", TRUE, "%s", descbuf);
+			if (error == 0 && 0 < len && descbuf[0] != '\0') {
+				khttpd_mbuf_json_property(&body,
+				    "description");
+				khttpd_mbuf_json_cstr(&body, TRUE, descbuf);
+			}
 		}
 
 		/* Get the value of the next entry. */

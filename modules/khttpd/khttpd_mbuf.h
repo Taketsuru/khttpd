@@ -27,24 +27,16 @@
 
 #pragma once
 
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
+
 #include <sys/types.h>
 #include <machine/stdarg.h>
-
-enum khttpd_mbuf_append_entry_type {
-	KHTTPD_MBUF_APPEND_END,
-	KHTTPD_MBUF_APPEND_STR,
-	KHTTPD_MBUF_APPEND_STR_JSON,
-	KHTTPD_MBUF_APPEND_MBUF,
-	KHTTPD_MBUF_APPEND_MBUF_JSON,
-	KHTTPD_MBUF_APPEND_FMT,
-	KHTTPD_MBUF_APPEND_FMT_JSON
-};
 
 struct mbuf;
 struct sbuf;
 struct sockaddr;
-struct sockaddr_in;
-struct sockaddr_in6;
 
 struct khttpd_mbuf_pos {
 	struct mbuf	*ptr;
@@ -89,18 +81,9 @@ int khttpd_mbuf_next_list_element(struct khttpd_mbuf_pos *pos,
 boolean_t khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos,
     char *token, boolean_t ignore_case);
 
-struct mbuf *khttpd_mbuf_put_json_string_wo_quote_mbuf(struct mbuf *output,
-    struct mbuf *source);
-struct mbuf *khttpd_mbuf_put_json_string(struct mbuf *output,
-    const char *begin, const char *end);
-struct mbuf *khttpd_mbuf_put_json_string_cstr(struct mbuf *output,
-    const char *str);
-
 void khttpd_mbuf_json_new(struct khttpd_mbuf_json *v);
 struct mbuf *khttpd_mbuf_json_data(struct khttpd_mbuf_json *v);
 struct mbuf *khttpd_mbuf_json_move(struct khttpd_mbuf_json *v);
-void khttpd_mbuf_json_copy_to_sbuf(struct khttpd_mbuf_json *, struct sbuf *);
-void khttpd_mbuf_json_print(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_delete(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_null(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_boolean(struct khttpd_mbuf_json *v, boolean_t value);
@@ -108,37 +91,17 @@ void khttpd_mbuf_json_cstr(struct khttpd_mbuf_json *v, boolean_t is_string,
     const char *value);
 void khttpd_mbuf_json_mbuf(struct khttpd_mbuf_json *v, boolean_t is_string,
     struct mbuf *m);
-void khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
-    const struct sockaddr *sockaddr);
+void khttpd_mbuf_json_mbuf_1st_line(struct khttpd_mbuf_json *v,
+    struct mbuf *m);
 void khttpd_mbuf_json_format(struct khttpd_mbuf_json *v, boolean_t is_string,
     const char *fmt, ...);
 void khttpd_mbuf_json_vformat(struct khttpd_mbuf_json *v, boolean_t is_string,
     const char *fmt, va_list args);
 void khttpd_mbuf_json_object_begin(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_object_end(struct khttpd_mbuf_json *v);
-void khttpd_mbuf_json_property(struct khttpd_mbuf_json *, const char *);
-void khttpd_mbuf_json_property_null(struct khttpd_mbuf_json *v,
-    const char *name);
-void khttpd_mbuf_json_property_null(struct khttpd_mbuf_json *v,
-    const char *name);
-void khttpd_mbuf_json_property_boolean(struct khttpd_mbuf_json *v,
-    const char *name, boolean_t value);
-void khttpd_mbuf_json_property_cstr(struct khttpd_mbuf_json *v,
-    const char *name, boolean_t is_string, const char *value);
-void khttpd_mbuf_json_property_format(struct khttpd_mbuf_json *v,
-    const char *name, boolean_t is_string, const char *fmt, ...);
-void khttpd_mbuf_json_property_vformat(struct khttpd_mbuf_json *v,
-    const char *name, boolean_t is_string, const char *fmt, va_list args);
-void khttpd_mbuf_json_property_mbuf(struct khttpd_mbuf_json *v,
-    const char *name, boolean_t is_string, struct mbuf *m);
-void khttpd_mbuf_json_property_mbuf_1st_line(struct khttpd_mbuf_json *v,
-    const char *name, struct mbuf *m);
-void khttpd_mbuf_json_property_sockaddr(struct khttpd_mbuf_json *v,
-    const char *name, struct sockaddr *addr);
-void khttpd_mbuf_json_property_array_begin(struct khttpd_mbuf_json *v,
-    const char *name);
-void khttpd_mbuf_json_property_object_begin(struct khttpd_mbuf_json *v,
-    const char *name);
 void khttpd_mbuf_json_array_begin(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *v);
+void khttpd_mbuf_json_property(struct khttpd_mbuf_json *, const char *);
 void khttpd_mbuf_json_now(struct khttpd_mbuf_json *v);
+void khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
+    const struct sockaddr *sockaddr);

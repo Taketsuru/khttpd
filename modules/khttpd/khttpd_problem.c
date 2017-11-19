@@ -393,8 +393,9 @@ khttpd_problem_response_begin(struct khttpd_mbuf_json *output, int status,
 	khttpd_mbuf_json_new(output);
 	khttpd_mbuf_json_object_begin(output);
 	if (type != NULL) {
-		khttpd_mbuf_json_property_format(output, "type", TRUE,
-		    "%s/%s", KHTTPD_PROBLEM_URL, type);
+		khttpd_mbuf_json_property(output, "type");
+		khttpd_mbuf_json_format(output, TRUE, "%s/%s",
+		    KHTTPD_PROBLEM_URL, type);
 	} else if (title == NULL) {
 		head = khttpd_problem_known_code_slist_head(status);
 		SLIST_FOREACH(codep, head, link)
@@ -404,11 +405,12 @@ khttpd_problem_response_begin(struct khttpd_mbuf_json *output, int status,
 		    }
 	}
 
-	if (title != NULL)
-		khttpd_mbuf_json_property_format(output, "title", TRUE,
-		    "%s", title);
-	khttpd_mbuf_json_property_format(output, "status", FALSE, "%d",
-	    status);
+	if (title != NULL) {
+		khttpd_mbuf_json_property(output, "title");
+		khttpd_mbuf_json_cstr(output, TRUE, title);
+	}
+	khttpd_mbuf_json_property(output, "status");
+	khttpd_mbuf_json_format(output, FALSE, "%d", status);
 }
 
 void
@@ -429,12 +431,14 @@ khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
 
 	khttpd_mbuf_json_new(output);
 	khttpd_mbuf_json_object_begin(output);
-	khttpd_mbuf_json_property_format(output, "type", TRUE, "%s/%s",
-	    KHTTPD_PROBLEM_URL, type != NULL ? type : label);
-	khttpd_mbuf_json_property_format(output, "title", TRUE, "%s",
-	    title != NULL ? title : type != NULL ? type : label);
-	khttpd_mbuf_json_property_format(output, "severity", FALSE, "%s",
-	    label);
+	khttpd_mbuf_json_property(output, "type");
+	khttpd_mbuf_json_format(output, TRUE, "%s/%s", KHTTPD_PROBLEM_URL,
+	    type != NULL ? type : label);
+	khttpd_mbuf_json_property(output, "title");
+	khttpd_mbuf_json_cstr(output, TRUE, title != NULL ? title :
+	    type != NULL ? type : label);
+	khttpd_mbuf_json_property(output, "severity");
+	khttpd_mbuf_json_cstr(output, TRUE, label);
 }
 
 void
@@ -450,8 +454,8 @@ khttpd_problem_set_property(struct khttpd_mbuf_json *output,
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 	khttpd_problem_property_specifier_to_string(&sbuf, prop_spec);
 	sbuf_finish(&sbuf);
-	khttpd_mbuf_json_property_format(output, "property", TRUE,
-	    "%s", sbuf_data(&sbuf));
+	khttpd_mbuf_json_property(output, "property");
+	khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	sbuf_delete(&sbuf);
 }
 
@@ -470,9 +474,11 @@ khttpd_problem_set_detail(struct khttpd_mbuf_json *output,
 void khttpd_problem_set_errno(struct khttpd_mbuf_json *output,
     int error)
 {
-	if (error != 0)
-		khttpd_mbuf_json_property_format(output, "errno", FALSE, "%d",
-		    error);
+	if (error == 0)
+		return;
+
+	khttpd_mbuf_json_property(output, "errno");
+	khttpd_mbuf_json_format(output, FALSE, "%d", error);
 }
 
 void

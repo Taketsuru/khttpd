@@ -617,7 +617,7 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		khttpd_problem_set_errno(&logent, error);
 
 		khttpd_mbuf_json_property(&logent, "path");
-		khttpd_mbuf_json_format(&logent, TRUE, "%s", data->path);
+		khttpd_mbuf_json_cstr(&logent, TRUE, data->path);
 
 		khttpd_mbuf_json_property(&logent, "offset");
 		khttpd_mbuf_json_format(&logent, FALSE, "%jd",
@@ -975,8 +975,8 @@ khttpd_file_location_get(struct khttpd_location *location,
 		khttpd_obj_type_get_id(&khttpd_ctrl_rewriters,
 		    location_data->charset_rewriter, &sbuf);
 		sbuf_finish(&sbuf);
-		khttpd_mbuf_json_property_format(output, "charsetRules", TRUE,
-		    "%s", sbuf_data(&sbuf));
+		khttpd_mbuf_json_property(output, "charsetRules");
+		khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	}
 
 	if (location_data->mime_type_rewriter != NULL) {
@@ -984,12 +984,12 @@ khttpd_file_location_get(struct khttpd_location *location,
 		khttpd_obj_type_get_id(&khttpd_ctrl_rewriters,
 		    location_data->mime_type_rewriter, &sbuf);
 		sbuf_finish(&sbuf);
-		khttpd_mbuf_json_property_format(output, "mimeTypeRules", TRUE,
-		    "%s", sbuf_data(&sbuf));
+		khttpd_mbuf_json_property(output, "mimeTypeRules");
+		khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	}
 
-	khttpd_mbuf_json_property_format(output, "documentRoot", TRUE,
-	    "%s", location_data->docroot);
+	khttpd_mbuf_json_property(output, "documentRoot");
+	khttpd_mbuf_json_cstr(output, TRUE, location_data->docroot);
 
 	khttpd_mbuf_json_object_end(output);
 

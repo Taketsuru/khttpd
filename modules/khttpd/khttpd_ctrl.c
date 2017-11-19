@@ -272,10 +272,10 @@ khttpd_ctrl_parse_json(struct khttpd_json **value_out,
 		sbuf_delete(diag.detail);
 	}
 
-	khttpd_mbuf_json_property_format(response, "line", FALSE, "%u",
-	    diag.line);
-	khttpd_mbuf_json_property_format(response, "column", FALSE, "%u",
-	    diag.column);
+	khttpd_mbuf_json_property(response, "line");
+	khttpd_mbuf_json_format(response, FALSE, "%u", diag.line);
+	khttpd_mbuf_json_property(response, "column");
+	khttpd_mbuf_json_format(response, FALSE, "%u", diag.column);
 
 	return (status);
 }
@@ -652,8 +652,8 @@ khttpd_obj_type_put_id_property(struct khttpd_obj_type *type,
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 	khttpd_obj_type_get_id(type, object, &sbuf);
 	sbuf_finish(&sbuf);
-	khttpd_mbuf_json_property_format(output, "id", TRUE, "%s",
-	    sbuf_data(&sbuf));
+	khttpd_mbuf_json_property(output, "id");
+	khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	sbuf_delete(&sbuf);
 }
 
@@ -893,9 +893,10 @@ khttpd_ctrl_get_node(struct khttpd_exchange *exchange)
 	sx_slock(&khttpd_ctrl_lock);
 
 	khttpd_mbuf_json_object_begin(&response);
-	khttpd_mbuf_json_property_format(&response, "totalItems", FALSE,
-	    "%u", type->leaf_count);
-	khttpd_mbuf_json_property_array_begin(&response, "items");
+	khttpd_mbuf_json_property(&response, "totalItems");
+	khttpd_mbuf_json_format(&response, FALSE, "%u", type->leaf_count);
+	khttpd_mbuf_json_property(&response, "items");
+	khttpd_mbuf_json_array_begin(&response);
 
 	LIST_FOREACH(leaf, &type->leafs, link) {
 		object = leaf->object;
@@ -1674,9 +1675,10 @@ khttpd_ctrl_port_get_index(void *object, struct khttpd_mbuf_json *output)
 	khttpd_mbuf_json_property(output, "address");
 	khttpd_mbuf_json_sockaddr(output, (struct sockaddr *)&port_data->addr);
 	proto_name = khttpd_ctrl_protocol_name(port_data->protocol);
-	if (proto_name != NULL)
-		khttpd_mbuf_json_property_format(output, "protocol", TRUE,
-		    "%s", proto_name);
+	if (proto_name != NULL) {
+		khttpd_mbuf_json_property(output, "protocol");
+		khttpd_mbuf_json_cstr(output, TRUE, proto_name);
+	}
 
 	return (KHTTPD_STATUS_OK);
 }
@@ -1997,16 +1999,18 @@ khttpd_ctrl_server_get_index(void *object, struct khttpd_mbuf_json *output)
 
 	server = object;
 
-	if (server == khttpd_ctrl_server)
-		khttpd_mbuf_json_property_format(output, "hasConfigurator",
-		    FALSE, "true");
+	if (server == khttpd_ctrl_server) {
+		khttpd_mbuf_json_property(output, "hasConfigurator");
+		khttpd_mbuf_json_cstr(output, FALSE, "true");
+	}
 
 	name = khttpd_vhost_copy_server_name(server);
 
 	value = khttpd_vhost_get_canonical_name(name);
-	if (value != NULL)
-		khttpd_mbuf_json_property_format(output, "name", TRUE, "%s",
-		    value);
+	if (value != NULL) {
+		khttpd_mbuf_json_property(output, "name");
+		khttpd_mbuf_json_cstr(output, TRUE, "%s");
+	}
 
 	khttpd_vhost_server_name_delete(name);
 
@@ -2032,13 +2036,15 @@ khttpd_ctrl_server_get(void *object, struct khttpd_mbuf_json *output)
 
 	name = khttpd_vhost_copy_server_name(server);
 
-	khttpd_mbuf_json_property_array_begin(output, "aliases");
+	khttpd_mbuf_json_property(output, "aliases");
+	khttpd_mbuf_json_array_begin(output);
 	n = khttpd_vhost_get_exact_alias_list_length(name);
 	for (i = 0; i < n; ++i) {
 		khttpd_mbuf_json_object_begin(output);
-		khttpd_mbuf_json_property_format(output, "type", TRUE, "%s",
-		    "exact");
-		khttpd_mbuf_json_property_format(output, "value", TRUE, "%s",
+		khttpd_mbuf_json_property(output, "type");
+		khttpd_mbuf_json_cstr(output, TRUE, "exact");
+		khttpd_mbuf_json_property(output, "value");
+		khttpd_mbuf_json_cstr(output, TRUE,
 		    khttpd_vhost_get_exact_alias(name, i));
 		khttpd_mbuf_json_object_end(output);
 	}
@@ -2047,13 +2053,14 @@ khttpd_ctrl_server_get(void *object, struct khttpd_mbuf_json *output)
 	khttpd_vhost_server_name_delete(name);
 
 	sbuf_new(&url, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	khttpd_mbuf_json_property_array_begin(output, "ports");
+	khttpd_mbuf_json_property(output, "ports");
+	khttpd_mbuf_json_array_begin(output);
 	for (iter = khttpd_vhost_port_iterator(server); iter != NULL; ) {
 		sbuf_clear(&url);
 		iter = khttpd_vhost_port_iterator_next(iter, &port);
 		khttpd_obj_type_get_id(&khttpd_ctrl_ports, port, &url);
 		sbuf_finish(&url);
-		khttpd_mbuf_json_format(output, TRUE, "%s", sbuf_data(&url));
+		khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&url));
 	}
 	khttpd_mbuf_json_array_end(output);
 	sbuf_delete(&url);
@@ -2261,19 +2268,21 @@ khttpd_ctrl_location_get_index(void *object, struct khttpd_mbuf_json *output)
 	    khttpd_ctrl_location_data_key);
 	type = location_data->type;
 
-	if (type != NULL)
-		khttpd_mbuf_json_property_format(output, "type", TRUE, "%s",
-		    type->name);
+	if (type != NULL) {
+		khttpd_mbuf_json_property(output, "type");
+		khttpd_mbuf_json_cstr(output, TRUE, type->name);
+	}
 
 	server = khttpd_location_get_server(location);
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 	khttpd_obj_type_get_id(&khttpd_ctrl_servers, server, &sbuf);
 	sbuf_finish(&sbuf);
-	khttpd_mbuf_json_property_format(output, "server", TRUE, "%s",
-	    sbuf_data(&sbuf));
+	khttpd_mbuf_json_property(output, "server");
+	khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	sbuf_delete(&sbuf);
 
-	khttpd_mbuf_json_property_format(output, "path", TRUE, "%s",
+	khttpd_mbuf_json_property(output, "path");
+	khttpd_mbuf_json_cstr(output, TRUE,
 	    khttpd_location_get_path(location));
 
 	return (KHTTPD_STATUS_OK);
@@ -2443,7 +2452,8 @@ khttpd_ctrl_rewriter_get(void *object, struct khttpd_mbuf_json *output)
 
 	khttpd_mbuf_json_object_begin(output);
 
-	khttpd_mbuf_json_property_array_begin(output, "rules");
+	khttpd_mbuf_json_property(output, "rules");
+	khttpd_mbuf_json_array_begin(output);
 
 	for (rule = khttpd_rewriter_iteration_begin(rewriter);
 	     rule != NULL;
@@ -2454,14 +2464,14 @@ khttpd_ctrl_rewriter_get(void *object, struct khttpd_mbuf_json *output)
 		switch (khttpd_rewriter_rule_get_type(rule)) {
 
 		case KHTTPD_REWRITER_RULE_SUFFIX:
-			khttpd_mbuf_json_property_format(output, "type", TRUE,
-			    "%s", "suffix");
+			khttpd_mbuf_json_property(output, "type");
+			khttpd_mbuf_json_cstr(output, TRUE, "suffix");
 			khttpd_rewriter_rule_inspect_suffix_rule(rule, &str1,
 			    &str2);
-			khttpd_mbuf_json_property_format(output, "pattern",
-			    TRUE, "%s", str1);
-			khttpd_mbuf_json_property_format(output, "result",
-			    TRUE, "%s", str2);
+			khttpd_mbuf_json_property(output, "pattern");
+			khttpd_mbuf_json_cstr(output, TRUE, str1);
+			khttpd_mbuf_json_property(output, "result");
+			khttpd_mbuf_json_cstr(output, TRUE, str2);
 			break;
 
 		default:
@@ -2479,9 +2489,10 @@ khttpd_ctrl_rewriter_get(void *object, struct khttpd_mbuf_json *output)
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 	has_default = khttpd_rewriter_get_default(rewriter, &sbuf);
 	sbuf_finish(&sbuf);
-	if (has_default)
-		khttpd_mbuf_json_property_format(output, "default", TRUE,
-		    "%s", sbuf_data(&sbuf));
+	if (has_default) {
+		khttpd_mbuf_json_property(output, "default");
+		khttpd_mbuf_json_format(output, TRUE, "%s", sbuf_data(&sbuf));
+	}
 	sbuf_delete(&sbuf);
 
 	khttpd_mbuf_json_object_end(output);
