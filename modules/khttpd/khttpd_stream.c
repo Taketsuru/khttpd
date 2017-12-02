@@ -55,3 +55,6 @@ khttpd_stream_data_is_available(struct khttpd_stream *stream);
 
 extern void
 khttpd_stream_clear_to_send(struct khttpd_stream *stream, ssize_t);
+
+extern void
+khttpd_stream_error(struct khttpd_stream *, struct khttpd_mbuf_json *);

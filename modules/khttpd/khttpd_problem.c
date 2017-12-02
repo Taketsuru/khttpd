@@ -33,6 +33,7 @@
 #include <sys/hash.h>
 #include <sys/mbuf.h>
 #include <sys/sbuf.h>
+#include <sys/syslog.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/sysproto.h>
@@ -511,4 +512,12 @@ khttpd_problem_get_severity_label(int severity)
 	    ("unknown severity: %d", severity));
 
 	return (khttpd_problem_severities[severity]);
+}
+
+void
+khttpd_problem_internal_error_log_new(struct khttpd_mbuf_json *output)
+{
+
+	khttpd_problem_log_new(output, LOG_ERR, "internal_error",
+	    "internal error");
 }

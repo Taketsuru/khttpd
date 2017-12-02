@@ -193,6 +193,8 @@ static int khttpd_session_receive_header_or_trailer(struct khttpd_session *);
 static int khttpd_session_receive_request_line(struct khttpd_session *);
 static void khttpd_session_data_is_available(struct khttpd_stream *);
 static void khttpd_session_clear_to_send(struct khttpd_stream *, ssize_t);
+static void khttpd_session_error(struct khttpd_stream *,
+    struct khttpd_mbuf_json *);
 static void khttpd_session_transmit(struct khttpd_session *session, ssize_t);
 
 /* --------------------------------------------------- variable definitions */
@@ -225,6 +227,7 @@ static struct khttpd_log * volatile khttpd_http_logs[KHTTPD_HTTP_LOG_END];
 static struct khttpd_stream_up_ops khttpd_session_ops = {
 	.data_is_available = khttpd_session_data_is_available,
 	.clear_to_send = khttpd_session_clear_to_send,
+	.error = khttpd_session_error,
 };
 
 static struct khttpd_exchange_ops khttpd_exchange_null_ops;
@@ -519,33 +522,9 @@ void
 khttpd_exchange_error(struct khttpd_exchange *exchange,
     struct khttpd_mbuf_json *entry)
 {
-	struct khttpd_session *session;
-	struct khttpd_log *log;
 
-	session = khttpd_exchange_get_session(exchange);
-
-	log = khttpd_http_logs[KHTTPD_HTTP_LOG_ERROR];
-	if (log == NULL) {
-		m_freem(khttpd_mbuf_json_move(entry));
-		return;
-	}
-
-	khttpd_mbuf_json_property(entry, "timestamp");
-	khttpd_mbuf_json_now(entry);
-
-	if (sbuf_done(&session->host)) {
-		khttpd_mbuf_json_property(entry, "host");
-		khttpd_mbuf_json_cstr(entry, TRUE, sbuf_data(&session->host));
-	}
-
-	khttpd_mbuf_json_property(entry, "peer");
-	khttpd_mbuf_json_sockaddr(entry, 
-	    khttpd_socket_peer_address(session->socket));
-
-	khttpd_mbuf_json_property(entry, "request");
-	khttpd_mbuf_json_mbuf_1st_line(entry, exchange->request_line);
-
-	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
+	khttpd_session_error(&khttpd_exchange_get_session(exchange)->stream,
+	    entry);
 }
 
 const char *
@@ -631,8 +610,7 @@ khttpd_exchange_vadd_response_field(struct khttpd_exchange *exchange,
 
 	if (exchange->response_header_closed) {
 		if (!exchange->response_chunked) {
-			khttpd_problem_log_new(&problem, LOG_ERR,
-			    "server_internal_error", "server internal error");
+			khttpd_problem_internal_error_log_new(&problem);
 			khttpd_problem_set_detail(&problem,
 			    "Field %s is added to a response but "
 			    "the payload transfer has been started.", field);
@@ -989,9 +967,10 @@ khttpd_session_transmit(struct khttpd_session *session, ssize_t space)
 	exchange = &session->exchange;
 
 	if (exchange->ops->get == NULL) {
-		log(LOG_ERR, "khttpd: exchange op for target \"%s\""
-		    "doesn't have neither get nor send method",
-		    sbuf_data(&exchange->target));
+		khttpd_problem_internal_error_log_new(&logent);
+		khttpd_problem_set_detail(&logent, 
+		    "exchange_op doesn't have neither get nor send method");
+		khttpd_session_error(&session->stream, &logent);
 
 		exchange->close = TRUE;
 		khttpd_session_transmit_finish(session, NULL);
@@ -1004,9 +983,7 @@ khttpd_session_transmit(struct khttpd_session *session, ssize_t space)
 	    &pause);
 	if (error == ENOMSG && exchange->response_chunked) {
 		if (pause) {
-			khttpd_problem_log_new(&logent, LOG_WARNING,
-			    "server_internal_error", 
-			    "server internal error");
+			khttpd_problem_internal_error_log_new(&logent);
 			khttpd_problem_set_detail(&logent, 
 			    "exchange_ops::get try to pause the server"
 			    "but the transfer has been completed");
@@ -1052,8 +1029,7 @@ khttpd_session_transmit(struct khttpd_session *session, ssize_t space)
 		khttpd_session_transmit_finish(session, head);
 
 	else {
-		khttpd_problem_log_new(&logent, LOG_ERR,
-		    "server_internal_error", "server internal error");
+		khttpd_problem_internal_error_log_new(&logent);
 		khttpd_problem_set_detail(&logent,
 		    "exchange_ops::get try to pause the server but "
 		    "the transfer has been completed");
@@ -1438,8 +1414,7 @@ khttpd_session_receive_body(struct khttpd_session *session)
 	}
 
 	if (pause) {
-		khttpd_problem_log_new(&logent, LOG_ERR,
-		    "server_internal_error", "server internal error");
+		khttpd_problem_internal_error_log_new(&logent);
 		khttpd_problem_set_detail(&logent,
 		    "exchange_ops::put try to pause but the request body has "
 		    "already been transfered completely.");
@@ -1753,10 +1728,13 @@ khttpd_session_receive_transfer_encoding_field(struct khttpd_session *session,
 
 		error = khttpd_mbuf_next_list_element(pos, &token);
 		if (error != 0) {
-			if (error != ENOMSG)
-				log(LOG_ERR, "khttpd: "
-				    "khttpd_mbuf_next_list_element failed "
-				    "(error: %d)", error);
+			if (error != ENOMSG) {
+				khttpd_problem_internal_error_log_new(&diag);
+				khttpd_problem_set_detail(&diag,
+				    "khttpd_mbuf_next_list_element failed");
+				khttpd_problem_set_errno(&diag, error);
+				khttpd_exchange_error(exchange, &diag);
+			}
 			break;
 		}
 
@@ -2174,6 +2152,41 @@ khttpd_session_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 		khttpd_session_transmit(session, space);
 }
 
+static void
+khttpd_session_error(struct khttpd_stream *stream,
+    struct khttpd_mbuf_json *entry)
+{
+	struct khttpd_exchange *exchange;
+	struct khttpd_session *session;
+	struct khttpd_log *log;
+
+	session = stream->up;
+	exchange = &session->exchange;
+
+	log = khttpd_http_logs[KHTTPD_HTTP_LOG_ERROR];
+	if (log == NULL) {
+		m_freem(khttpd_mbuf_json_move(entry));
+		return;
+	}
+
+	khttpd_mbuf_json_property(entry, "timestamp");
+	khttpd_mbuf_json_now(entry);
+
+	if (sbuf_done(&session->host)) {
+		khttpd_mbuf_json_property(entry, "host");
+		khttpd_mbuf_json_cstr(entry, TRUE, sbuf_data(&session->host));
+	}
+
+	khttpd_mbuf_json_property(entry, "peer");
+	khttpd_mbuf_json_sockaddr(entry, 
+	    khttpd_socket_peer_address(session->socket));
+
+	khttpd_mbuf_json_property(entry, "request");
+	khttpd_mbuf_json_mbuf_1st_line(entry, exchange->request_line);
+
+	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
+}
+
 static int
 khttpd_http_client_init(void *mem, int size, int flags)
 {
@@ -2240,7 +2253,7 @@ khttpd_http_accept_http_client(void *arg)
 	stream = &client->session.stream;
 	stream->down = client->session.socket = socket = khttpd_socket_new();
 
-	error = khttpd_socket_start(socket, stream, port, NULL);
+	error = khttpd_socket_start(socket, stream, port);
 	if (error != 0)
 		uma_zfree(khttpd_http_client_zone, client);
 }

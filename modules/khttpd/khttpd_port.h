@@ -57,8 +57,7 @@ void khttpd_port_shutdown(struct khttpd_port *port);
 
 struct khttpd_socket *khttpd_socket_new(void);
 int khttpd_socket_start(struct khttpd_socket *socket,
-    struct khttpd_stream *stream, struct khttpd_port *port,
-    const char **detail_out);
+    struct khttpd_stream *stream, struct khttpd_port *port);
 const struct sockaddr *khttpd_socket_peer_address
     (struct khttpd_socket *socket);
 

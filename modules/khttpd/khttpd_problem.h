@@ -66,3 +66,4 @@ void khttpd_problem_no_value_response_begin(struct khttpd_mbuf_json *);
 void khttpd_problem_wrong_type_response_begin(struct khttpd_mbuf_json *);
 void khttpd_problem_invalid_value_response_begin(struct khttpd_mbuf_json *);
 const char *khttpd_problem_get_severity_label(int severity);
+void khttpd_problem_internal_error_log_new(struct khttpd_mbuf_json *output);

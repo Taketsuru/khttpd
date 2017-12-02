@@ -1,6 +1,10 @@
 - Add 'log' function to struct khttpd_stream_up_ops and make khttpd_port
   use it to log errors.
 
+- CGI and FastCGI
+
+- Add support for basic authentication
+
 - Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
 
 - Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
@@ -9,10 +13,6 @@
   the end of the exchange, but the request.  This is difficult to know from the
   name.  Also the meaning of 'get' and 'put' are easily misunderstood as
   opposit.
-
-- CGI and FastCGI
-
-- Add support for basic authentication
 
 - make khttpd_test multi-module aware
 

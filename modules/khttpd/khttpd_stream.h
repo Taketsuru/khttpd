@@ -32,6 +32,7 @@
 #ifdef _KERNEL
 
 struct mbuf;
+struct khttpd_mbuf_json;
 struct khttpd_stream;
 
 enum {
@@ -47,6 +48,8 @@ typedef boolean_t (*khttpd_stream_send_fn_t)
     (struct khttpd_stream *, struct mbuf *, int);
 typedef void (*khttpd_stream_bufstat_fn_t)(struct khttpd_stream *, size_t *,
     size_t *, size_t *);
+typedef void (*khttpd_stream_log_fn_t)(struct khttpd_stream *,
+    struct khttpd_mbuf_json *);
 
 struct khttpd_stream_down_ops {
 	khttpd_stream_receive_fn_t	receive;
@@ -61,6 +64,7 @@ struct khttpd_stream_down_ops {
 struct khttpd_stream_up_ops {
 	khttpd_stream_fn_t	data_is_available;
 	khttpd_stream_cts_fn_t	clear_to_send;
+	khttpd_stream_log_fn_t	error;
 };
 
 struct khttpd_stream {
@@ -136,6 +140,14 @@ khttpd_stream_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 {
 
 	stream->up_ops->clear_to_send(stream, space);
+}
+
+inline void
+khttpd_stream_error(struct khttpd_stream *stream,
+    struct khttpd_mbuf_json *entry)
+{
+
+	stream->up_ops->error(stream, entry);
 }
 
 #endif	/* _KERNEL */

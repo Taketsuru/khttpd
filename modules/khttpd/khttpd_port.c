@@ -59,6 +59,7 @@
 #include "khttpd_job.h"
 #include "khttpd_ktr.h"
 #include "khttpd_log.h"
+#include "khttpd_problem.h"
 #include "khttpd_refcount.h"
 #include "khttpd_status_code.h"
 #include "khttpd_malloc.h"
@@ -482,6 +483,19 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 }
 
 static void
+khttpd_socket_error(struct khttpd_socket *socket, int severity, int error,
+    const char *detail)
+{
+	struct khttpd_mbuf_json entry;
+
+	khttpd_problem_log_new(&entry, severity, "socket_error",
+	    "socket I/O error");
+	khttpd_problem_set_detail(&entry, detail);
+	khttpd_problem_set_errno(&entry, error);
+	khttpd_stream_error(socket->stream, &entry);
+}
+
+static void
 khttpd_socket_schedule_read_event(struct khttpd_socket *socket)
 {
 
@@ -508,7 +522,7 @@ khttpd_socket_schedule_read_event(struct khttpd_socket *socket)
 
 int
 khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
-    struct khttpd_port *port, const char **detail_out)
+    struct khttpd_port *port)
 {
 	struct thread *td;
 	struct sockaddr *name;
@@ -525,9 +539,9 @@ khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
 	error = kern_accept4(td, port->fd, &name, &namelen, SOCK_NONBLOCK, 
 	    NULL);
 	if (error != 0) {
-		KHTTPD_BRANCH("%s accept failed (error: %d)", __func__, error);
-		detail = "accept failed";
-		goto error;
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "accept failed");
+		return (error);
 	}
 	socket->fd = fd = td->td_retval[0];
 
@@ -539,18 +553,18 @@ khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
 	error = getsock_cap(td, fd, &khttpd_socket_rights, &socket->fp, NULL,
 	    NULL);
 	if (error != 0) {
-		detail = "getsock_cap failed";
-		KHTTPD_BRANCH("%s %s (error: %d)", __func__, detail, error);
-		goto error;
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "getsock_cap failed");
+		return (error);
 	}
 
 	nosigpipe = 1;
 	error = kern_setsockopt(td, fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe,
 	    UIO_SYSSPACE, sizeof(nosigpipe));
 	if (error != 0) {
-		detail = "setsockopt(SO_NOSIGPIPE) failed";
-		KHTTPD_BRANCH("%s %s (error: %d)", __func__, detail, error);
-		goto error;
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "setsockopt(SO_NOSIGPIPE) failed");
+		return (error);
 	}
 
 	if (port->is_tcp) {
@@ -560,10 +574,9 @@ khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
 		error = kern_setsockopt(td, fd, IPPROTO_TCP, TCP_NODELAY,
 		    &nodelay, UIO_SYSSPACE, sizeof(nodelay));
 		if (error != 0) {
-			detail = "setsockopt(TCP_NODELAY) failed";
-			KHTTPD_BRANCH("%s %s (error: %d)", __func__, detail,
-			    error);
-			goto error;
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "setsockopt(TCP_NODELAY) failed");
+			return (error);
 		}
 	}
 
@@ -584,12 +597,6 @@ khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
 	khttpd_socket_schedule_read_event(socket);
 
 	return (0);
-
- error:
-	if (detail_out != NULL)
-		*detail_out = detail;
-
-	return (error);
 }
 
 static void
@@ -603,8 +610,8 @@ khttpd_socket_nopush(struct khttpd_socket *socket, int nopush)
 	error = so_setsockopt(socket->fp->f_data, IPPROTO_TCP, TCP_NOPUSH,
 	    &nopush, sizeof(nopush));
 	if (error != 0)
-		log(LOG_ERR, "khttpd: setsockopt(TCP_NOPUSH) failed "
-		    "(error: %d)", error);
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "setsockopt(TCP_NOPUSH) failed");
 }
 
 static int
@@ -638,7 +645,8 @@ khttpd_socket_stream_receive(struct khttpd_stream *stream, ssize_t *resid,
 		break;
 
 	default:
-		log(LOG_WARNING, "khttpd: recv() failed (error: %d)", error);
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "recv() failed");
 	}
 
 	return (error);
@@ -665,8 +673,8 @@ khttpd_socket_stream_shutdown_receiver(struct khttpd_stream *stream)
 	so = socket->fp->f_data;
 	error = soshutdown(so, SHUT_RD);
 	if (error != 0 && error != ENOTCONN)
-		log(LOG_ERR, "khttpd: shutdown(SHUT_RD) failed (error: %d)",
-		    error);
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "shutdown(SHUT_RD) failed");
 }
 
 static boolean_t
@@ -751,15 +759,15 @@ khttpd_socket_send(struct khttpd_socket *socket)
 
 		error = sosend(so, NULL, NULL, head, NULL, 0, td);
 		if (error != 0 && error != EPIPE)
-			log(LOG_WARNING, "khttpd: send failed "
-			    "(error: %d)", error);
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "send() failed");
 	}
 
 	if (need_close) {
 		error = soshutdown(so, SHUT_WR);
 		if (error != 0 && error != ENOTCONN)
-			log(LOG_ERR, "khttpd: "
-			    "shutdown(SHUT_WR) failed (error: %d)", error);
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "shutdown(SHUT_WR) failed");
 	}
 
 	if (need_flush)
@@ -882,8 +890,8 @@ khttpd_socket_shutdown(void *arg)
 	so = socket->fp->f_data;
 	error = soshutdown(so, SHUT_RDWR);
 	if (error != 0 && error != ENOTCONN)
-		log(LOG_ERR, "khttpd: shutdown(SHUT_RDWR) failed (error: %d)",
-		    error);
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "shutdown(SHUT_RDWR) failed");
 }
 
 static void
