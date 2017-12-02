@@ -79,8 +79,7 @@ static struct khttpd_strtab_entry khttpd_methods[] = {
 	{ "VERSION-CONTROL" },
 };
 
-CTASSERT(sizeof(khttpd_methods) / sizeof(khttpd_methods[0]) ==
-    KHTTPD_METHOD_END);
+CTASSERT(nitems(khttpd_methods) == KHTTPD_METHOD_END);
 
 static struct khttpd_strtab_entry_slist
     khttpd_method_table[KHTTPD_STRTAB_POW2_CEIL(KHTTPD_METHOD_END)];
@@ -91,8 +90,7 @@ khttpd_method_find(const char *begin, const char *end)
 	struct khttpd_strtab_entry *entry;
 
 	entry = khttpd_strtab_find(khttpd_method_table,
-	    sizeof(khttpd_method_table) / sizeof(khttpd_method_table[0]),
-	    begin, end, FALSE);
+	    nitems(khttpd_method_table), begin, end, FALSE);
 
 	return (entry == NULL ? KHTTPD_METHOD_UNKNOWN :
 	    entry - khttpd_methods);
@@ -111,10 +109,8 @@ static int
 khttpd_method_init(void)
 {
 
-	khttpd_strtab_init(khttpd_method_table,
-	    sizeof(khttpd_method_table) / sizeof(khttpd_method_table[0]),
-	    khttpd_methods, sizeof(khttpd_methods) /
-	    sizeof(khttpd_methods[0]));
+	khttpd_strtab_init(khttpd_method_table, nitems(khttpd_method_table),
+	    khttpd_methods, nitems(khttpd_methods));
 
 	return (0);
 }

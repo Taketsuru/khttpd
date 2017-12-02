@@ -329,8 +329,8 @@ khttpd_job_register_events(void)
 	khttpd_job_queues = queues =
 	    khttpd_malloc(n * sizeof(struct khttpd_job_queue *));
 
-	khttpd_job_queue_zone = uma_zcreate("khttpd-jobq"
-	    , sizeof(struct khttpd_job_queue), NULL, NULL, NULL, NULL,
+	khttpd_job_queue_zone = uma_zcreate("khttpd-jobq",
+	    sizeof(struct khttpd_job_queue), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_CACHE, 0);
 
 	for (i = 0; i < n; ++i) {

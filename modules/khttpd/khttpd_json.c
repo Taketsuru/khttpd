@@ -158,7 +158,7 @@ khttpd_json_delete(struct khttpd_json *value)
 		return;
 
 	depth = 0;
-	stksiz = sizeof(initstack) / sizeof(initstack[0]);
+	stksiz = nitems(initstack);
 	stack = initstack;
 
 	ptr = value;

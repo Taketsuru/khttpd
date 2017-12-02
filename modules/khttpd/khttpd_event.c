@@ -158,7 +158,7 @@ khttpd_event_main(void *arg)
 
 	td = curthread;
 	queue->owner = td;
-	evasize = sizeof(events) / sizeof(events[0]);
+	evasize = nitems(events);
 	error = 0;
 
 	while (!khttpd_event_exiting) {

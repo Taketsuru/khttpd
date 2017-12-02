@@ -1,4 +1,5 @@
-- Utilize nitems macro defined in <sys/param.h>.
+- Add 'log' function to struct khttpd_stream_up_ops and make khttpd_port
+  use it to log errors.
 
 - Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
 
@@ -9,13 +10,17 @@
   name.  Also the meaning of 'get' and 'put' are easily misunderstood as
   opposit.
 
-- TLS
-
-- CGI etc.
+- CGI and FastCGI
 
 - Add support for basic authentication
 
 - make khttpd_test multi-module aware
+
+- Access control infrastructure
+
+- Last-Modified: and ETag:
+
+- TLS
 
 - Optimize file/cache serving performance
 

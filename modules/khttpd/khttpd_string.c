@@ -135,7 +135,7 @@ khttpd_parse_ip_addresss(uint32_t *out, const char *value)
 
 
 	result = 0;
-	for (i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+	for (i = 0; i < nitems(values); ++i) {
 		if (values[i] < 0 || 255 < values[i])
 			return (EINVAL);
 		result = (result << 8) | values[i];
@@ -157,7 +157,7 @@ khttpd_parse_ipv6_address(u_char *out, const char *value)
 	char ch, termch;
 
 	dbl_colon = -1;
-	n = sizeof(nums) / sizeof(nums[0]);
+	n = nitems(nums);
 	cp = value;
 	i = 0;
 	for (;;) {

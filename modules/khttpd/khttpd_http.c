@@ -205,7 +205,7 @@ static struct khttpd_strtab_entry khttpd_fields[] = {
 	{ "Host" },
 };
 
-CTASSERT(sizeof(khttpd_fields) / sizeof(khttpd_fields[0]) == KHTTPD_FIELD_END);
+CTASSERT(nitems(khttpd_fields) == KHTTPD_FIELD_END);
 
 /*
  * This value must be larger than the length of the longest name in
@@ -252,8 +252,7 @@ khttpd_field_find(const char *begin, const char *end)
 	struct khttpd_strtab_entry *entry;
 
 	entry = khttpd_strtab_find(khttpd_field_hash_table,
-		sizeof(khttpd_field_hash_table) /
-	    sizeof(khttpd_field_hash_table[0]), begin, end, TRUE);
+		nitems(khttpd_field_hash_table), begin, end, TRUE);
 
 	return (entry == NULL ? KHTTPD_FIELD_UNKNOWN :
 	    entry - khttpd_fields);
@@ -2263,8 +2262,7 @@ khttpd_http_check_field_name_size(void)
 	KHTTPD_ENTRY("%s()", __func__);
 
 	longest = 0;
-	for (i = 0; i < sizeof(khttpd_fields) / sizeof(khttpd_fields[0]);
-	     ++i) {
+	for (i = 0; i < nitems(khttpd_fields); ++i) {
 		len = strlen(khttpd_fields[i].name) + 1;
 		if (longest < len)
 			longest = len;
@@ -2285,12 +2283,12 @@ khttpd_http_local_init(void)
 	khttpd_http_client_zone = uma_zcreate("http",
 	    sizeof(struct khttpd_http_client),
 	    khttpd_http_client_ctor, khttpd_http_client_dtor,
-	    khttpd_http_client_init, khttpd_http_client_fini, UMA_ALIGN_PTR, 0);
+	    khttpd_http_client_init, khttpd_http_client_fini,
+	    UMA_ALIGN_PTR, 0);
 
 	khttpd_strtab_init(khttpd_field_hash_table,
-	    sizeof(khttpd_field_hash_table) /
-	    sizeof(khttpd_field_hash_table[0]), khttpd_fields,
-	    sizeof(khttpd_fields) / sizeof(khttpd_fields[0]));
+	    nitems(khttpd_field_hash_table), khttpd_fields,
+	    nitems(khttpd_fields));
 
 	khttpd_http_check_field_name_size();
 

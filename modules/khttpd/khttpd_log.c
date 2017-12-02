@@ -317,7 +317,7 @@ khttpd_log_handle_job(void *arg)
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
 	td = curthread;
-	niov = sizeof(iovs) / sizeof(iovs[0]);
+	niov = nitems(iovs);
 	subject = arg;
 
 	mtx_lock(&subject->lock);

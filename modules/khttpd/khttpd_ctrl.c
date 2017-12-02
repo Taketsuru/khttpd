@@ -178,16 +178,14 @@ static const char *khttpd_ctrl_protocol_table[] = {
 	"http", "https",
 };
 
-CTASSERT(sizeof(khttpd_ctrl_protocol_table) /
-    sizeof(khttpd_ctrl_protocol_table[0]) == KHTTPD_CTRL_PROTOCOL_END);
+CTASSERT(nitems(khttpd_ctrl_protocol_table) == KHTTPD_CTRL_PROTOCOL_END);
 
 static void (*khttpd_ctrl_accept_fns[])(void *) = {
 	khttpd_http_accept_http_client,
 	khttpd_http_accept_https_client,
 };
 
-CTASSERT(sizeof(khttpd_ctrl_accept_fns) / sizeof(khttpd_ctrl_accept_fns[0]) ==
-    KHTTPD_CTRL_PROTOCOL_END);
+CTASSERT(nitems(khttpd_ctrl_accept_fns) == KHTTPD_CTRL_PROTOCOL_END);
 
 static struct khttpd_location_ops khttpd_ctrl_asterisc_ops = {
 	.method[KHTTPD_METHOD_OPTIONS] = khttpd_ctrl_options_asterisc
@@ -750,7 +748,7 @@ khttpd_obj_type_load(struct khttpd_obj_type *type,
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 
 	prop_specs[0].link = input_prop_spec;
-	for (i = 1; i < sizeof(prop_specs) / sizeof(prop_specs[0]); ++i)
+	for (i = 1; i < nitems(prop_specs); ++i)
 		prop_specs[i].link = &prop_specs[i - 1];
 
 	n = khttpd_json_array_size(input);
@@ -1355,8 +1353,7 @@ khttpd_ctrl_protocol_for_name(const char *name)
 {
 	int i;
 
-	for (i = 0; i < sizeof(khttpd_ctrl_protocol_table) /
-		 sizeof(khttpd_ctrl_protocol_table[0]); ++i)
+	for (i = 0; i < nitems(khttpd_ctrl_protocol_table); ++i)
 		if (strcmp(name, khttpd_ctrl_protocol_table[i]) == 0)
 			return (i);
 	return (KHTTPD_CTRL_PROTOCOL_UNKNOWN);
@@ -2863,8 +2860,8 @@ khttpd_ctrl_ioctl_start(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 	cmdbuf.hdr.handler = khttpd_ctrl_start;
 	cmdbuf.data = m_get(M_WAITOK, MT_DATA);
-	buf = malloc(roundup2(args->size, sizeof(u_int)) +
-	    sizeof(u_int), M_TEMP, M_WAITOK);
+	buf = malloc(roundup2(args->size, sizeof(u_int)) + sizeof(u_int),
+	    M_TEMP, M_WAITOK);
 	cmdbuf.data->m_len = args->size;
 	MEXTADD(cmdbuf.data, buf, args->size, khttpd_ctrl_free_cmdbuf_data,
 	    buf, NULL, 0, EXT_EXTREF);
@@ -2974,8 +2971,7 @@ khttpd_ctrl_preregister_location_types(void)
 
 	KHTTPD_ENTRY("khttpd_ctrl_preregister_location_types()");
 
-	for (i = 0; i < sizeof(khttpd_location_types) / 
-		 sizeof(khttpd_location_types[0]); ++i)
+	for (i = 0; i < nitems(khttpd_location_types); ++i)
 		SLIST_INIT(&khttpd_location_types[i]);
 
 	return (0);
@@ -2989,8 +2985,7 @@ khttpd_ctrl_postderegister_location_types(void)
 
 	KHTTPD_ENTRY("khttpd_ctrl_postderegister_location_types()");
 
-	for (i = 0; i < sizeof(khttpd_location_types) / 
-		 sizeof(khttpd_location_types[0]); ++i)
+	for (i = 0; i < nitems(khttpd_location_types); ++i)
 		SLIST_FOREACH_SAFE(loctype, &khttpd_location_types[i],
 		    slink, tloctype) {
 			log(LOG_WARNING, "khttpd: location type \"%s\" is "

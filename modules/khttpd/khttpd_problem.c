@@ -231,9 +231,8 @@ static struct khttpd_problem_known_code khttpd_problem_known_codes[] = {
 	},
 };
 
-#define KHTTPD_PROBLEM_CODE_HASH_TABLE_SIZE				\
-	(KHTTPD_STRTAB_POW2_CEIL(sizeof(khttpd_problem_known_codes) /	\
-	    sizeof(khttpd_problem_known_codes[0])))
+#define KHTTPD_PROBLEM_CODE_HASH_TABLE_SIZE \
+	(KHTTPD_STRTAB_POW2_CEIL(nitems(khttpd_problem_known_codes)))
 
 static struct khttpd_problem_known_code_slist 
     khttpd_problem_code_table[KHTTPD_PROBLEM_CODE_HASH_TABLE_SIZE];
@@ -261,8 +260,7 @@ khttpd_problem_init(void *arg)
 	struct khttpd_problem_known_code *ptr;
 	int i;
 
-	for (i = 0; i < sizeof(khttpd_problem_known_codes) /
-		 sizeof(khttpd_problem_known_codes[0]); ++i) {
+	for (i = 0; i < nitems(khttpd_problem_known_codes); ++i) {
 		ptr = &khttpd_problem_known_codes[i];
 		head = khttpd_problem_known_code_slist_head(ptr->status);
 		SLIST_INSERT_HEAD(head, ptr, link);
