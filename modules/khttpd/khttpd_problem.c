@@ -299,18 +299,13 @@ khttpd_problem_property_specifier_to_string(struct sbuf *output,
 	ptr = prev;
 	prev = NULL;
 	while (ptr != NULL) {
-		if (prev != NULL) {
-			if (ptr->name[0] != '[')
-				sbuf_putc(output, '.');
-			prev->link = ptr;
-		}
+		next = ptr->link;
+		ptr->link = prev;
+		if (prev != NULL && ptr->name[0] != '[')
+			sbuf_putc(output, '.');
 		sbuf_cat(output, ptr->name);
-
-		prev = ptr;
-		ptr = ptr->link;
+		ptr = next;
 	}
-	if (prev != NULL)
-		prev->link = NULL;
 }
 
 #ifdef KHTTPD_KTR_LOGGING
