@@ -900,6 +900,7 @@ khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 static void
 khttpd_socket_shutdown(void *arg)
 {
+	struct linger linger;
 	struct socket *so;
 	struct khttpd_socket *socket;
 	int error;
@@ -908,7 +909,16 @@ khttpd_socket_shutdown(void *arg)
 
 	socket = arg;
 	so = socket->fp->f_data;
-	error = soshutdown(so, SHUT_RDWR);
+
+	linger.l_onoff = 1;
+	linger.l_linger = 0;
+	error = so_setsockopt(socket->fp->f_data, SOL_SOCKET, SO_LINGER,
+	    &linger, sizeof(linger));
+	if (error != 0)
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "setsockopt(SOL_SOCKET, SO_LINGER) failed");
+
+	error = soshutdown(so, SHUT_RD);
 	if (error != 0 && error != ENOTCONN)
 		khttpd_socket_error(socket, LOG_WARNING, error,
 		    "shutdown(SHUT_RDWR) failed");
