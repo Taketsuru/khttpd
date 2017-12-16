@@ -47,3 +47,5 @@ int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
 int khttpd_parse_ipv6_address(u_char *out, const char *value);
 void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
 boolean_t khttpd_is_json_media_type(const char *input);
+int khttpd_decode_hexdigit(char);
+int khttpd_unescape_uri(struct sbuf *, const char *);

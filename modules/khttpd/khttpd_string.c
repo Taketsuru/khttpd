@@ -303,3 +303,46 @@ khttpd_is_json_media_type(const char *input)
 	cp = khttpd_rtrim_ws(begin, cp);
 	return (strncmp(begin, "application/json", cp - begin) == 0);
 }
+
+int
+khttpd_decode_hexdigit(char ch)
+{
+	if ('0' <= ch && ch <= '9')
+		return (ch - '0');
+
+	if ('A' <= ch && ch <= 'F')
+		return (ch - 'A' + 10);
+
+	if ('a' <= ch && ch <= 'f')
+		return (ch - 'a' + 10);
+
+	return (-1);
+}
+
+int
+khttpd_unescape_uri(struct sbuf *out, const char *in)
+{
+	const char *src, *pp;
+	int code, digit;
+
+	src = in;
+	while ((pp = strchr(src, '%')) != NULL) {
+		sbuf_bcat(out, src, pp - src);
+
+		digit = khttpd_decode_hexdigit(pp[1]);
+		if (digit == -1)
+			return (EINVAL);
+		code = digit << 4;
+
+		digit = khttpd_decode_hexdigit(pp[2]);
+		if (digit == -1)
+			return (EINVAL);
+		code = digit | (code << 4);
+
+		sbuf_putc(out, code);
+		src = pp + 3;
+	}
+	sbuf_cat(out, src);
+
+	return (0);
+}

@@ -143,19 +143,26 @@ MTX_SYSINIT(khttpd_file_lock, &khttpd_file_lock, "file", MTX_DEF);
  * Note:
  *   This function removes leading '/'s.
  */
-static boolean_t
-khttpd_file_normalize_path(char *out, const char *in)
+static int
+khttpd_file_normalize_path(char *buf, const char *path)
 {
 	struct sbuf sbuf;
 	const char *src, *segend;
-	char *dst, *dstend;
+	char *dst;
+	int error;
 	char ch;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, out, in);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, buf, path);
 
-	dst = out;
-	dstend = out + PATH_MAX;
-	src = in;
+	sbuf_new(&sbuf, buf, PATH_MAX, SBUF_FIXEDLEN);
+	error = khttpd_unescape_uri(&sbuf, path);
+	if (error == 0)
+		error = sbuf_finish(&sbuf);
+	sbuf_delete(&sbuf);
+	if (error != 0)
+		return (error);
+
+	src = dst = buf;
 	for (;; src = segend) {
 		while ((ch = *src) == '/')
 			++src;
@@ -171,27 +178,28 @@ khttpd_file_normalize_path(char *out, const char *in)
 				continue;
 
 			if (src + 2 == segend && src[1] == '.') {
-				if (dst == out)
-					return (FALSE);
-				while (out < --dst && dst[-1] != '/')
+				if (dst == buf)
+					return (EINVAL);
+				while (buf < --dst && dst[-1] != '/')
 					; /* nothing */
 				continue;
 			}
 		}
 
-		if (dstend - dst < segend - src + 1)
-			return (FALSE);
-
-		bcopy(src, dst, segend - src + 1);
+		if (src != dst)
+			bcopy(src, dst, segend - src + 1);
 		dst += segend - src + 1;
 	}
 
-	if (dst == out)
-		*dst++ = '.';
-	else if (dst[-1] == '/')
+	if (dst == buf) {
+		buf[0] = '.';
+		buf[1] = '\0';
+	} else if (dst[-1] == '/')
 		dst[-1] = '\0';
+	else
+		*dst = '\0';
 
-	return (TRUE);
+	return (0);
 }
 
 static int
@@ -662,7 +670,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	struct khttpd_location *location;
 	struct khttpd_stream *stream;
 	struct thread *td;
-	const char *suffix;
 	size_t space;
 	int error, status;
 	boolean_t mime_type_specified, charset_specified;
@@ -677,10 +684,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	location_data = khttpd_location_data(location);
 	mtx_unlock(&khttpd_file_lock);
 
-	/* 
-	 * This MAX() is necessary because normalizing an empty path can result
-	 * in "."
-	 */
 	data = uma_zalloc(khttpd_file_get_exchange_data_zone, M_WAITOK);
 	bzero(&data->khttpd_file_get_exchange_data_zctor_begin,
 	    offsetof(struct khttpd_file_get_exchange_data,
@@ -691,8 +694,9 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
 
-	if (!khttpd_file_normalize_path(&data->path,
-		khttpd_exchange_suffix(exchange)))
+	error = khttpd_file_normalize_path(data->path, 
+	    khttpd_exchange_suffix(exchange));
+	if (error != 0)
 		goto not_found;
 
 	error = khttpd_file_open_for_read(location_data->docroot_fd, data);

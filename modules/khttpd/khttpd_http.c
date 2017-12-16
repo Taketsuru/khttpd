@@ -736,21 +736,18 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
     struct khttpd_mbuf_pos *pos)
 {
 	ssize_t query_off;
-	int code, error, i, n;
-	char ch, hex[2];
+	int code, error, digit;
+	char ch;
 
 	error = 0;
 	query_off = -1;
-	for (;;) {
-		ch = khttpd_mbuf_getc(pos);
+	while ((ch = khttpd_mbuf_getc(pos)) != ' ') {
 		switch (ch) {
 
 		case '\n':
+			sbuf_finish(&exchange->target);
 			exchange->query = NULL;
 			return (TRUE);
-
-		case ' ':
-			goto end;
 
 		case '?':
 			sbuf_putc(&exchange->target, '\0');
@@ -758,35 +755,27 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 			continue;
 
 		case '%':
-			code = 0;
-			n = 0;
-			for (i = 0; i < 2; ++i) {
-				code <<= 4;
-				hex[i] = ch = khttpd_mbuf_getc(pos);
-				if ('0' <= ch && ch <= '9')
-					code |= ch - '0';
+			digit = khttpd_decode_hexdigit(khttpd_mbuf_getc(pos));
+			if (digit == -1)
+				return (TRUE);
+			code = digit << 4;
 
-				else if ('A' <= ch && ch <= 'F')
-					code |= ch - 'A' + 10;
+			digit = khttpd_decode_hexdigit(khttpd_mbuf_getc(pos));
+			if (digit == -1)
+				return (TRUE);
+			code = digit | (code << 4);
 
-				else if ('a' <= ch && ch <= 'f')
-					code |= ch - 'a' + 10;
-
-				else
-					return (TRUE);
-			}
-
-			switch (code) {
-			case 0: case '/':
-				sbuf_putc(&exchange->target, '%');
-				for (i = 0; i < 2; ++i)
-					sbuf_putc(&exchange->target, hex[i]);
-				break;
-
-			default:
+			if (isalpha(code) || isdigit(code) || code == '-' ||
+			    code == '.' || code == '_' || code == '~')
 				sbuf_putc(&exchange->target, code);
-			}
+			else
+				sbuf_printf(&exchange->target, "%02X", code);
 			continue;
+
+		default:
+			if (!isalpha(ch) && !isdigit(ch))
+				return (TRUE);
+			/* FALLTHROUGH */
 
 		case ':': case '@': case '/':
 		case '!': case '$': case '&': case '\'':
@@ -794,21 +783,16 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 		case ',': case ';': case '=':
 		case '-': case '.': case '_': case '~':
 			sbuf_putc(&exchange->target, ch);
-			break;
-
-		default:
-			if (!isalpha(ch) && !isdigit(ch))
-				return (TRUE);
-			sbuf_putc(&exchange->target, ch);
 		}
 	}
 
-end:
-	error = sbuf_finish(&exchange->target);
+	if (sbuf_finish(&exchange->target) != 0) {
+		exchange->query = NULL;
+		return (TRUE);
+	}
 
-	if (error == 0)
-		exchange->query = query_off < 0 ? NULL :
-		    sbuf_data(&exchange->target) + query_off;
+	exchange->query = query_off < 0 ? NULL :
+	    sbuf_data(&exchange->target) + query_off;
 
 	return (FALSE);
 }
