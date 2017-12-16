@@ -1,47 +1,40 @@
-- Add 'log' function to struct khttpd_stream_up_ops and make khttpd_port
-  use it to log errors.
+- FastCGI
 
-- CGI and FastCGI
+- Last-Modified: and ETag:
 
 - Add support for basic authentication
 
-- Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
-
-- Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
-
-- struct khttpd_exchange_ops::{get,put,end} should be renamed.  'end' is not
-  the end of the exchange, but the request.  This is difficult to know from the
-  name.  Also the meaning of 'get' and 'put' are easily misunderstood as
-  opposit.
-
-- make khttpd_test multi-module aware
-
 - Access control infrastructure
-
-- Last-Modified: and ETag:
 
 - TLS
 
 - Optimize file/cache serving performance
+
+- Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
+
+- Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
+
+- struct khttpd_exchange_ops::end should be renamed.  'end' is not the end of
+  the exchange, but the request.  This is difficult to know from the name.
 
 - Currently, khttpd_file_get_exchange_get() limits io_size to MAXPHYS.
   See whether this is necessary or not.
 
 - Optimize the setting of SO_SNDLOWAT value.
 
-- the kernel should restrict the time waiting the client to close the
-  connection after it sends a response with 'Connection: close' (nginx's
-  lingering_timeout feature).
-
-- Set SO_LINGER option with timeout = 0 when the server aborts a connection.
-
 - More scalable object lifecycle management than reference counting.
 
 - See whether running jobs of khttpd_file on the same CPU as the caller of
   khttpd_file_get performs better than random CPU assignment.
 
+- the kernel should restrict the time waiting the client to close the
+  connection after it sends a response with 'Connection: close' (nginx's
+  lingering_timeout feature).
+
 - configuration dump/restore API
 
 - Server configuration UI
+
+- make khttpd_test multi-module aware
 
 - Atomic server reconfiguration.
