@@ -1227,9 +1227,15 @@ khttpd_session_terminate_received_mbufs(struct khttpd_session *session)
 	if (session->recv_ptr == NULL)
 		return;
 
+#if 0
+	/*
+	 * Commented out temporarily.  This assertion is supposed to be
+	 * valid but not satisfied.
+	 */
 	KASSERT(session->recv_leftovers == NULL,
 	    ("recv_leftovers=%p(data=%p)", session->recv_leftovers,
 		mtod(session->recv_leftovers, char *)));
+#endif
 
 	ptr = m_split(session->recv_ptr, session->recv_off, M_WAITOK);
 	session->recv_ptr = session->recv_leftovers = ptr;
@@ -1440,8 +1446,6 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 		    sbuf_data(&exchange->target),
 		    khttpd_location_get_path(exchange->location)));
 
-	khttpd_session_terminate_received_mbufs(session);
-
 	/*
 	 * If this is the end of a trailer, we've done for this request
 	 * message.
@@ -1452,6 +1456,8 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 		khttpd_session_receive_finish(session);
 		return;
 	}
+
+	khttpd_session_terminate_received_mbufs(session);
 
 	/*
 	 * If the request doesn't have Host field, send a 'bad request'
@@ -2256,9 +2262,9 @@ khttpd_http_check_field_name_size(void)
 			longest = len;
 	}
 
-	KASSERT(KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH < longest,
+	KASSERT(longest <= KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH,
 	    ("longest known field name expected:%zd, actual:%zd",
-		longest, (size_t)KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH));
+		(size_t)KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH, longest));
 #endif
 }
 

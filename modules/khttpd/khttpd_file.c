@@ -528,7 +528,7 @@ khttpd_file_read_file(void *arg)
 		    NULL, i + count == npages ? &rahead : NULL,
 		    &khttpd_file_read_file_done, data);
 		KASSERT(rv == VM_PAGER_OK,
-		    ("vm_pager_get_pages_async(%p,pages + %d,%d,,,,) => %d"
+		    ("vm_pager_get_pages_async(%p,pages + %d,%d,,,,) => %d",
 			object, i, count, rv));
 
 		i += count;
@@ -610,7 +610,6 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 	pageoff = data->io_offset & PAGE_MASK;
 	io_size = data->io_size;
 
-
 	hd = lmb = NULL;
 	for (i = 0; i < n; ++i) {
 retry:
@@ -641,11 +640,11 @@ retry:
 	}
 	*data_out = hd;
 
-	KASSERT(0 < space, ("space is %#x, is not greater than 0", space));
+	KASSERT(0 < space, ("space is %#zx, is not greater than 0", space));
 
-	KASSERT(m_length(mbufs[0], NULL) == data->io_size,
+	KASSERT(m_length(hd, NULL) == data->io_size,
 	    ("m_length(mbufs[0], NULL)=%#x, data->io_size=%#zx",
-		m_length(mbufs[0], NULL), data->io_size));
+		m_length(hd, NULL), data->io_size));
 
 	len = data->io_size;
 	data->xmit_residual -= len;

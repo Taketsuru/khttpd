@@ -348,10 +348,11 @@ khttpd_vhost_compare_ports(const void *x, const void *y)
 	return (x == y ? 0 : x < y ? -1 : 1);
 }
 
-boolean_t
+static boolean_t
 khttpd_vhost_is_valid_port_list(struct khttpd_port **port_list, int len)
 {
 	struct khttpd_port **buf;
+	int i;
 
 	buf = khttpd_malloc(len * sizeof(struct khttpd_port *));
 	bcopy(port_list, buf, len * sizeof(struct khttpd_port *));
@@ -426,10 +427,11 @@ khttpd_vhost_compare_servers(const void *x, const void *y)
 	return (x == y ? 0 : x < y ? -1 : 1);
 }
 
-boolean_t
+static boolean_t
 khttpd_vhost_is_valid_server_list(struct khttpd_server **server_list, int len)
 {
 	struct khttpd_server **buf;
+	int i;
 
 	buf = khttpd_malloc(len * sizeof(struct khttpd_server *));
 	bcopy(server_list, buf, len * sizeof(struct khttpd_server *));

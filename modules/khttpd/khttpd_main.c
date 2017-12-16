@@ -430,8 +430,6 @@ khttpd_loader(struct module *m, int what, void *arg)
 			destroy_dev(khttpd_main_dev);
 
 		khttpd_init_unload(m);
-		KASSERT(SLIST_EMPTY(&khttpd_main_ioctls),
-		    ("incomplete ioctl deregistration"));
 
 		EVENTHANDLER_DEREGISTER(khttpd_init_shutdown, 
 		    khttpd_main_shutdown_tag);

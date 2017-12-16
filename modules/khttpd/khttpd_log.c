@@ -221,7 +221,7 @@ khttpd_log_timeout(void *arg)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 	log = arg;
-	mtx_assert(&log->lock, MA_LOCKED);
+	mtx_assert(&log->lock, MA_OWNED);
 
 	need_scheduling = !log->busy && 0 < mbufq_len(&log->queue);
 	if (need_scheduling)

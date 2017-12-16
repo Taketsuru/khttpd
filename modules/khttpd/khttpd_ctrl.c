@@ -1449,7 +1449,8 @@ khttpd_location_type_register(const char *name,
 	struct khttpd_location_type *ptr;
 	struct khttpd_location_type_slist *head;
 
-	KASSERT(khttpd_init_get_phase() == KHTTPD_INIT_PHASE_RUN,
+	KASSERT(khttpd_init_get_phase() ==
+	    KHTTPD_INIT_PHASE_REGISTER_LOCATION_TYPES,
 	    ("khttpd_init_get_phase()=%d", khttpd_init_get_phase()));
 
 	if (create == NULL) {
@@ -1491,7 +1492,8 @@ khttpd_location_type_deregister(const char *name)
 	struct khttpd_location_type *ptr, *next;
 	struct khttpd_location_type_slist *head;
 
-	KASSERT(khttpd_init_get_phase() == KHTTPD_INIT_PHASE_RUN,
+	KASSERT(khttpd_init_get_phase() ==
+	    KHTTPD_INIT_PHASE_REGISTER_LOCATION_TYPES,
 	    ("khttpd_init_get_phase()=%d", khttpd_init_get_phase()));
 
 	sx_xlock(&khttpd_ctrl_lock);
@@ -2889,9 +2891,6 @@ khttpd_ctrl_register_ioctl(const void *arg)
 	khttpd_main_register_ioctl(KHTTPD_IOC_START, khttpd_ctrl_ioctl_start);
 }
 
-SYSINIT(khttpd, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_ctrl_register_ioctl,
-    NULL);
-
 static void
 khttpd_ctrl_deregister_ioctl(const void *arg)
 {
@@ -2900,6 +2899,8 @@ khttpd_ctrl_deregister_ioctl(const void *arg)
 	khttpd_main_deregister_ioctl(KHTTPD_IOC_START);
 }
 
+SYSINIT(khttpd, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_ctrl_register_ioctl,
+    NULL);
 SYSUNINIT(khttpd, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_ctrl_deregister_ioctl,
     NULL);
 

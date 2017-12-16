@@ -146,7 +146,7 @@ khttpd_location_unlink(struct khttpd_location *loc)
 	rw_wlock(&server->lock);
 
 	parent = loc->parent;
-	KASSERT(parent != NULL, ("location %p, parent %p", location, parent));
+	KASSERT(parent != NULL, ("location %p, parent %p", loc, parent));
 
 	RB_REMOVE(khttpd_location_tree, &parent->children_tree, loc);
 
@@ -261,7 +261,8 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	 * This function doesn't accept NULL ops.  NULL ops means it is a root
 	 * location.
 	 */
-	KASSERT(ops != NULL, ("ops for location \"%s\" is NULL", ops));
+	KASSERT(ops != NULL, ("ops for location \"%s\" is NULL",
+		khttpd_ktr_printf("\"%s\"", path)));
 
 	/* 
 	 * The path must be '*' or start with '/'.  The trailing '/' can be
@@ -708,25 +709,6 @@ khttpd_server_deregister_costructs(void)
 KHTTPD_INIT(khttpd_server, khttpd_server_register_costructs,
     khttpd_server_deregister_costructs,
     KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS - 1);
-
-#ifdef INVARIANTS
-
-static void
-khttpd_server_exit(void)
-{
-	unsigned n;
-
-	KHTTPD_ENTRY("khttpd_server_exit()");
-
-	n = khttpd_costruct_instance_count(&khttpd_server_costruct_info);
-	KASSERT(n == 0, ("server instance count=%d", n));
-	n = khttpd_costruct_instance_count(&khttpd_location_costruct_info);
-	KASSERT(n == 0, ("location instance count=%d", n));
-}
-
-KHTTPD_INIT(khttpd_server, NULL, khttpd_server_exit, KHTTPD_INIT_PHASE_RUN);
-
-#endif
 
 /*
  * If 'server' is NULL, this function doesn't check whether the location's

@@ -97,7 +97,7 @@ khttpd_ktr_newbuf(int *bufsize)
 {
 	int i, ni;
 
-	mtx_assert(&khttpd_ktr_mtx, MA_LOCKED);
+	mtx_assert(&khttpd_ktr_mtx, MA_OWNED);
 
 	if (bufsize != NULL)
 		*bufsize = KHTTPD_KTR_STRING_SIZE;
@@ -116,7 +116,7 @@ khttpd_ktr_vprintf(const char *fmt, __va_list ap)
 {
 	char *buf;
 
-	mtx_assert(&khttpd_ktr_mtx, MA_LOCKED);
+	mtx_assert(&khttpd_ktr_mtx, MA_OWNED);
 
 	buf = khttpd_ktr_newbuf(NULL);
 	if (buf == NULL)

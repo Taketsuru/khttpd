@@ -54,7 +54,7 @@ inline void *
 khttpd_costruct_get(void *host, khttpd_costruct_key_t key)
 {
 
-	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT < khttpd_init_get_phase(),
+	KASSERT(KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS < khttpd_init_get_phase(),
 	    ("%s is called in init phase %d",
 		__func__, khttpd_init_get_phase()));
 
@@ -65,7 +65,7 @@ inline void *
 khttpd_costruct_host_of(void *costruct, khttpd_costruct_key_t key)
 {
 
-	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT < khttpd_init_get_phase(),
+	KASSERT(KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS < khttpd_init_get_phase(),
 	    ("%s is called in init phase %d",
 		__func__, khttpd_init_get_phase()));
 

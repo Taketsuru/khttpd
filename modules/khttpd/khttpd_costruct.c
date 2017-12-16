@@ -71,7 +71,7 @@ khttpd_costruct_info_new(struct khttpd_costruct_info **info_out,
 	struct khttpd_costruct_info *info;
 
 	KHTTPD_ENTRY("%s(,%#zx)", __func__, host_size);
-	KASSERT(khttpd_init_get_phase() < KHTTPD_INIT_PHASE_DEFINE_COSTRUCT,
+	KASSERT(khttpd_init_get_phase() < KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS,
 	    ("%s is called in phase %d", __func__, khttpd_init_get_phase()));
 
 	info = khttpd_malloc(sizeof(*info));
@@ -107,7 +107,7 @@ khttpd_costruct_register(struct khttpd_costruct_info *info,
 
 	KHTTPD_ENTRY("%s(%p,%#zx,%p,%p,%p)", __func__, info, costruct_size,
 	    ctor, dtor, arg);
-	KASSERT(khttpd_init_get_phase() == KHTTPD_INIT_PHASE_DEFINE_COSTRUCT,
+	KASSERT(khttpd_init_get_phase() == KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS,
 	    ("%s is called in phase %d", __func__, khttpd_init_get_phase()));
 
 	if (ctor == NULL)
@@ -147,7 +147,7 @@ khttpd_costruct_call_ctors(struct khttpd_costruct_info *info, void *host)
 	int error;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, info, host);
-	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT <
+	KASSERT(KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS <
 	    khttpd_init_get_phase(), ("%s is called in init phase %d",
 		__func__, khttpd_init_get_phase()));
 
@@ -180,7 +180,7 @@ size_t
 khttpd_costruct_instance_size(struct khttpd_costruct_info *info)
 {
 
-	KASSERT(KHTTPD_INIT_PHASE_DEFINE_COSTRUCT < khttpd_init_get_phase(),
+	KASSERT(KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS < khttpd_init_get_phase(),
 	    ("%s is called in init phase %d",
 		__func__, khttpd_init_get_phase()));
 

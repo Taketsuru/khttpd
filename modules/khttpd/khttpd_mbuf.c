@@ -284,8 +284,9 @@ void khttpd_mbuf_get_line_and_column(struct khttpd_mbuf_pos *origin,
 		if (0 < eoff) {
 			--eoff;
 		} else {
-			KASSERT(eptr != origin->ptr, 
-			    ("ptr=eptr=%p, eoff=0", ptr));
+			KASSERT(eptr != origin->ptr,
+			    ("origin->ptr=%p, eptr=%p, eoff=0",
+				origin->ptr, eptr));
 
 			eptr = NULL;
 			eoff = 0;

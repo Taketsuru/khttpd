@@ -426,7 +426,9 @@ khttpd_event_trigger(struct khttpd_event *event)
 	    event == NULL ? "<null>" : khttpd_ktr_printf("%s", event->tmsg));
 	KASSERT(event->kevent.filter == EVFILT_USER,
 	    ("event %p, ident %d", event, event->kevent.filter));
-	KASSERT(queue->owner == curthread || &event->owner == 0, ("busy"));
+	KASSERT(event->queue->owner == curthread ||
+	    event->queue->owner == NULL,
+	    ("event->queue->owner=%p", event->queue->owner));
 
 	event->kevent.flags = EV_ENABLE;
 	event->kevent.fflags = NOTE_TRIGGER;

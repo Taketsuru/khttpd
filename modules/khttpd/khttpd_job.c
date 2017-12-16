@@ -151,7 +151,7 @@ khttpd_job_kick_and_unlock(struct khttpd_job_queue *queue, int flags)
 
 	mtx_assert(&queue->lock, MA_OWNED);
 	KASSERT(0 < queue->worker_count_max,
-	    ("queue(%d)->worker_count_max <= 0", queue->id,
+	    ("queue(%d)->worker_count_max=%d", queue->id,
 		queue->worker_count_max));
 
 	if ((worker = TAILQ_FIRST(&queue->idle_workers)) != NULL)
