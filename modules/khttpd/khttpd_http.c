@@ -705,8 +705,8 @@ void
 khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
     int status, struct khttpd_mbuf_json *response)
 {
-	struct khttpd_location *location;
 	struct khttpd_mbuf_json new_resp;
+	struct khttpd_location *location;
 	khttpd_location_set_error_response_fn_t fn;
 
 	KHTTPD_ENTRY("%s(%p,%d,%p)", __func__, exchange, status, response);
@@ -719,14 +719,10 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 
 	khttpd_mbuf_json_object_end(response);
 
-	for (location = khttpd_exchange_location(exchange);
-	     location != NULL;
-	     location = khttpd_location_get_parent(location)) {
-		fn = khttpd_location_get_ops(location)->set_error_response;
-		if (fn != NULL && fn(exchange, status, response))
-			break;
-	}
-	if (location == NULL)
+	location = khttpd_exchange_location(exchange);
+	fn = location == NULL ? NULL :
+	    khttpd_location_get_ops(location)->set_error_response;
+	if (fn == NULL || !fn(exchange, status, response))
 		khttpd_exchange_set_response_body_problem_json(exchange,
 		    status, response);
 }
@@ -1437,13 +1433,14 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 	struct khttpd_location_ops *ops;
 	struct khttpd_exchange *exchange;
 	struct mbuf *m;
-	int method, status;
+	int i, method, status;
 
 	exchange = &session->exchange;
 
 	KHTTPD_ENTRY("%s(%p), %s", __func__, session,
 		khttpd_ktr_printf("target %s, location %s",
 		    sbuf_data(&exchange->target),
+		    exchange->location == NULL ? "null" :
 		    khttpd_location_get_path(exchange->location)));
 
 	/*
@@ -1460,14 +1457,31 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 	khttpd_session_terminate_received_mbufs(session);
 
 	/*
-	 * If the request doesn't have Host field, send a 'bad request'
-	 * response.
-	 *
-	 * The handler of Host: field sets exchange->location.  It's always
-	 * non-null because khttpd_server_find_location never returns null.
+	 * If the request doesn't have Host field or no matching location,
+	 * send a 'bad request' response.
 	 */
 
 	if (exchange->location == NULL) {
+		if (exchange->method == KHTTPD_METHOD_OPTIONS &&
+		    strcmp(sbuf_data(&exchange->target), "*") == 0) {
+
+			sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
+			sbuf_cpy(&sbuf, "OPTIONS");
+			for (i = 0; i < KHTTPD_METHOD_END; ++i)
+				if (i != KHTTPD_METHOD_OPTIONS)
+					sbuf_printf(&sbuf, ", %s",
+					    khttpd_method_name(i));
+			sbuf_finish(&sbuf);
+			khttpd_exchange_set_response_content_length(exchange,
+			    0);
+			khttpd_exchange_add_response_field(exchange, "Allow",
+			    "%s", sbuf_data(&sbuf));
+			khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
+			sbuf_delete(&sbuf);
+
+			goto quit;
+		}
+
 		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
 		khttpd_exchange_reject(exchange);
 		return;

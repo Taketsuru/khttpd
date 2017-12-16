@@ -155,7 +155,6 @@ struct khttpd_main_start_command {
 	struct mbuf	*data;
 };
 
-static void khttpd_ctrl_options_asterisc(struct khttpd_exchange *);
 static void khttpd_ctrl_get(struct khttpd_exchange *);
 static void khttpd_ctrl_put(struct khttpd_exchange *);
 static void khttpd_ctrl_options(struct khttpd_exchange *);
@@ -186,10 +185,6 @@ static void (*khttpd_ctrl_accept_fns[])(void *) = {
 };
 
 CTASSERT(nitems(khttpd_ctrl_accept_fns) == KHTTPD_CTRL_PROTOCOL_END);
-
-static struct khttpd_location_ops khttpd_ctrl_asterisc_ops = {
-	.method[KHTTPD_METHOD_OPTIONS] = khttpd_ctrl_options_asterisc
-};
 
 static struct khttpd_location_ops khttpd_ctrl_ops = {
 	.set_error_response = khttpd_exchange_set_response_body_problem_json,
@@ -225,28 +220,6 @@ struct khttpd_obj_type khttpd_ctrl_servers;
 struct khttpd_obj_type khttpd_ctrl_locations;
 
 SX_SYSINIT(khttpd_ctrl_lock, &khttpd_ctrl_lock, "ctrl");
-
-static void
-khttpd_ctrl_options_asterisc(struct khttpd_exchange *exchange)
-{
-	char buf[128];
-	struct sbuf sbuf;
-	int i;
-
-	KHTTPD_ENTRY("khttpd_ctrl_options_asterisc(%p)", exchange);
-
-	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	sbuf_cpy(&sbuf, "OPTIONS");
-	for (i = 0; i < KHTTPD_METHOD_END; ++i)
-		if (i != KHTTPD_METHOD_OPTIONS)
-			sbuf_printf(&sbuf, ", %s", khttpd_method_name(i));
-	sbuf_finish(&sbuf);
-	khttpd_exchange_set_response_content_length(exchange, 0);
-	khttpd_exchange_add_response_field(exchange, "Allow", "%s",
-	    sbuf_data(&sbuf));
-	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
-	sbuf_delete(&sbuf);
-}
 
 int
 khttpd_ctrl_parse_json(struct khttpd_json **value_out,
@@ -487,7 +460,7 @@ khttpd_obj_type_show_obj(struct khttpd_obj_type *type, void *object,
 	struct khttpd_ctrl_leaf *leaf;
 
 	KHTTPD_ENTRY("khttpd_obj_type_show_obj(%p,%p,%016lx%016lx)", type,
-	    object, ((u_long *)uuid)[0], ((u_long *)uuid)[1]);
+	    object, ((const u_long *)uuid)[0], ((const u_long *)uuid)[1]);
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
 	leaf = khttpd_obj_type_get_leaf(type, object);
@@ -2139,11 +2112,9 @@ static int
 khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	char uuid[KHTTPD_UUID_SIZE];
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_server *server;
 	struct khttpd_json *has_config_j;
-	struct khttpd_location *location;
 	int error, status;
 	boolean_t has_config;
 
@@ -2188,15 +2159,6 @@ khttpd_ctrl_server_create(void *object_out, struct khttpd_mbuf_json *output,
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		khttpd_server_release(server);
 		return (status);
-	}
-
-	if (!has_config) {
-		khttpd_uuid_new(uuid);
-		location = khttpd_location_new(&error, server, "*",
-		    &khttpd_ctrl_asterisc_ops, NULL);
-		khttpd_obj_type_show_obj(&khttpd_ctrl_locations, location,
-		    uuid);
-		khttpd_location_release(location);
 	}
 
 	*(void **)object_out = server;
@@ -2655,26 +2617,15 @@ static int
 khttpd_ctrl_clear(void)
 {
 	char uuid[KHTTPD_UUID_SIZE];
-	struct khttpd_location *location;
-	int error;
 
 	KHTTPD_ENTRY("khttpd_ctrl_clear()");
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
-	location = khttpd_location_new(&error, khttpd_ctrl_server, "*",
-	    &khttpd_ctrl_asterisc_ops, NULL);
-	if (location == NULL)
-		return (error);
-
 	khttpd_obj_type_clear(&khttpd_ctrl_rewriters);
 	khttpd_obj_type_clear(&khttpd_ctrl_locations);
 	khttpd_obj_type_clear(&khttpd_ctrl_servers);
 	khttpd_obj_type_clear(&khttpd_ctrl_ports);
-
-	khttpd_uuid_new(uuid);
-	khttpd_obj_type_show_obj(&khttpd_ctrl_locations, location, uuid);
-	khttpd_location_release(location);
 
 	khttpd_uuid_new(uuid);
 	khttpd_obj_type_show_obj(&khttpd_ctrl_servers,

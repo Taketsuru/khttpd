@@ -48,11 +48,13 @@ struct sbuf;
 typedef void (*khttpd_method_fn_t)(struct khttpd_exchange *);
 typedef void (*khttpd_location_fn_t)(struct khttpd_location *);
 typedef boolean_t (*khttpd_location_set_error_response_fn_t)
-    (struct khttpd_exchange *, int status, struct khttpd_mbuf_json *response);
+    (struct khttpd_exchange *, int, struct khttpd_mbuf_json *);
+typedef boolean_t (*khttpd_filter_fn_t)(struct khttpd_location *, const char *);
 
 struct khttpd_location_ops {
 	khttpd_location_fn_t dtor;
 	khttpd_location_set_error_response_fn_t set_error_response;
+	khttpd_filter_fn_t filter;
 	khttpd_method_fn_t method[KHTTPD_METHOD_END];
 	khttpd_method_fn_t catch_all;
 };
@@ -72,7 +74,6 @@ void *khttpd_location_set_data(struct khttpd_location *location, void *data);
 const char *khttpd_location_get_path(struct khttpd_location *location);
 struct khttpd_server * khttpd_location_get_server
     (struct khttpd_location *);
-struct khttpd_location *khttpd_location_get_parent(struct khttpd_location *);
 void khttpd_location_get_options(struct khttpd_location *,
     struct sbuf *output);
 
@@ -87,8 +88,6 @@ struct khttpd_location *khttpd_server_first_location
 struct khttpd_location *khttpd_server_next_location
     (struct khttpd_server *server, struct khttpd_location *);
 
-int khttpd_location_check_invariants(struct khttpd_location *location,
-    struct khttpd_server *server);
 int khttpd_server_check_invariants(struct khttpd_server *server);
 
 #endif	/* _KERNEL */
