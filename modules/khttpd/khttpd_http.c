@@ -2246,9 +2246,10 @@ khttpd_http_accept_http_client(void *arg)
 	client = uma_zalloc(khttpd_http_client_zone, M_WAITOK);
 	client->session.port = khttpd_port_acquire(port);
 	stream = &client->session.stream;
-	stream->down = client->session.socket = socket = khttpd_socket_new();
+	stream->down = client->session.socket = socket =
+	    khttpd_socket_new(stream);
 
-	error = khttpd_socket_start(socket, stream, port);
+	error = khttpd_port_accept(port, socket);
 	if (error != 0)
 		uma_zfree(khttpd_http_client_zone, client);
 }

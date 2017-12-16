@@ -54,10 +54,12 @@ int khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
     khttpd_event_fn_t accept_handler, const char **detail_out);
 void khttpd_port_stop(struct khttpd_port *port);
 void khttpd_port_shutdown(struct khttpd_port *port);
+int khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket);
 
-struct khttpd_socket *khttpd_socket_new(void);
-int khttpd_socket_start(struct khttpd_socket *socket,
-    struct khttpd_stream *stream, struct khttpd_port *port);
+struct khttpd_socket *khttpd_socket_new(struct khttpd_stream *);
+int khttpd_socket_connect(struct khttpd_socket *, struct sockaddr *,
+    struct sockaddr *);
+
 const struct sockaddr *khttpd_socket_peer_address
     (struct khttpd_socket *socket);
 

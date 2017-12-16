@@ -51,8 +51,6 @@ enum khttpd_http_log_id {
 
 struct khttpd_exchange_ops {
 	void (*dtor)(struct khttpd_exchange *, void *);
-	int  (*send)(struct khttpd_exchange *, void *, struct khttpd_stream *,
-	    size_t *);
 	int  (*get)(struct khttpd_exchange *, void *, ssize_t, struct mbuf **,
 	    boolean_t *);
 	void (*put)(struct khttpd_exchange *, void *, struct mbuf *,

@@ -134,10 +134,13 @@ static void khttpd_socket_stream_send_bufstat(struct khttpd_stream *,
 static void khttpd_socket_stream_notify_of_drain(struct khttpd_stream *);
 static void khttpd_socket_stream_destroy(struct khttpd_stream *);
 
+static void khttpd_socket_error(struct khttpd_socket *, int, int,
+    const char *);
 static void khttpd_socket_shutdown(void *);
 static void khttpd_socket_handle_timeout(void *);
 static void khttpd_socket_handle_read_event(void *);
 static void khttpd_socket_handle_write_event(void *);
+static void khttpd_socket_schedule_read_event(struct khttpd_socket *);
 
 struct khttpd_stream_down_ops khttpd_socket_ops = {
 	.receive = khttpd_socket_stream_receive,
@@ -401,14 +404,92 @@ khttpd_port_shutdown(struct khttpd_port *port)
 	mtx_unlock(&port->lock);
 }
 
+int
+khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket)
+{
+	struct thread *td;
+	struct sockaddr *name;
+	struct khttpd_event *read_event;
+	const char *detail;
+	socklen_t namelen;
+	int error, fd, nodelay, nosigpipe;
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, port, socket);
+
+	td = curthread;
+	detail = NULL;
+
+	error = kern_accept4(td, port->fd, &name, &namelen, SOCK_NONBLOCK, 
+	    NULL);
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "accept failed");
+		return (error);
+	}
+	socket->fd = fd = td->td_retval[0];
+
+	KASSERT(namelen < sizeof(socket->peer_address),
+	    ("namelen=%zd, size=%zd",
+		namelen, sizeof(socket->peer_address)));
+	bcopy(name, &socket->peer_address, namelen);
+
+	error = getsock_cap(td, fd, &khttpd_socket_rights, &socket->fp, NULL,
+	    NULL);
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "getsock_cap failed");
+		return (error);
+	}
+
+	nosigpipe = 1;
+	error = kern_setsockopt(td, fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe,
+	    UIO_SYSSPACE, sizeof(nosigpipe));
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "setsockopt(SO_NOSIGPIPE) failed");
+		return (error);
+	}
+
+	if (port->is_tcp) {
+		socket->is_tcp = TRUE;
+
+		nodelay = 1;
+		error = kern_setsockopt(td, fd, IPPROTO_TCP, TCP_NODELAY,
+		    &nodelay, UIO_SYSSPACE, sizeof(nodelay));
+		if (error != 0) {
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "setsockopt(TCP_NODELAY) failed");
+			return (error);
+		}
+	}
+
+	socket->read_event = read_event = khttpd_event_new_read
+	    (khttpd_socket_handle_read_event, socket, socket->fd, FALSE, NULL);
+	socket->write_event = khttpd_event_new_write
+	    (khttpd_socket_handle_write_event, socket, socket->fd, FALSE,
+		read_event);
+
+	mtx_lock(&port->lock);
+	KASSERT(socket->port == NULL,
+	    ("socket=%p, socket->port=%p", socket, socket->port));
+	socket->port = port;
+	LIST_INSERT_HEAD(&port->sockets, socket, link);
+	mtx_unlock(&port->lock);
+
+	khttpd_socket_schedule_read_event(socket);
+
+	return (0);
+}
+
 struct khttpd_socket *
-khttpd_socket_new(void)
+khttpd_socket_new(struct khttpd_stream *stream)
 {
 	struct khttpd_socket *socket;
 
 	KHTTPD_ENTRY("%s()", __func__);
 
 	socket = uma_zalloc(khttpd_socket_zone, M_WAITOK);
+	socket->stream = stream;
 	bzero(&socket->khttpd_socket_zero_begin,
 	    offsetof(struct khttpd_socket, khttpd_socket_zero_end) -
 	    offsetof(struct khttpd_socket, khttpd_socket_zero_begin));
@@ -538,85 +619,6 @@ khttpd_socket_schedule_read_event(struct khttpd_socket *socket)
 	mtx_unlock(&socket->lock);
 
 	khttpd_event_enable(socket->read_event);
-}
-
-int
-khttpd_socket_start(struct khttpd_socket *socket, struct khttpd_stream *stream,
-    struct khttpd_port *port)
-{
-	struct thread *td;
-	struct sockaddr *name;
-	struct khttpd_event *read_event;
-	const char *detail;
-	socklen_t namelen;
-	int error, fd, nodelay, nosigpipe;
-
-	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, stream, port);
-
-	td = curthread;
-	detail = NULL;
-
-	error = kern_accept4(td, port->fd, &name, &namelen, SOCK_NONBLOCK, 
-	    NULL);
-	if (error != 0) {
-		khttpd_socket_error(socket, LOG_WARNING, error,
-		    "accept failed");
-		return (error);
-	}
-	socket->fd = fd = td->td_retval[0];
-
-	KASSERT(namelen < sizeof(socket->peer_address),
-	    ("namelen=%zd, size=%zd",
-		namelen, sizeof(socket->peer_address)));
-	bcopy(name, &socket->peer_address, namelen);
-
-	error = getsock_cap(td, fd, &khttpd_socket_rights, &socket->fp, NULL,
-	    NULL);
-	if (error != 0) {
-		khttpd_socket_error(socket, LOG_WARNING, error,
-		    "getsock_cap failed");
-		return (error);
-	}
-
-	nosigpipe = 1;
-	error = kern_setsockopt(td, fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe,
-	    UIO_SYSSPACE, sizeof(nosigpipe));
-	if (error != 0) {
-		khttpd_socket_error(socket, LOG_WARNING, error,
-		    "setsockopt(SO_NOSIGPIPE) failed");
-		return (error);
-	}
-
-	if (port->is_tcp) {
-		socket->is_tcp = TRUE;
-
-		nodelay = 1;
-		error = kern_setsockopt(td, fd, IPPROTO_TCP, TCP_NODELAY,
-		    &nodelay, UIO_SYSSPACE, sizeof(nodelay));
-		if (error != 0) {
-			khttpd_socket_error(socket, LOG_WARNING, error,
-			    "setsockopt(TCP_NODELAY) failed");
-			return (error);
-		}
-	}
-
-	socket->stream = stream;
-	socket->read_event = read_event = khttpd_event_new_read
-	    (khttpd_socket_handle_read_event, socket, socket->fd, FALSE, NULL);
-	socket->write_event = khttpd_event_new_write
-	    (khttpd_socket_handle_write_event, socket, socket->fd, FALSE,
-		read_event);
-
-	mtx_lock(&port->lock);
-	KASSERT(socket->port == NULL,
-	    ("socket=%p, socket->port=%p", socket, socket->port));
-	socket->port = port;
-	LIST_INSERT_HEAD(&port->sockets, socket, link);
-	mtx_unlock(&port->lock);
-
-	khttpd_socket_schedule_read_event(socket);
-
-	return (0);
 }
 
 static void
@@ -993,6 +995,84 @@ khttpd_socket_handle_write_event(void *arg)
 
 		khttpd_stream_clear_to_send(socket->stream, space);
 	}
+}
+
+int
+khttpd_socket_connect(struct khttpd_socket *socket, struct sockaddr *peeraddr,
+    struct sockaddr *sockaddr)
+{
+	struct thread *td;
+	struct khttpd_event *read_event;
+	const char *detail;
+	int error, fd, nodelay, nosigpipe;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+
+	td = curthread;
+	detail = NULL;
+
+	error = kern_socket(td, peeraddr->sa_family,
+	    SOCK_STREAM | SOCK_NONBLOCK, 0);
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "socket() failed");
+		return (error);
+	}
+	socket->fd = fd = td->td_retval[0];
+
+	error = getsock_cap(td, fd, &khttpd_socket_rights, &socket->fp, NULL,
+	    NULL);
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "getsock_cap() failed");
+		return (error);
+	}
+
+	nosigpipe = 1;
+	error = kern_setsockopt(td, fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe,
+	    UIO_SYSSPACE, sizeof(nosigpipe));
+	if (error != 0) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "setsockopt(SO_NOSIGPIPE) failed");
+		return (error);
+	}
+
+	if (peeraddr->sa_family == PF_INET ||
+	    peeraddr->sa_family == PF_INET6) {
+		socket->is_tcp = TRUE;
+
+		nodelay = 1;
+		error = kern_setsockopt(td, fd, IPPROTO_TCP, TCP_NODELAY,
+		    &nodelay, UIO_SYSSPACE, sizeof(nodelay));
+		if (error != 0) {
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "setsockopt(TCP_NODELAY) failed");
+			return (error);
+		}
+	}
+
+	if (sockaddr != NULL) {
+		error = kern_bindat(td, AT_FDCWD, fd, sockaddr);
+		if (error != 0) {
+			khttpd_socket_error(socket, LOG_WARNING, error,
+			    "bind() failed");
+			return (error);
+		}
+	}
+
+	error = kern_connectat(td, AT_FDCWD, fd, peeraddr);
+	if (error != 0 && error != EINPROGRESS) {
+		khttpd_socket_error(socket, LOG_WARNING, error,
+		    "connect() failed");
+		return (error);
+	}
+
+	socket->read_event = read_event = khttpd_event_new_read
+	    (khttpd_socket_handle_read_event, socket, fd, FALSE, NULL);
+	socket->write_event = khttpd_event_new_write
+	    (khttpd_socket_handle_write_event, socket, fd, FALSE, read_event);
+
+	return (0);
 }
 
 const struct sockaddr *
