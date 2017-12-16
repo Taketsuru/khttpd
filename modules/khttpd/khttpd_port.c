@@ -95,6 +95,7 @@ struct khttpd_socket {
 	unsigned		xmit_close_scheduled:1;
 	unsigned		xmit_nopush:1;
 	unsigned		xmit_notification_requested:1;
+	unsigned		marker:1;
 #define khttpd_socket_zero_end fd
 
 	int			fd;
@@ -371,13 +372,32 @@ khttpd_port_stop(struct khttpd_port *port)
 void
 khttpd_port_shutdown(struct khttpd_port *port)
 {
-	struct khttpd_socket *socket;
+	struct khttpd_socket marker;
+	struct khttpd_socket *socket, *next;
+
+	bzero(&marker, sizeof(marker));
+	marker.marker = TRUE;
 
 	mtx_lock(&port->lock);
-	LIST_FOREACH(socket, &port->sockets, link)
-		khttpd_socket_shutdown(socket);
+
+	for (socket = LIST_FIRST(&port->sockets);
+	     socket != NULL; socket = next)
+		if (socket->marker)
+			next = LIST_NEXT(socket, link);
+		else {
+			LIST_INSERT_AFTER(socket, &marker, link);
+			mtx_unlock(&port->lock);
+			khttpd_socket_shutdown(socket);
+			mtx_lock(&port->lock);
+			next = LIST_NEXT(&marker, link);
+			LIST_REMOVE(&marker, link);
+			if (next == NULL && LIST_EMPTY(&port->sockets))
+				wakeup(&port->sockets);
+		}
+
 	while (!LIST_EMPTY(&port->sockets))
 		mtx_sleep(&port->sockets, &port->lock, 0, "sockcls", 0);
+
 	mtx_unlock(&port->lock);
 }
 
