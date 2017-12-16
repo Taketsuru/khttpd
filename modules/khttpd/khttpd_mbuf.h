@@ -82,6 +82,8 @@ boolean_t khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos,
     char *token, boolean_t ignore_case);
 
 void khttpd_mbuf_json_new(struct khttpd_mbuf_json *v);
+void khttpd_mbuf_json_swap(struct khttpd_mbuf_json *,
+    struct khttpd_mbuf_json *);
 struct mbuf *khttpd_mbuf_json_data(struct khttpd_mbuf_json *v);
 struct mbuf *khttpd_mbuf_json_move(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_delete(struct khttpd_mbuf_json *v);

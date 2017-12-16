@@ -1004,6 +1004,25 @@ khttpd_mbuf_json_new(struct khttpd_mbuf_json *v)
 	v->is_property_value = FALSE;
 }
 
+void
+khttpd_mbuf_json_swap(struct khttpd_mbuf_json *x, struct khttpd_mbuf_json *y)
+{
+	struct mbuf *m;
+	boolean_t v;
+
+	m = x->mbuf;
+	x->mbuf = y->mbuf;
+	y->mbuf = m;
+
+	v = x->is_first;
+	x->is_first = y->is_first;
+	y->is_first = v;
+
+	v = x->is_property_value;
+	x->is_property_value = y->is_property_value;
+	y->is_property_value = v;
+}
+
 struct mbuf *
 khttpd_mbuf_json_data(struct khttpd_mbuf_json *v)
 {
@@ -1018,6 +1037,8 @@ khttpd_mbuf_json_move(struct khttpd_mbuf_json *v)
 
 	m = v->mbuf;
 	v->mbuf = NULL;
+	v->is_first = TRUE;
+	v->is_property_value = FALSE;
 
 	return (m);
 }
