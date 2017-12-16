@@ -2337,7 +2337,6 @@ static int
 khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
-	struct khttpd_problem_property prop_spec;
 	struct khttpd_location_type *type;
 	struct khttpd_location *location;
 	struct khttpd_ctrl_location_data *location_data;
@@ -2347,8 +2346,6 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	int status;
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
-
-	prop_spec.link = NULL;
 
 	status = khttpd_location_type_get_from_property(&type, "type", output,
 	    input_prop_spec, input);
@@ -2721,6 +2718,7 @@ khttpd_ctrl_start(void *arg)
 	status = KHTTPD_STATUS_OK;
 
 	if (rewriters_j != NULL) {
+		prop_spec.name = "rewriters";
 		status = khttpd_obj_type_load(&khttpd_ctrl_rewriters, &output,
 		    &prop_spec, rewriters_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
@@ -2728,6 +2726,7 @@ khttpd_ctrl_start(void *arg)
 	}
 
 	if (ports_j != NULL) {
+		prop_spec.name = "ports";
 		status = khttpd_obj_type_load(&khttpd_ctrl_ports, &output,
 		    &prop_spec, ports_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
@@ -2735,15 +2734,20 @@ khttpd_ctrl_start(void *arg)
 	}
 
 	if (servers_j != NULL) {
+		prop_spec.name = "servers";
 		status = khttpd_obj_type_load(&khttpd_ctrl_servers, &output,
 		    &prop_spec, servers_j);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 			goto unlock;
 	}
 
-	if (locations_j != NULL)
+	if (locations_j != NULL) {
+		prop_spec.name = "locations";
 		status = khttpd_obj_type_load(&khttpd_ctrl_locations, &output,
 		    &prop_spec, locations_j);
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+			goto unlock;
+	}
 
 	khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, access_log);
 	khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, error_log);
