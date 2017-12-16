@@ -139,93 +139,59 @@ static LIST_HEAD(, khttpd_file_get_exchange_data) khttpd_file_orphan_get_list =
 
 MTX_SYSINIT(khttpd_file_lock, &khttpd_file_lock, "file", MTX_DEF);
 
-static int
-khttpd_file_normalize_path(const char *path, char *buf, size_t bufsize)
+/* 
+ * Note:
+ *   This function removes leading '/'s.
+ */
+static boolean_t
+khttpd_file_normalize_path(char *out, const char *in)
 {
+	struct sbuf sbuf;
 	const char *src, *segend;
 	char *dst, *dstend;
+	char ch;
 
-	KHTTPD_ENTRY("%s(%p,%p,%zu)", __func__, path, buf, bufsize);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, out, in);
 
-	src = path;
-	dst = buf;
-	dstend = dst + bufsize;
-
-	for (;;) {
-
-		/* consecutive slashes are replaced with a slash */
-		if (*src == '/') {
-			while (*++src == '/')
-				; /* nothing */
-
-			if (dstend <= dst)
-				return (ENOMEM);
-			*dst++ = '/';
-		}
-
-again:
-		if (*src == '\0')
+	dst = out;
+	dstend = out + PATH_MAX;
+	src = in;
+	for (;; src = segend) {
+		while ((ch = *src) == '/')
+			++src;
+		if (ch == '\0')
 			break;
 
-		if (src[0] == '.' && src[1] == '\0') {
-			if (buf < dst)
-				--dst;
-			break;
-		}
-
-		if (src[0] == '.' && src[1] == '/') {
-			src += 2;
-			while (*src == '/')
-				++src;
-			if (*src == '\0')
-				break;
-		}
-
-		segend = strchr(src, '/');
+		segend = strchr(src + 1, '/');
 		if (segend == NULL)
-			/* XXX Is this repeated call of strlen() redundant? */
-			segend = src + strlen(src); 
+			segend = src + 1 + strlen(src + 1); 
 
-		if (segend - src == 2 && 
-		    src[0] == '.' && src[1] == '.') {
-			if (dst <= buf)
-				return (EINVAL);
-			--dst;
-			while (dst < buf && dst[-1] != '/')
-				--dst;
+		if (ch == '.') {
+			if (src + 1 == segend)
+				continue;
 
-			if (src[2] == '\0') {
-				if (dst <= buf)
-					return (EINVAL);
-				--dst;
-				break;
+			if (src + 2 == segend && src[1] == '.') {
+				if (dst == out)
+					return (FALSE);
+				while (out < --dst && dst[-1] != '/')
+					; /* nothing */
+				continue;
 			}
-
-			for (src = segend + 1; *src == '/'; ++src)
-				; /* nothing */
-			goto again;
 		}
 
 		if (dstend - dst < segend - src + 1)
-			return (ENOMEM);
+			return (FALSE);
 
-		bcopy(src, dst, segend - src);
-		dst += segend - src;
-
-		src = segend;
+		bcopy(src, dst, segend - src + 1);
+		dst += segend - src + 1;
 	}
 
-	if (buf == dst) {
-		if (dstend <= dst)
-			return (ENOMEM);
+	if (dst == out)
 		*dst++ = '.';
-	}
+	else if (dst[-1] == '/')
+		dst[-1] = '\0';
 
-	if (dstend <= dst)
-		return (ENOMEM);
-	*dst = '\0';
-
-	return (0);
+	return (TRUE);
 }
 
 static int
@@ -697,7 +663,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	struct khttpd_stream *stream;
 	struct thread *td;
 	const char *suffix;
-	size_t pathsize, space;
+	size_t space;
 	int error, status;
 	boolean_t mime_type_specified, charset_specified;
 
@@ -710,11 +676,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	mtx_lock(&khttpd_file_lock);
 	location_data = khttpd_location_data(location);
 	mtx_unlock(&khttpd_file_lock);
-
-	/* Make sure 'suffix' is a relative path name. */
-	for (suffix = khttpd_exchange_suffix(exchange); suffix[0] == '/';
-	     ++suffix)
-		; /* nothing */
 
 	/* 
 	 * This MAX() is necessary because normalizing an empty path can result
@@ -730,12 +691,8 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
 
-	pathsize = MAX(2, strlen(suffix) + 1);
-	if (sizeof(data->path) < pathsize)
-		goto not_found;
-
-	error = khttpd_file_normalize_path(suffix, data->path, pathsize);
-	if (error != 0)
+	if (!khttpd_file_normalize_path(&data->path,
+		khttpd_exchange_suffix(exchange)))
 		goto not_found;
 
 	error = khttpd_file_open_for_read(location_data->docroot_fd, data);

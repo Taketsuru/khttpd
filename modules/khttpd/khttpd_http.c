@@ -117,7 +117,6 @@ struct khttpd_exchange {
 	unsigned		close:1;
 	unsigned		close_requested:1;
 	unsigned		continue_requested:1;
-	unsigned		target_includes_nul:1;
 	unsigned		request_has_content_length:1;
 	unsigned		request_chunked:1;
 	unsigned		response_has_content_length:1;
@@ -738,7 +737,7 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 {
 	ssize_t query_off;
 	int code, error, i, n;
-	char ch;
+	char ch, hex[2];
 
 	error = 0;
 	query_off = -1;
@@ -763,7 +762,7 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 			n = 0;
 			for (i = 0; i < 2; ++i) {
 				code <<= 4;
-				ch = khttpd_mbuf_getc(pos);
+				hex[i] = ch = khttpd_mbuf_getc(pos);
 				if ('0' <= ch && ch <= '9')
 					code |= ch - '0';
 
@@ -777,10 +776,16 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 					return (TRUE);
 			}
 
-			if (code == 0)
-				exchange->target_includes_nul = TRUE;
+			switch (code) {
+			case 0: case '/':
+				sbuf_putc(&exchange->target, '%');
+				for (i = 0; i < 2; ++i)
+					sbuf_putc(&exchange->target, hex[i]);
+				break;
 
-			sbuf_putc(&exchange->target, code);
+			default:
+				sbuf_putc(&exchange->target, code);
+			}
 			continue;
 
 		case ':': case '@': case '/':
@@ -1487,20 +1492,6 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 		KHTTPD_BRANCH("%s exchange->method == KHTTPD_METHOD_UNKNOWN",
 		    __func__);
 		status = KHTTPD_STATUS_NOT_IMPLEMENTED;
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
-		goto quit;
-	}
-
-	/* 
-	 * If the target includes a NUL character, send response with "Not
-	 * Found" status.
-	 */
-
-	if (exchange->target_includes_nul) {
-		KHTTPD_BRANCH("%s exchange->target_includes_nul", __func__);
-		status = KHTTPD_STATUS_NOT_FOUND;
 		khttpd_exchange_set_error_response_body(exchange, status,
 		    NULL);
 		khttpd_exchange_respond(exchange, status);
