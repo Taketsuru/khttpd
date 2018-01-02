@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,7 +27,9 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/types.h>
 #include <sys/linker_set.h>
@@ -51,8 +53,9 @@ enum {
 	KHTTPD_INIT_PHASE_RUN = 13
 };
 
-typedef int (*khttpd_init_fn_t)(void);
-typedef void (*khttpd_fini_fn_t)(void);
+typedef int	(*khttpd_init_fn_t)(void);
+typedef void	(*khttpd_fini_fn_t)(void);
+typedef void	(*khttpd_init_shutdown_fn_t)(void *);
 
 struct khttpd_init {
 	const char		*name;
@@ -87,14 +90,18 @@ struct khttpd_init {
 	};								\
 	SET_ENTRY(khttpd_init_set, __CONCAT(khttpd_init_, __LINE__))
 
-typedef void (*khttpd_init_shutdown_fn_t)(void *);
 EVENTHANDLER_DECLARE(khttpd_init_shutdown, khttpd_init_shutdown_fn_t);
 
-int khttpd_init_get_phase(void);
-int khttpd_init_run(void (*fn)(int));
-int khttpd_init_run_focusing(void (*fn)(int), const char **files, int nfiles);
-int khttpd_init_quiesce(void);
-void khttpd_init_unload(struct module *);
-void khttpd_init_wait_load_completion(struct module *);
+int	khttpd_init_get_phase(void);
+int	khttpd_init_quiesce(void);
+int	khttpd_init_run_focusing(void (*_fn)(int), const char **_files,
+	    int _nfiles);
+void	khttpd_init_unload(struct module *_mod);
+void	khttpd_init_wait_load_completion(struct module *_mod);
 
-#endif	/* _KERNEL */
+inline int
+khttpd_init_run(void (*_fn)(int))
+{
+
+	return (khttpd_init_run_focusing(_fn, NULL, 0));
+}

@@ -28,49 +28,151 @@
 #include "khttpd_strtab.h"
 
 #include <sys/param.h>
+#include <sys/limits.h>
 #include <sys/ctype.h>
 #include <sys/hash.h>
-#include <sys/queue.h>
+#include <sys/smp.h>
+#include <sys/pcpu.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
+#include "khttpd_ktr.h"
 #include "khttpd_string.h"
+#include "khttpd_malloc.h"
+
+struct khttpd_strtab {
+	const char	**strings;
+	short		*table;
+	char		**buf;
+	u_int		maxlen;
+	u_int		mask;
+};
+
+static uint32_t
+khttpd_strtab_hash(struct khttpd_strtab *table, const char *begin,
+    const char *end)
+{
+	const char *srcp;
+	char *buf, *dstp;
+	int ch;
+	uint32_t h;
+
+	KASSERT(end - begin < table->maxlen, ("too long"));
+
+	srcp = begin;
+	critical_enter();
+	dstp = buf = table->buf[PCPU_GET(cpuid)];
+	while ((ch = *srcp++) != '\0')
+		*dstp++ = tolower(ch);
+	h = murmur3_32_hash(buf, dstp - buf, 0);
+	critical_exit();
+
+	return (h);
+}
 
 void
-khttpd_strtab_init(struct khttpd_strtab_entry_slist *table, int table_size,
-    struct khttpd_strtab_entry *symbols, int n)
+khttpd_strtab_delete(struct khttpd_strtab *strtab)
 {
+	int i;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, strtab);
+
+	if (strtab == NULL)
+		return;
+
+	for (i = 0; i < mp_ncpus; ++i)
+		khttpd_free(strtab->buf[i]);
+	khttpd_free(strtab->buf);
+	khttpd_free(strtab->table);
+	khttpd_free(strtab);
+}
+
+int
+khttpd_strtab_find(struct khttpd_strtab *strtab,
+    const char *begin, const char *end, boolean_t ci)
+{
+	int (*cmp)(const char *, const char *, size_t);
 	uint32_t h;
 	int i;
 
-	KASSERT((table_size & -table_size) == table_size,
-	    ("table_size=%d", table_size));
+	if (strtab->maxlen < end - begin)
+		return (-1);
 
-	for (i = 0; i < table_size; ++i)
-		SLIST_INIT(&table[i]);
+	h = khttpd_strtab_hash(strtab, begin, end) & strtab->mask;
+	i = strtab->table[h];
+	if (i == -1)
+		return (-1);
 
-	for (i = 0; i < n; ++i) {
-		h = khttpd_hash32_str_ci(symbols[i].name, 0) &
-		    (table_size - 1);
-		SLIST_INSERT_HEAD(&table[h], &symbols[i], link);
-	}
+	cmp = ci ? strncasecmp : strncmp;
+
+	return (cmp(begin, strtab->strings[i], end - begin) == 0 ? i : -1);
 }
 
-struct khttpd_strtab_entry *
-khttpd_strtab_find(struct khttpd_strtab_entry_slist *table, int table_size,
-    const char *begin, const char *end, boolean_t ci)
+int
+khttpd_strtab_maxlen(struct khttpd_strtab *strtab)
 {
-	struct khttpd_strtab_entry *ptr;
-	uint32_t h;
 
-	KASSERT((table_size & -table_size) == table_size,
-	    ("table_size=%d", table_size));
+	return (strtab->maxlen);
+}
 
-	h = khttpd_hash32_buf_ci(begin, end, 0) & (table_size - 1);
-	SLIST_FOREACH(ptr, &table[h], link)
-		if ((ci ? strncasecmp : strncmp)
-		    (begin, ptr->name, end - begin) == 0)
-			return (ptr);
+struct khttpd_strtab *
+khttpd_strtab_new(const char **strings, int n)
+{
+	struct khttpd_strtab *result;
+	size_t len;
+	uint32_t h, *hashes;
+	short *table;
+	int bit, i, mask;
+	extern int uma_align_cache;
+
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, strings, n);
+	KASSERT(0 < n && n < SHRT_MAX, ("n=%d", n));
+
+	result = khttpd_malloc(sizeof(*result));
+	bzero(result, sizeof(*result));
+	result->buf = khttpd_malloc(mp_ncpus * sizeof(char *));
+
+	len = 0;
+	for (i = 0; i < n; ++i)
+		len = MAX(len, strlen(strings[i]));
+	result->maxlen = len = roundup2(len + 1, uma_align_cache + 1);
+
+	for (i = 0; i < mp_ncpus; ++i)
+		result->buf[i] = khttpd_malloc(len);
+
+	hashes = khttpd_malloc(n * sizeof(uint32_t));
+
+	for (i = 0; i < n; ++i)
+		hashes[i] = khttpd_strtab_hash(result, strings[i],
+		    strings[i] + strlen(strings[i]));
+
+	for (bit = flsl(n - 1); bit < 32; ++bit) {
+		table = khttpd_malloc(sizeof(int) << bit);
+		mask = (1 << bit) - 1;
+		for (i = 0; i <= mask; ++i)
+			table[i] = -1;
+
+		for (i = 0; i < n; ++i) {
+			h = hashes[i] & mask;
+			if (table[h] != -1)
+				goto next;
+			table[h] = i;
+		}
+
+		khttpd_free(hashes);
+
+		result->strings = strings;
+		result->table = table;
+		result->mask = mask;
+
+		return (result);
+
+next:
+		khttpd_free(table);
+	}
+
+	khttpd_free(hashes);
+	khttpd_strtab_delete(result);
 
 	return (NULL);
 }

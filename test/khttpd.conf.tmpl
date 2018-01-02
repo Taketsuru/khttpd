@@ -52,6 +52,23 @@
     ],
     "locations": [
 	{
+	    "id": "74461a46-edb1-477c-8724-dc6d8f62bef0",
+	    "type": "khttpd_fastcgi",
+	    "server": "6e6d5fcf-b94d-11e7-87c2-08002744012d",
+	    "path": "/",
+	    "fsPath": "$PROJECT/docroot",
+	    "scriptSuffix": ".php",
+	    "upstreams": [
+		{
+		    "address": {
+		    	"family": "inet",
+			"address": "192.168.56.2",
+			"port": 9000
+		    }
+		}
+	    ]
+	},
+	{
 	    "id": "8271aca9-b94d-11e7-87c2-08002744012d",
 	    "type": "khttpd_file",
 	    "server": "6e6d5fcf-b94d-11e7-87c2-08002744012d",

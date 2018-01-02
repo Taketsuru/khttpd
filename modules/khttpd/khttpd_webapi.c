@@ -156,39 +156,87 @@ khttpd_webapi_get_object_property(struct khttpd_json **value_out,
 }
 
 int
-khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
+khttpd_webapi_get_array_property(struct khttpd_json **value_out,
+    const char *name,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output)
+    struct khttpd_mbuf_json *output, boolean_t may_not_exist)
 {
 	struct khttpd_problem_property prop_spec;
+	struct khttpd_json *value_j;
+
+	KASSERT(khttpd_json_type(input) == KHTTPD_JSON_OBJECT,
+	    ("wrong type %d", khttpd_json_type(input)));
+
+	prop_spec.link = input_prop_spec;
+	prop_spec.name = name;
+	value_j = khttpd_json_object_get(input, name);
+	if (value_j == NULL) {
+		if (may_not_exist) {
+			*value_out = 0;
+			return (KHTTPD_STATUS_NO_CONTENT);
+		}
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+
+	if (khttpd_json_type(value_j) != KHTTPD_JSON_ARRAY) {
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+
+	*value_out = value_j;
+
+	return (KHTTPD_STATUS_OK);
+}
+
+int
+khttpd_webapi_get_sockaddr_property(struct sockaddr *addr, socklen_t len,
+    const char *name,
+    struct khttpd_problem_property *input_prop_spec,
+    struct khttpd_json *input, struct khttpd_mbuf_json *output,
+    boolean_t may_not_exist)
+{
+	struct khttpd_problem_property prop_spec[2];
 	struct sockaddr_un *un;
 	struct sockaddr_in *in;
 	struct sockaddr_in6 *in6;
+	struct khttpd_json *obj_j;
 	const char *family, *address;
+	uint32_t ipaddr;
 	in_port_t *port_field;
 	size_t alen;
 	int64_t port;
 	int status;
 
+	status = khttpd_webapi_get_object_property(&obj_j, name, 
+	    input_prop_spec, input, output, may_not_exist);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		return (status);
+
+	prop_spec[0].name = name;
+	prop_spec[0].link = input_prop_spec;
+
 	status = khttpd_webapi_get_string_property(&family, "family",
-	    input_prop_spec, input, output, FALSE);
+	    &prop_spec[0], obj_j, output, FALSE);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
 	status = khttpd_webapi_get_string_property(&address, "address",
-	    input_prop_spec, input, output, TRUE);
+	    &prop_spec[0], obj_j, output, TRUE);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
 	port_field = NULL;
 
-	prop_spec.link = input_prop_spec;
-	prop_spec.name = "address";
+	prop_spec[1].name = "address";
+	prop_spec[1].link = &prop_spec[0];
 
 	if (strcmp(family, "unix") == 0) {
 		if (address == NULL) {
 			khttpd_problem_no_value_response_begin(output);
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -196,7 +244,7 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 			khttpd_problem_invalid_value_response_begin(output);
 			khttpd_problem_set_detail(output, 
 			    "absolute path only");
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -205,7 +253,7 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 		    + 1;
 		if (len < MIN(sizeof(struct sockaddr_un), alen)) {
 			khttpd_problem_invalid_value_response_begin(output);
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			khttpd_problem_set_detail(output, "too long");
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
@@ -220,11 +268,12 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 		in->sin_len = sizeof(struct sockaddr_in);
 		in->sin_family = AF_INET;
 		if (address == NULL) {
-			in->sin_addr.s_addr = INADDR_ANY;
-		} else if (khttpd_parse_ip_addresss(&in->sin_addr.s_addr, 
-			address) != 0) {
+			in->sin_addr.s_addr = htonl(INADDR_ANY);
+		} else if (khttpd_parse_ip_addresss(&ipaddr, address) == 0) {
+			in->sin_addr.s_addr = htonl(ipaddr);
+		} else {
 			khttpd_problem_invalid_value_response_begin(output);
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
@@ -239,27 +288,27 @@ khttpd_webapi_get_sockaddr_properties(struct sockaddr *addr, socklen_t len,
 		} else if (khttpd_parse_ipv6_address(in6->sin6_addr.s6_addr,
 			address) != 0) {
 			khttpd_problem_invalid_value_response_begin(output);
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 
 	} else {
-		prop_spec.name = "family";
+		prop_spec[1].name = "family";
 		khttpd_problem_invalid_value_response_begin(output);
-		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_property(output, &prop_spec[1]);
 		return (KHTTPD_STATUS_BAD_REQUEST);
 	}
 
 	if (port_field != NULL) {
 		status = khttpd_webapi_get_integer_property(&port, "port",
-		    input_prop_spec, input, output, FALSE);
+		    &prop_spec[0], obj_j, output, FALSE);
 		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 			return (status);
 
 		if (port < 1 || IPPORT_MAX < port) {
-			prop_spec.name = "port";
+			prop_spec[1].name = "port";
 			khttpd_problem_invalid_value_response_begin(output);
-			khttpd_problem_set_property(output, &prop_spec);
+			khttpd_problem_set_property(output, &prop_spec[1]);
 			return (KHTTPD_STATUS_BAD_REQUEST);
 		}
 

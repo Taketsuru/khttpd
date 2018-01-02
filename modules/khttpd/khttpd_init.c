@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,9 +33,7 @@
 #include <sys/hash.h>
 #include <sys/eventhandler.h>
 #include <sys/lock.h>
-#include <sys/sx.h>
-#include <sys/proc.h>
-#include <sys/kthread.h>
+#include <sys/mutex.h>
 #include <sys/module.h>
 #include <sys/syslog.h>
 #include <sys/kernel.h>
@@ -44,6 +42,15 @@
 
 #include "khttpd_ktr.h"
 #include "khttpd_malloc.h"
+
+/*
+ * (a) Need khttpd_init_lock to read/write
+ * (b) Only the thread which
+ *     - see khttpd_init_busy is clear and
+ *       keep holding khttpd_init_lock or, which
+ *     - see khttpd_init_busy is clear and
+ *       set khttpd_init_busy may access.
+ */
 
 SET_DECLARE(khttpd_init_set, struct khttpd_init);
 
@@ -68,144 +75,18 @@ struct khttpd_init_file {
 
 LIST_HEAD(khttpd_init_file_list, khttpd_init_file);
 
-static struct sx khttpd_init_lock;
+extern int khttpd_init_run(void (*fn)(int));
+
 static struct khttpd_init_file_list khttpd_init_files =
-    LIST_HEAD_INITIALIZER(&khttpd_init_files);
-static struct khttpd_init_node **khttpd_init_nodes;
-static struct khttpd_init *khttpd_init_current;
-static int khttpd_init_generation;
+    LIST_HEAD_INITIALIZER(&khttpd_init_files); /* (b) */
+static struct mtx khttpd_init_lock;
 static eventhandler_tag khttpd_init_kldload_tag;
+static struct khttpd_init * khttpd_init_current;    /* (a) */
+static struct khttpd_init_node **khttpd_init_nodes; /* (a) */
+static int khttpd_init_generation;		    /* (a) */
+static bool khttpd_init_busy;			    /* (a) */
 
-SX_SYSINIT(khttpd_init_lock, &khttpd_init_lock, "khttpd-init");
-
-int
-khttpd_init_get_phase(void)
-{
-	int phase;
-
-	sx_slock(&khttpd_init_lock);
-	phase = khttpd_init_current == NULL ? INT_MIN :
-	    khttpd_init_current->phase;
-	sx_sunlock(&khttpd_init_lock);
-
-	return (phase);
-}
-
-int
-khttpd_init_run(void (*fn)(int))
-{
-
-	return (khttpd_init_run_focusing(fn, NULL, 0));
-}
-
-static boolean_t
-khttpd_init_may_run(struct khttpd_init *init, const char **files, int nfiles)
-{
-	size_t iflen, flen;
-	int i;
-
-	KHTTPD_ENTRY("%s(%p(%s),%p,%d)", __func__, init, init->file, files,
-	    nfiles);
-
-	if (files == NULL)
-		return (TRUE);
-
-	iflen = strlen(init->file);
-	for (i = 0; i < nfiles; ++i) {
-		flen = strlen(files[i]);
-		if (flen <= iflen &&
-		    memcmp(init->file + iflen - flen, files, flen) == 0)
-			return (TRUE);
-	}
-
-	return (FALSE);
-}
-
-int
-khttpd_init_run_focusing(void (*fn)(int), const char **files, int nfiles)
-{
-	static struct khttpd_init marker = {
-		.name = "<ready>",
-		.phase = INT_MAX
-	};
-	struct thread *td;
-	struct khttpd_init *init;
-	struct khttpd_init_node **nodes;
-	int error, gen, i;
-
-	KHTTPD_ENTRY("khttpd_init_run_focusing(%p,%p,%d)", fn, files, nfiles);
-
-	td = curthread;
-	error = 0;
-
-	sx_xlock(&khttpd_init_lock);
-
-	if (khttpd_init_current != NULL) {
-		sx_xunlock(&khttpd_init_lock);
-		return (EBUSY);
-	}
-
-	nodes = khttpd_init_nodes;
-	khttpd_init_nodes = NULL;
-	gen = khttpd_init_generation;
-
-	if (nodes == NULL) {
-		i = 0;
-		goto init_end;
-	}
-
-	for (i = 0; error == 0 && nodes[i] != NULL; ++i) {
-		init = nodes[i]->init;
-		if (init->init == NULL)
-			continue;
-		if (!khttpd_init_may_run(init, files, nfiles))
-			continue;
-
-		khttpd_init_current = init;
-		sx_xunlock(&khttpd_init_lock);
-
-		KHTTPD_NOTE("init %p \"%s\" %d", init, init->name,
-		    init->phase);
-		error = init->init();
-		KASSERT(0 <= error && error <= ELAST, ("error %d", error));
-
-		sx_xlock(&khttpd_init_lock);
-	}
-
- init_end:
-	khttpd_init_current = &marker;
-	sx_xunlock(&khttpd_init_lock);
-
-	fn(error);
-
-	sx_xlock(&khttpd_init_lock);
-
-	for (; 0 < i; --i) {
-		init = nodes[i - 1]->init;
-		if (init->fini == NULL)
-			continue;
-		if (!khttpd_init_may_run(init, files, nfiles))
-			continue;
-
-		khttpd_init_current = init;
-		sx_xunlock(&khttpd_init_lock);
-
-		KHTTPD_NOTE("fini %p \"%s\" %d", init, init->name,
-		    init->phase);
-		init->fini();
-
-		sx_xlock(&khttpd_init_lock);
-	}
-
-	khttpd_init_current = NULL;
-	if (gen != khttpd_init_generation)
-		khttpd_free(nodes);
-	else
-		khttpd_init_nodes = nodes;
-	sx_xunlock(&khttpd_init_lock);
-
-	return (0);
-}
+MTX_SYSINIT(khttpd_init_lock, &khttpd_init_lock, "init", MTX_DEF);
 
 static int
 khttpd_compare_init(const void *a1, const void *a2)
@@ -226,9 +107,9 @@ khttpd_init_add_node(struct khttpd_init_node_slist *table, size_t table_size,
 	struct khttpd_init_node *p;
 	uint32_t h;
 
-	h = hash32_str(name, phase) % table_size;
+	h = murmur3_32_hash(name, strlen(name), phase) % table_size;
 	SLIST_FOREACH(p, table + h, link) {
-		if (phase == p->init->phase &&
+		if (phase == p->init->phase && 
 		    strcmp(name, p->init->name) == 0) {
 			log(LOG_ERR, "khttpd: conflict on name '%s' "
 			    "(module1: \"%s\", module2: \"%s\", "
@@ -251,11 +132,13 @@ khttpd_init_find_node(struct khttpd_init_node_slist *table, size_t table_size,
 	struct khttpd_init_node *p;
 	uint32_t h;
 
-	h = hash32_str(name, phase) % table_size;
-	SLIST_FOREACH(p, table + h, link)
+	h = murmur3_32_hash(name, strlen(name), phase) % table_size;
+	SLIST_FOREACH(p, table + h, link) {
 		if (phase == p->init->phase &&
-		    strcmp(name, p->init->name) == 0)
+		    strcmp(name, p->init->name) == 0) {
 			return (p);
+		}
+	}
 
 	return (NULL);
 }
@@ -270,29 +153,37 @@ khttpd_init_order_entries(void)
 	const char **depnamep;
 	int error, i, n, order, total_count;
 
-	KHTTPD_ENTRY("khttpd_init_order_entries()");
+	KHTTPD_ENTRY("%s()", __func__);
+	mtx_assert(&khttpd_init_lock, MA_OWNED);
+	KASSERT(khttpd_init_busy, ("!khttpd_init_busy"));
+
+	mtx_unlock(&khttpd_init_lock);
 
 	node_table = NULL;
 	sorted_nodes = NULL;
 	error = 0;
 
-	sx_assert(&khttpd_init_lock, SA_XLOCKED);
-
 	total_count = 0;
-	LIST_FOREACH(mod, &khttpd_init_files, link)
+	LIST_FOREACH(mod, &khttpd_init_files, link) {
 		total_count += mod->node_count;
+	}
 
 	if (total_count == 0) {
 		khttpd_free(khttpd_init_nodes);
+
+		mtx_lock(&khttpd_init_lock);
 		khttpd_init_nodes = NULL;
 		++khttpd_init_generation;
+		wakeup(&khttpd_init_generation);
+
 		return;
 	}
 
 	node_table = khttpd_malloc(total_count *
 	    sizeof(struct khttpd_init_node_slist));
-	for (i = 0; i < total_count; ++i)
+	for (i = 0; i < total_count; ++i) {
 		SLIST_INIT(node_table + i);
+	}
 
 	LIST_FOREACH(mod, &khttpd_init_files, link) {
 		nodes = mod->nodes;
@@ -302,8 +193,9 @@ khttpd_init_order_entries(void)
 			init = nodes[i].init;
 			if (init->name[0] != '\0' &&
 			    !khttpd_init_add_node(node_table, total_count,
-				init->phase, init->name, &nodes[i]))
+				init->phase, init->name, &nodes[i])) {
 				goto error;
+			}
 		}
 	}
 
@@ -367,23 +259,26 @@ khttpd_init_order_entries(void)
 		    "among the following inits");
 
 		/*
-		 * Note that order and in_degree are the members of the
-		 * same union, and in_degree of each element was 0 when it
-		 * was added to sorted_nodes.
+		 * Note that order and in_degree are the members of the same
+		 * union, and in_degree of each element was 0 when it was added
+		 * to sorted_nodes.
 		 */
-		for (i = 0; i < order; ++i)
+		for (i = 0; i < order; ++i) {
 			sorted_nodes[i]->order = 0;
+		}
 
 		LIST_FOREACH(mod, &khttpd_init_files, link) {
 			nodes = mod->nodes;
 			n = mod->node_count;
-			for (i = 0; i < n; ++i)
-				if (nodes[i].in_degree != 0)
+			for (i = 0; i < n; ++i) {
+				if (nodes[i].in_degree != 0) {
 					log(LOG_ERR, "  (file: \"%s\", "
 					    "name: \"%s\", phase: %d)",
 					    mod->linker_file->pathname,
 					    nodes[i].init->name,
 					    nodes[i].init->phase);
+				}
+			}
 		}
 
 		goto error;
@@ -395,28 +290,36 @@ khttpd_init_order_entries(void)
 	    khttpd_compare_init);
 
 	khttpd_free(khttpd_init_nodes);
+
+	mtx_lock(&khttpd_init_lock);
 	khttpd_init_nodes = sorted_nodes;
 	++khttpd_init_generation;
+	wakeup(&khttpd_init_generation);
 
 	return;
 
  error:
 	khttpd_free(node_table);
 	khttpd_free(sorted_nodes);
+	mtx_lock(&khttpd_init_lock);
 }
 
-int
-khttpd_init_quiesce(void)
+static void
+khttpd_init_wait(void)
 {
-	int error;
 
-	sx_slock(&khttpd_init_lock);
-	error = khttpd_init_current != NULL ? 0 : EBUSY;
-	sx_sunlock(&khttpd_init_lock);
-
-	return (error);
+	KHTTPD_ENTRY("%s()", __func__);
+	while (khttpd_init_busy) {
+		mtx_sleep(&khttpd_init_busy, &khttpd_init_lock, 0,
+		    "initbusy", 0);
+	}
 }
 
+/* 
+ * We need this function to be called by kldload eventhandler because
+ * linker_file_lookup_set() requires kld_sx lock, the lock is static, and, the
+ * eventhandler is called while the lock is held.
+ */
 static void
 khttpd_init_kldload(void *arg, struct linker_file *lf)
 {
@@ -425,14 +328,15 @@ khttpd_init_kldload(void *arg, struct linker_file *lf)
 	struct khttpd_init **begin, **end, **initp;
 	int count, error;
 
-	KHTTPD_ENTRY("khttpd_init_kldload(%p{path=%s})", lf, lf->pathname);
+	KHTTPD_ENTRY("%s(%p{path=%s})", __func__, lf, lf->pathname);
 
 	error = linker_file_lookup_set(lf, "khttpd_init_set", &begin, &end,
 	    &count);
-	if (error != 0)
+	if (error != 0) {
 		return;
+	}
 
-	file = khttpd_malloc(sizeof(*file) +
+	file = khttpd_malloc(sizeof(*file) + 
 	    count * sizeof(struct khttpd_init_node));
 	file->node_count = count;
 	file->linker_file = lf;
@@ -444,14 +348,176 @@ khttpd_init_kldload(void *arg, struct linker_file *lf)
 		++node;
 	}
 
-	sx_xlock(&khttpd_init_lock);
+	mtx_lock(&khttpd_init_lock);
+
+	khttpd_init_wait();
+	khttpd_init_busy = true;
 
 	LIST_INSERT_HEAD(&khttpd_init_files, file, link);
-	wakeup(&khttpd_init_files);
-
 	khttpd_init_order_entries();
 
-	sx_xunlock(&khttpd_init_lock);
+	khttpd_init_busy = false;
+	wakeup(&khttpd_init_busy);
+
+	mtx_unlock(&khttpd_init_lock);
+}
+
+static void
+khttpd_init_sysinit(void *arg)
+{
+
+	KHTTPD_ENTRY("%s()", __func__);
+	khttpd_init_kldload_tag = EVENTHANDLER_REGISTER(kld_load,
+	    khttpd_init_kldload, NULL, 0);
+}
+
+static void
+khttpd_init_sysuninit(void *arg)
+{
+
+	KHTTPD_ENTRY("%s()", __func__);
+	EVENTHANDLER_DEREGISTER(kld_load, khttpd_init_kldload_tag);
+}
+
+SYSINIT(khttpd_init, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_init_sysinit,
+    NULL);
+SYSUNINIT(khttpd_init, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_init_sysuninit,
+    NULL);
+
+static boolean_t
+khttpd_init_may_run(struct khttpd_init *init, const char **files, int nfiles)
+{
+	size_t iflen, flen;
+	int i;
+
+	KHTTPD_ENTRY("%s(%p(%s),%p,%d)", __func__, init, init->file, files,
+	    nfiles);
+
+	if (files == NULL) {
+		return (TRUE);
+	}
+
+	iflen = strlen(init->file);
+	for (i = 0; i < nfiles; ++i) {
+		flen = strlen(files[i]);
+		if (flen <= iflen &&
+		    memcmp(init->file + iflen - flen, files, flen) == 0) {
+			return (TRUE);
+		}
+	}
+
+	return (FALSE);
+}
+
+int
+khttpd_init_get_phase(void)
+{
+	int phase;
+
+	mtx_lock(&khttpd_init_lock);
+	phase = khttpd_init_current == NULL ? INT_MIN :
+	    khttpd_init_current->phase;
+	mtx_unlock(&khttpd_init_lock);
+
+	return (phase);
+}
+
+int
+khttpd_init_quiesce(void)
+{
+	int error;
+
+	mtx_lock(&khttpd_init_lock);
+	error = khttpd_init_current != NULL ? 0 : EBUSY;
+	mtx_unlock(&khttpd_init_lock);
+
+	return (error);
+}
+
+int
+khttpd_init_run_focusing(void (*fn)(int), const char **files, int nfiles)
+{
+	static struct khttpd_init marker = {
+		.name = "<ready>",
+		.phase = INT_MAX
+	};
+	struct thread *td;
+	struct khttpd_init *init;
+	struct khttpd_init_node **nodes;
+	int error, gen, i;
+
+	KHTTPD_ENTRY("%s(%p,%p,%d)", __func__, fn, files, nfiles);
+
+	td = curthread;
+	error = 0;
+
+	mtx_lock(&khttpd_init_lock);
+
+	if (khttpd_init_current != NULL) {
+		mtx_unlock(&khttpd_init_lock);
+		return (EBUSY);
+	}
+
+	nodes = khttpd_init_nodes;
+	khttpd_init_nodes = NULL;
+	gen = khttpd_init_generation;
+
+	if (nodes == NULL) {
+		i = 0;
+		goto init_end;
+	}
+
+	for (i = 0; error == 0 && nodes[i] != NULL; ++i) {
+		init = nodes[i]->init;
+		if (init->init == NULL ||
+		    !khttpd_init_may_run(init, files, nfiles)) {
+			continue;
+		}
+
+		khttpd_init_current = init;
+		mtx_unlock(&khttpd_init_lock);
+
+		KHTTPD_NOTE("init %p \"%s\" %d", init, init->name, init->phase);
+		error = init->init();
+		KASSERT(0 <= error && error <= ELAST, ("error %d", error));
+
+		mtx_lock(&khttpd_init_lock);
+	}
+
+ init_end:
+	khttpd_init_current = &marker;
+	mtx_unlock(&khttpd_init_lock);
+
+	fn(error);
+
+	mtx_lock(&khttpd_init_lock);
+
+	for (; 0 < i; --i) {
+		init = nodes[i - 1]->init;
+		if (init->fini == NULL ||
+		    !khttpd_init_may_run(init, files, nfiles)) {
+			continue;
+		}
+
+		khttpd_init_current = init;
+		mtx_unlock(&khttpd_init_lock);
+
+		KHTTPD_NOTE("fini %p \"%s\" %d", init, init->name, init->phase);
+		init->fini();
+
+		mtx_lock(&khttpd_init_lock);
+	}
+
+	khttpd_init_current = NULL;
+	if (gen == khttpd_init_generation) {
+		khttpd_init_nodes = nodes;
+		nodes = NULL;
+	}
+	mtx_unlock(&khttpd_init_lock);
+
+	khttpd_free(nodes);
+
+	return (0);
 }
 
 void
@@ -460,15 +526,18 @@ khttpd_init_unload(struct module *mod)
 	struct khttpd_init_file *ptr, *tptr;
 	struct linker_file *lf;
 
-	KHTTPD_ENTRY("khttpd_init_unload(%p)", mod);
+	KHTTPD_ENTRY("%s(%p)", __func__, mod);
 
 	lf = module_file(mod);
-	sx_xlock(&khttpd_init_lock);
+	mtx_lock(&khttpd_init_lock);
+
+	khttpd_init_wait();
+	khttpd_init_busy = true;
 
 	while (khttpd_init_current != NULL) {
-		sx_xunlock(&khttpd_init_lock);
+		mtx_unlock(&khttpd_init_lock);
 		EVENTHANDLER_INVOKE(khttpd_init_shutdown);
-		sx_xlock(&khttpd_init_lock);
+		mtx_lock(&khttpd_init_lock);
 	}
 
 	LIST_FOREACH_SAFE(ptr, &khttpd_init_files, link, tptr)
@@ -478,7 +547,10 @@ khttpd_init_unload(struct module *mod)
 			break;
 		}
 
-	sx_xunlock(&khttpd_init_lock);
+	khttpd_init_busy = false;
+	wakeup(&khttpd_init_busy);
+
+	mtx_unlock(&khttpd_init_lock);
 
 	khttpd_free(ptr);
 }
@@ -489,47 +561,22 @@ khttpd_init_wait_load_completion(struct module *mod)
 	struct linker_file *lf;
 	struct khttpd_init_file *ptr;
 
-	KHTTPD_ENTRY("khttpd_init_wait_load_completion(%p)", mod);
+	KHTTPD_ENTRY("%s(%p)", __func__, mod);
 
 	lf = module_file(mod);
 
-	sx_slock(&khttpd_init_lock);
-
+	mtx_lock(&khttpd_init_lock);
 	for (;;) {
-		LIST_FOREACH(ptr, &khttpd_init_files, link)
-			if (ptr->linker_file == lf)
-				break;
+		khttpd_init_wait();
 
-		if (ptr != NULL)
-			break;
+		LIST_FOREACH(ptr, &khttpd_init_files, link) {
+			if (ptr->linker_file == lf) {
+				mtx_unlock(&khttpd_init_lock);
+				return;
+			}
+		}
 
-		sx_sleep(&khttpd_init_files, &khttpd_init_lock, 0, 
-		    "initload", 0);
+		mtx_sleep(&khttpd_init_generation, &khttpd_init_lock, 0,
+		    "initwait", 0);
 	}
-
-	sx_sunlock(&khttpd_init_lock);
 }
-
-static void
-khttpd_init_sysinit(void *arg)
-{
-
-	KHTTPD_ENTRY("khttpd_init_sysinit");
-	khttpd_init_kldload_tag = EVENTHANDLER_REGISTER(kld_load,
-	    khttpd_init_kldload, NULL, 0);
-}
-
-static void
-khttpd_init_sysuninit(void *arg)
-{
-
-	KHTTPD_ENTRY("khttpd_init_sysuninit");
-	EVENTHANDLER_DEREGISTER(kld_load, khttpd_init_kldload_tag);
-	sx_xlock(&khttpd_init_lock);
-	sx_xunlock(&khttpd_init_lock);
-}
-
-SYSINIT(khttpd_init, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_init_sysinit,
-    NULL);
-SYSUNINIT(khttpd_init, SI_SUB_CONFIGURE, SI_ORDER_ANY, khttpd_init_sysuninit,
-    NULL);

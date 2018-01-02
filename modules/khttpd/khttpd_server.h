@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -45,16 +45,19 @@ struct khttpd_server;
 struct mbuf;
 struct sbuf;
 
-typedef void (*khttpd_method_fn_t)(struct khttpd_exchange *);
 typedef void (*khttpd_location_fn_t)(struct khttpd_location *);
-typedef boolean_t (*khttpd_location_set_error_response_fn_t)
+typedef bool (*khttpd_location_set_error_response_fn_t)
     (struct khttpd_exchange *, int, struct khttpd_mbuf_json *);
-typedef boolean_t (*khttpd_filter_fn_t)(struct khttpd_location *, const char *);
+typedef bool (*khttpd_filter_fn_t)(struct khttpd_location *,
+    struct khttpd_exchange *, const char *, struct sbuf *);
+typedef void (*khttpd_options_fn_t)(struct khttpd_exchange *, struct sbuf *);
+typedef void (*khttpd_method_fn_t)(struct khttpd_exchange *);
 
 struct khttpd_location_ops {
 	khttpd_location_fn_t dtor;
 	khttpd_location_set_error_response_fn_t set_error_response;
 	khttpd_filter_fn_t filter;
+	khttpd_options_fn_t options;
 	khttpd_method_fn_t method[KHTTPD_METHOD_END];
 	khttpd_method_fn_t catch_all;
 };
@@ -67,26 +70,20 @@ KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_location, khttpd_location);
 struct khttpd_location *khttpd_location_new(int *error_out, 
     struct khttpd_server *server, const char *path,
     struct khttpd_location_ops *ops, void *data);
-struct khttpd_location_ops *khttpd_location_get_ops
-    (struct khttpd_location *location);
 void *khttpd_location_data(struct khttpd_location *location);
 void *khttpd_location_set_data(struct khttpd_location *location, void *data);
-const char *khttpd_location_get_path(struct khttpd_location *location);
-struct khttpd_server * khttpd_location_get_server
-    (struct khttpd_location *);
-void khttpd_location_get_options(struct khttpd_location *,
-    struct sbuf *output);
+struct khttpd_location_ops *khttpd_location_get_ops(struct khttpd_location *);
+const char *khttpd_location_get_path(struct khttpd_location *);
+struct khttpd_server * khttpd_location_get_server(struct khttpd_location *);
 
 KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_server, khttpd_server);
 
 struct khttpd_server *khttpd_server_new(int *error_out);
-struct khttpd_location *khttpd_server_find_location
-    (struct khttpd_server *server,
-     const char *begin, const char *end, const char **suffix_out);
-struct khttpd_location *khttpd_server_first_location
-    (struct khttpd_server *server);
-struct khttpd_location *khttpd_server_next_location
-    (struct khttpd_server *server, struct khttpd_location *);
+struct khttpd_location *khttpd_server_route(struct khttpd_server *,
+    struct sbuf *, struct khttpd_exchange *, const char **, struct sbuf *);
+struct khttpd_location *khttpd_server_first_location(struct khttpd_server *);
+struct khttpd_location *khttpd_server_next_location(struct khttpd_server *,
+    struct khttpd_location *);
 
 int khttpd_server_check_invariants(struct khttpd_server *server);
 

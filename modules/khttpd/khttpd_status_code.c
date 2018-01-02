@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,29 +25,11 @@
  * DAMAGE.
  */
 
-#pragma once
+#include "khttpd_status_code.h"
 
-#ifdef _KERNEL
-
-#include <sys/types.h>
-#include <sys/eventhandler.h>
-
-struct cdev;
-struct thread;
-
-struct khttpd_main_command {
-	void	(*handler)(void *);
-	int	error;
-};
-
-typedef int (*khttpd_main_ioctl_fn_t)(struct cdev *, u_long, caddr_t, int,
-    struct thread *);
-typedef void (*khttpd_main_shutdown_fn_t)(void *);
-
-void khttpd_main_call(struct khttpd_main_command *);
-int khttpd_main_register_ioctl(u_long, khttpd_main_ioctl_fn_t);
-void khttpd_main_deregister_ioctl(u_long);
-
-EVENTHANDLER_DECLARE(khttpd_main_shutdown, khttpd_main_shutdown_fn_t);
-
-#endif	/* _KERNEL */
+const char *
+khttpd_status_default_reason(int status)
+{
+	
+	return ("N/A");
+}

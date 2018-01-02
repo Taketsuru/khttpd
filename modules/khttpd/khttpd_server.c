@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -231,7 +231,7 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	struct khttpd_prefix *prefix, *parent, *ptr;
 	char *lbegin, *lend;
 	size_t len;
-	boolean_t need_not_append_slash, found_exact_match;
+	bool need_not_append_slash, found_exact_match;
 
 	KHTTPD_ENTRY("%s(%p,%s,%p,%p)", __func__, server,
 	    khttpd_ktr_printf("\"%s\"", path), ops, data);
@@ -247,7 +247,7 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	loc->prefix = NULL;
 	loc->ops = ops;
 	loc->data = data;
-	loc->costructs_ready = FALSE;
+	loc->costructs_ready = false;
 	KHTTPD_REFCOUNT1_INIT(khttpd_location, loc);
 
 	if ((*error_out = khttpd_costruct_call_ctors
@@ -256,7 +256,7 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 		return (NULL);
 	}
 
-	loc->costructs_ready = TRUE;
+	loc->costructs_ready = true;
 
 	/* Allocate a prefix */
 
@@ -276,8 +276,9 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 
 	rw_wlock(&server->lock);
 
-	found_exact_match = FALSE;
+	found_exact_match = false;
 	parent = &server->root;
+	KHTTPD_TR("&server->root %p", parent);
 	for (;;) {
 		/*
 		 * Find the location that might be the previous element in the
@@ -299,8 +300,7 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 
 		} else {
 			/* Found a prefix with an identical path. */
-			loc->prefix = parent;
-			found_exact_match = TRUE;
+			found_exact_match = true;
 			break;
 		}
 
@@ -338,13 +338,14 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 
 	if (found_exact_match) {
 		TAILQ_INSERT_TAIL(&parent->location_tailq, loc, link);
-		loc->prefix = parent;
+		loc->prefix = ptr;
 
 	} else {
 		RB_INIT(&prefix->children_tree);
 		TAILQ_INIT(&prefix->children_tailq);
 		TAILQ_INIT(&prefix->location_tailq);
 		prefix->server = server;
+		KHTTPD_TR("prefix %p, parent %p", prefix, parent);
 		prefix->parent = parent;
 		loc->prefix = prefix;
 
@@ -371,32 +372,13 @@ khttpd_location_new(int *error_out, struct khttpd_server *server,
 	return (loc);
 }
 
-void
-khttpd_location_get_options(struct khttpd_location *location,
-    struct sbuf *output)
-{
-	struct khttpd_location_ops *ops;
-	int i;
-
-	ops = khttpd_location_get_ops(location);
-
-	sbuf_cpy(output, "OPTIONS");
-
-	for (i = 0; i < KHTTPD_METHOD_END; ++i)
-		if (i != KHTTPD_METHOD_OPTIONS && ops->method[i] != NULL)
-			sbuf_printf(output, ", %s", khttpd_method_name(i));
-
-	if (ops->method[KHTTPD_METHOD_HEAD] == NULL &&
-	    ops->method[KHTTPD_METHOD_GET] != NULL)
-		sbuf_cat(output, ", HEAD");
-}
-
 static void
 khttpd_server_dtor(struct khttpd_server *server)
 {
 
 	if (server->costructs_ready)
-		khttpd_costruct_call_dtors(khttpd_server_costruct_info, server);
+		khttpd_costruct_call_dtors(khttpd_server_costruct_info,
+		    server);
 	rw_destroy(&server->lock);
 }
 
@@ -413,7 +395,7 @@ khttpd_server_new(int *error_out)
 	RB_INIT(&server->root.children_tree);
 	TAILQ_INIT(&server->root.children_tailq);
 	TAILQ_INIT(&server->root.location_tailq);
-	server->costructs_ready = FALSE;
+	server->costructs_ready = false;
 	server->root.server = server;
 	server->root.parent = NULL;
 	server->root.key = "";
@@ -427,7 +409,7 @@ khttpd_server_new(int *error_out)
 		return (NULL);
 	}
 
-	server->costructs_ready = TRUE;
+	server->costructs_ready = true;
 
 	return (server);
 }
@@ -474,17 +456,21 @@ khttpd_server_adopt_successors(struct khttpd_prefix *parent,
  */
 
 struct khttpd_location *
-khttpd_server_find_location(struct khttpd_server *server,
-    const char *begin, const char *end, const char **suffix_out)
+khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
+    struct khttpd_exchange *exchange, const char **suffix_out,
+    struct sbuf *translated_path)
 {
 	struct khttpd_prefix key;
 	struct khttpd_prefix *ptr, *prev, *parent, *root;
 	struct khttpd_location *loc, *lastloc;
-	const char *cp;
+	const char *cp, *end;
 
-	KHTTPD_ENTRY("%s(%p,\"%s\")", __func__, server,
-	    khttpd_ktr_printf("%*s", (int)(end - begin), begin));
-	cp = begin;
+	KHTTPD_ENTRY("%s(%p,%s,%p)", __func__, server,
+	    khttpd_ktr_printf("\"%*.s\"",
+		(int)sbuf_len(target), sbuf_data(target)),
+	    exchange);
+	cp = sbuf_data(target);
+	end = cp + sbuf_len(target);
 
 	rw_rlock(&server->lock);
 
@@ -547,8 +533,10 @@ khttpd_server_find_location(struct khttpd_server *server,
 			lastloc = NULL;
 
 			if (loc->ops->filter == NULL ||
-			    loc->ops->filter(loc, cp)) {
-				*suffix_out = cp;
+			    loc->ops->filter(loc, exchange, cp,
+				translated_path)) {
+				if (suffix_out != NULL)
+					*suffix_out = cp;
 				return (loc);
 			}
 
@@ -662,7 +650,7 @@ khttpd_server_register_costructs(void)
 {
 
 	KHTTPD_ENTRY("khttpd_server_register_costructs()");
-	/* +1 is necessary for server.prefix[0].  */
+	/* +1 is necessary for server.prefix.path[0].  */
 	khttpd_costruct_info_new(&khttpd_server_costruct_info,
 	    sizeof(struct khttpd_server) + 1);
 	khttpd_costruct_info_new(&khttpd_location_costruct_info, 
@@ -770,7 +758,8 @@ khttpd_prefix_check_invariants(struct khttpd_prefix *prefix,
 			log(LOG_ERR, "khttpd: children list is not ordered. "
 			    "(file: \"%s\", line: %u, prefix: \"%s\", "
 			    "child: \"%s\", next: \"%s\")",
-			    __FILE__, __LINE__, path, locp1->path, locp2->path);
+			    __FILE__, __LINE__, path,
+			    locp1->path, locp2->path);
 			return (EDOOFUS);
 		}
 	}

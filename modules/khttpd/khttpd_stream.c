@@ -27,6 +27,99 @@
 
 #include "khttpd_stream.h"
 
+#include <sys/param.h>
+#include <sys/mbuf.h>
+
+#include "khttpd_ktr.h"
+#include "khttpd_mbuf.h"
+#include "khttpd_string.h"
+
+/*
+ * PARAMETERS
+ *
+ * RETURN VALUES
+ *
+ * If successful, khttpd_stream_read_line() returns 0.  It returns one of the
+ * following values on failure.
+ *   
+ * [EWOULDBLOCK]	More bytes are necessary.
+ * 
+ * [ENOMSG]		Reaches the end of the stream before it finds a CRLF.
+ *
+ * [ENOBUFS]		Have read more than *limit bytes.
+ *
+ * Others		Any other return values from soreceive().
+ *
+ * USAGE
+ *
+ *     struct khttpd_mbuf_pos bol, eol;
+ *
+ *     khttpd_mbuf_pos_init(&bol, <beginning of the line>);
+ *     eol = bol;
+ *     for (;;) {
+ *         error = khttpd_stream_read_until(stream, '\n', limit, &eol);
+ *         if (error != EWOULDBLOCK)
+ *		break;
+ *         ...wait until data become available...
+ *     }
+ */
+int
+khttpd_stream_receive_until(struct khttpd_stream *stream, int ch,
+    ssize_t *limit, struct khttpd_mbuf_pos *endpos)
+{
+	char *begin, *cp;
+	struct mbuf *ptr, *m;
+	int32_t off;
+	u_int len;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p,%#zd,,)", __func__, stream, *limit);
+
+	if (endpos->unget == ch) {
+		endpos->unget = -1;
+		return (0);
+	}
+
+	ptr = endpos->ptr;
+	off = endpos->off;
+
+	for (;;) {
+		/* Find the first ch in the mbuf pointed by ptr. */
+		begin = mtod(ptr, char *);
+		len = ptr->m_len;
+		cp = memchr(begin + off, ch, len);
+		if (cp != NULL) {
+			endpos->ptr = ptr;
+			endpos->off = cp - begin + 1;
+			return (0);
+		}
+
+		if (ptr->m_next != NULL) {
+			/* Advance to the next mbuf */
+			ptr = ptr->m_next;
+			off = 0;
+
+		} else {
+			/*
+			 * No '\n' found.  Receive further if we reached the
+			 * end of the chain.
+			 */
+
+			error = *limit == 0 ? ENOMSG :
+			    khttpd_stream_receive(stream, limit, &m);
+
+			if (error != 0) {
+				endpos->ptr = ptr;
+				endpos->off = off;
+				return (error);
+			}
+
+			ptr = ptr->m_next = m;
+			off = 0;
+		}
+	}
+}
+
 extern int
 khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid, 
     struct mbuf **m_out);
@@ -35,9 +128,9 @@ extern void
 khttpd_stream_continue_receiving(struct khttpd_stream *stream);
 
 extern void
-khttpd_stream_shutdown_receiver(struct khttpd_stream *stream);
+khttpd_stream_reset(struct khttpd_stream *stream);
 
-extern boolean_t
+extern bool
 khttpd_stream_send(struct khttpd_stream *stream, struct mbuf *m, int flags);
 
 extern void
@@ -47,8 +140,8 @@ extern void
 khttpd_stream_destroy(struct khttpd_stream *stream);
 
 extern void
-khttpd_stream_send_bufstat(struct khttpd_stream *stream, size_t *, size_t *,
-    size_t *);
+khttpd_stream_send_bufstat(struct khttpd_stream *stream, u_int *, int *, 
+    long *);
 
 extern void
 khttpd_stream_data_is_available(struct khttpd_stream *stream);

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -32,30 +32,54 @@
 #endif
 
 #include <sys/types.h>
-#include <machine/stdarg.h>
-#include <netinet/in.h>
+#include <sys/sbuf.h>
 
-struct sbuf;
+struct mbuf;
 
-struct khttpd_json;
-struct khttpd_mbuf_json;
-struct khttpd_problem_property;
+enum {
+	KHTTPD_FIELD_UNKNOWN = -1,
 
-int khttpd_webapi_get_string_property(const char **str_out, const char *name,
-    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output, boolean_t may_not_exist);
-int khttpd_webapi_get_integer_property(int64_t *value_out, const char *name,
-    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output, boolean_t may_not_exist);
-int khttpd_webapi_get_object_property(struct khttpd_json **value_out,
-    const char *name, 
-    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output, boolean_t may_not_exist);
-int khttpd_webapi_get_array_property(struct khttpd_json **value_out,
-    const char *name, 
-    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output, boolean_t may_not_exist);
-int khttpd_webapi_get_sockaddr_property(struct sockaddr *addr, socklen_t len,
-    const char *name,
-    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input,
-    struct khttpd_mbuf_json *output, boolean_t may_not_exist);
+	KHTTPD_FIELD_CONTENT_LENGTH,
+	KHTTPD_FIELD_TRANSFER_ENCODING,
+	KHTTPD_FIELD_CONNECTION,
+	KHTTPD_FIELD_EXPECT,
+	KHTTPD_FIELD_HOST,
+
+	KHTTPD_FIELD_CONTENT_TYPE,
+	KHTTPD_FIELD_LOCATION,
+	KHTTPD_FIELD_STATUS,
+
+	KHTTPD_FIELD_END
+};
+
+enum {
+	KHTTPD_FIELD_ERROR_LONG_LINE,
+	KHTTPD_FIELD_ERROR_FOLD_LINE,
+	KHTTPD_FIELD_ERROR_NO_SEPARATOR,
+	KHTTPD_FIELD_ERROR_NO_NAME,
+	KHTTPD_FIELD_ERROR_WS_FOLLOWING_NAME,
+};
+
+struct khttpd_field_parser {
+	struct sbuf	line;
+	struct mbuf    *ptr;
+	struct mbuf    *tail;
+	u_int		off;
+	u_int		maxlen;
+	bool		consume;
+	char		buf[512];
+};
+
+int	khttpd_field_find(const char *, const char *);
+int	khttpd_field_maxlen(void);
+const char *
+	khttpd_field_name(int);
+int	khttpd_field_parse(struct khttpd_field_parser *_parser, void *_arg,
+	    int (*_found_fn)(void *_arg, int _field, const char *_name,
+		const char *_value),
+	    int (*_error_fn)(void *_arg, int _reason, const char *_line));
+void	khttpd_field_parse_add_data(struct khttpd_field_parser *_parser,
+	    struct mbuf *_data);
+void	khttpd_field_parse_destroy(struct khttpd_field_parser *_parser);
+void	khttpd_field_parse_init(struct khttpd_field_parser *_parser,
+	    u_int _maxlen, bool _consume, struct mbuf *_data, u_int off);

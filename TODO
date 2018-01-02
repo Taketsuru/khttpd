@@ -1,31 +1,26 @@
-- FastCGI
+- New functional testing framework
+  - Goodbye jasmine and Node.js, welcome back Tcl!
 
 - Last-Modified: and ETag:
 
-- Add support for basic authentication
+- Content caching.
 
-- Access control infrastructure
+- FastCGI timeout/redirect
 
 - TLS
 
 - Optimize file/cache serving performance
 
+- Access control infrastructure
+
 - Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
 
 - Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
 
-- struct khttpd_exchange_ops::end should be renamed.  'end' is not the end of
-  the exchange, but the request.  This is difficult to know from the name.
-
 - Currently, khttpd_file_get_exchange_get() limits io_size to MAXPHYS.
   See whether this is necessary or not.
 
-- Optimize the setting of SO_SNDLOWAT value.
-
-- More scalable object lifecycle management than reference counting.
-
-- See whether running jobs of khttpd_file on the same CPU as the caller of
-  khttpd_file_get performs better than random CPU assignment.
+- bug: FastCGI reconfiguration (PUT to fastcgi location resource) crashes the kernel.
 
 - the kernel should restrict the time waiting the client to close the
   connection after it sends a response with 'Connection: close' (nginx's

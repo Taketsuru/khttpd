@@ -125,6 +125,8 @@ khttpd_main_command_loop(int error)
 	}
 
 	mtx_unlock(&khttpd_main_lock);
+
+	EVENTHANDLER_INVOKE(khttpd_main_shutdown);
 }
 
 static void

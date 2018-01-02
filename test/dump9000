@@ -1,0 +1,2 @@
+#!/bin/sh
+sudo tcpdump -n -X -i vtnet1 port 9000

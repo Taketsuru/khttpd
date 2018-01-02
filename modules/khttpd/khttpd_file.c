@@ -117,7 +117,7 @@ struct khttpd_file_get_exchange_data {
 
 static void khttpd_file_get_exchange_dtor(struct khttpd_exchange *, void *);
 static int khttpd_file_get_exchange_get(struct khttpd_exchange *, void *,
-    ssize_t, struct mbuf **, boolean_t *);
+    ssize_t, struct mbuf **);
 static void khttpd_file_get(struct khttpd_exchange *);
 static void khttpd_file_location_dtor(struct khttpd_location *);
 static void khttpd_file_read_file(void *);
@@ -542,7 +542,7 @@ khttpd_file_read_file(void *arg)
 
 static int
 khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
-    ssize_t space, struct mbuf **data_out, boolean_t *pause)
+    ssize_t space, struct mbuf **data_out)
 {
 	struct khttpd_mbuf_json logent;
 	struct khttpd_file_get_exchange_data *data;
@@ -560,8 +560,10 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 	data = arg;
 	td = curthread;
 
-	if (data->xmit_residual == 0)
-		return (ENOMSG);
+	if (data->xmit_residual == 0) {
+		*data_out = NULL;
+		return (0);
+	}
 
 	mtx_lock(&data->lock);
 
@@ -575,10 +577,7 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		 * function completes because khttpd_event guarantees that the
 		 * execution of the handler of an event is serialized.
 		 */
-		*pause = TRUE;
-		*data_out = NULL;
-
-		return (0);
+		return (EWOULDBLOCK);
 	}
 
 	mtx_unlock(&data->lock);

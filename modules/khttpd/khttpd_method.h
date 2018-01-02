@@ -27,6 +27,10 @@
 
 #pragma once
 
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
+
 enum {
 	KHTTPD_METHOD_UNKNOWN = -1,
 
@@ -73,9 +77,5 @@ enum {
 	KHTTPD_METHOD_END
 };
 
-#ifdef _KERNEL
-
 int khttpd_method_find(const char *begin, const char *end);
 const char *khttpd_method_name(int method);
-
-#endif	/* ifdef _KERNEL */

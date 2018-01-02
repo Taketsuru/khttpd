@@ -1,0 +1,2 @@
+#!/bin/sh
+http_proxy= curl --trace-ascii - http://192.168.56.3:8080/test.php

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,40 +27,51 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/param.h>
-#include <sys/lock.h>
-#include <sys/sx.h>
 #include <sys/socket.h>
-#include <machine/stdarg.h>
 
-#include "khttpd_event.h"
 #include "khttpd_refcount.h"
 
 struct mbuf;
+struct khttpd_costruct_info;
 struct khttpd_port;
 struct khttpd_socket;
 struct khttpd_stream;
 struct khttpd_stream_down_ops;
+
+typedef void (*khttpd_port_accept_fn_t)(struct khttpd_port *);
 
 extern struct khttpd_stream_down_ops khttpd_socket_ops;
 extern struct khttpd_costruct_info *khttpd_port_costruct_info;
 
 KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_port, khttpd_port);
 
-int khttpd_port_new(struct khttpd_port **port_out);
-int khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
-    khttpd_event_fn_t accept_handler, const char **detail_out);
-void khttpd_port_stop(struct khttpd_port *port);
-void khttpd_port_shutdown(struct khttpd_port *port);
-int khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket);
-
-struct khttpd_socket *khttpd_socket_new(struct khttpd_stream *);
-int khttpd_socket_connect(struct khttpd_socket *, struct sockaddr *,
-    struct sockaddr *);
-
-const struct sockaddr *khttpd_socket_peer_address
-    (struct khttpd_socket *socket);
-
-#endif	/* _KERNEL */
+int	khttpd_port_accept(struct khttpd_port *_port,
+	    struct khttpd_socket *socket);
+const struct sockaddr *
+	khttpd_port_address(struct khttpd_port *_port);
+int	khttpd_port_new(struct khttpd_port **_port_out);
+void	khttpd_port_reset(struct khttpd_port *_port);
+int	khttpd_port_start(struct khttpd_port *_port, struct sockaddr *_addr,
+	    khttpd_port_accept_fn_t _accept_fn, const char **_detail_out);
+void	khttpd_port_stop(struct khttpd_port *_port);
+int	khttpd_socket_connect(struct khttpd_socket *_sock,
+	    struct sockaddr *_peeraddr, struct sockaddr *_bindaddr);
+int	khttpd_socket_error(struct khttpd_socket *_sock);
+const struct sockaddr *
+	khttpd_socket_name(struct khttpd_socket *_sock);
+struct khttpd_socket *
+	khttpd_socket_new(struct khttpd_stream *_stream);
+const struct sockaddr *
+	khttpd_socket_peer_address(struct khttpd_socket *_sock);
+bool	khttpd_socket_on_worker_thread(struct khttpd_socket *_socket);
+struct khttpd_port *
+	khttpd_socket_port(struct khttpd_socket *_sock);
+void	khttpd_socket_run_later(struct khttpd_socket *_sock,
+	    void (*_fn)(void *), void *_arg);
+int	khttpd_socket_set_affinity(struct khttpd_socket *_target,
+	    struct khttpd_socket *_source, void (*_notify)(void *), void *_arg);

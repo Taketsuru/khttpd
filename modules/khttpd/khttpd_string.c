@@ -124,6 +124,47 @@ khttpd_hash32_str_ci(const char *str, uint32_t hash)
 }
 
 int
+khttpd_parse_digits_field(const char *begin, const char *end,
+    uintmax_t *value_out)
+{
+	uintmax_t value, digit;
+	const char *digits_begin, *cp;
+	int ch;
+
+	cp = begin;
+	while (cp < end && ((ch = *cp++) == ' ' || ch == '\t'))
+		; /* nothing */
+	--cp;
+
+	digits_begin = cp;
+	value = 0;
+	while (cp < end) {
+		ch = *cp++;
+		if (!isdigit(ch))
+			break;
+		digit = ch - '0';
+		if (value * 10 + digit < value)
+			return (ERANGE);
+		value = value * 10 + digit;
+	}
+
+	if (cp == digits_begin + 1)
+		return (ENOENT);
+
+	while (cp < end && ((ch = *cp++) == ' ' || ch == '\t'))
+		; /* nothing */
+
+	if (ch == '\r')
+		ch = *cp++;
+	if (ch != '\n')
+		return (EINVAL);
+
+	*value_out = value;
+
+	return (0);
+}
+
+int
 khttpd_parse_ip_addresss(uint32_t *out, const char *value)
 {
 	uint32_t result;

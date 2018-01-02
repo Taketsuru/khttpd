@@ -1,0 +1,7 @@
+#!/bin/sh
+
+if kldstat -q -m khttpd.ko; then
+   kldunload khttpd.ko
+fi
+kldload modules/khttpd/khttpd.ko
+usr.sbin/khttpdctl/khttpdctl load test/khttpd.conf

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -56,7 +56,7 @@ void khttpd_obj_type_get_id(struct khttpd_obj_type *type,
 int khttpd_obj_type_get_obj_from_property(struct khttpd_obj_type *type,
     void **obj_out, const char *name, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec,
-    struct khttpd_json *input, boolean_t may_not_exist);
+    struct khttpd_json *input, bool may_not_exist);
 
 typedef int (*khttpd_ctrl_location_create_fn_t)
     (struct khttpd_location **location_out, struct khttpd_server *server,

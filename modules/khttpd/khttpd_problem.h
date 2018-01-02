@@ -60,6 +60,8 @@ void khttpd_problem_set_property(struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *property);
 void khttpd_problem_set_detail(struct khttpd_mbuf_json *output,
     const char *fmt, ...);
+void khttpd_problem_set_vdetail(struct khttpd_mbuf_json *_output,
+    const char *_fmt, va_list _va);
 void khttpd_problem_set_errno(struct khttpd_mbuf_json *output,
     int error);
 void khttpd_problem_no_value_response_begin(struct khttpd_mbuf_json *);

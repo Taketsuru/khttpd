@@ -232,8 +232,29 @@ static struct khttpd_problem_known_code khttpd_problem_known_codes[] = {
 	},
 };
 
+#define KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,f) \
+	(x) <= 1ul << (f) ? 1ul << (f) :
+#define KHTTPD_PROBLEM_POW2_CEIL(x) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,1) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,2) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,3) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,4) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,5) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,6) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,7) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,8) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,9) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,10) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,11) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,12) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,13) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,14) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,15) \
+	KHTTPD_PROBLEM_POW2_CEIL_HELPER(x,16) \
+	1ul << 17
+
 #define KHTTPD_PROBLEM_CODE_HASH_TABLE_SIZE \
-	(KHTTPD_STRTAB_POW2_CEIL(nitems(khttpd_problem_known_codes)))
+	(KHTTPD_PROBLEM_POW2_CEIL(nitems(khttpd_problem_known_codes)))
 
 static struct khttpd_problem_known_code_slist 
     khttpd_problem_code_table[KHTTPD_PROBLEM_CODE_HASH_TABLE_SIZE];
@@ -271,19 +292,12 @@ khttpd_problem_init(void *arg)
 SYSINIT(khttpd_problem_init, SI_SUB_TUNABLES, SI_ORDER_FIRST,
     khttpd_problem_init, NULL);
 
-void
-khttpd_problem_property_specifier_to_string(struct sbuf *output,
-    struct khttpd_problem_property *prop_spec)
+static struct khttpd_problem_property *
+khttpd_problem_reverse_prop_chain(struct khttpd_problem_property *prop_spec)
 {
-	struct khttpd_problem_property *ptr, *top, *next, *prev;
+	struct khttpd_problem_property *ptr, *next, *prev;
 
-	if (prop_spec == NULL)
-		return;
-
-	ptr = top = prop_spec;
-
-	/* reverse the chain */
-
+	ptr = prop_spec;
 	prev = NULL;
 	while (ptr != NULL) {
 		next = ptr->link;
@@ -292,20 +306,26 @@ khttpd_problem_property_specifier_to_string(struct sbuf *output,
 		ptr = next;
 	}
 
-	/*
-	 * Put the name of each prop_spec and reverse the chain simultaneously.
-	 */
+	return (prev);
+}
 
-	ptr = prev;
-	prev = NULL;
-	while (ptr != NULL) {
-		next = ptr->link;
-		ptr->link = prev;
-		if (prev != NULL && ptr->name[0] != '[')
+void
+khttpd_problem_property_specifier_to_string(struct sbuf *output,
+    struct khttpd_problem_property *prop_spec)
+{
+	struct khttpd_problem_property *ptr, *bottom;
+
+	if (prop_spec == NULL)
+		return;
+
+	for (ptr = bottom = khttpd_problem_reverse_prop_chain(prop_spec);
+	     ptr != NULL; ptr = ptr->link) {
+		if (ptr->name[0] != '[' && ptr != bottom)
 			sbuf_putc(output, '.');
 		sbuf_cat(output, ptr->name);
-		ptr = next;
 	}
+
+	khttpd_problem_reverse_prop_chain(bottom);
 }
 
 #ifdef KHTTPD_KTR_LOGGING
@@ -313,7 +333,7 @@ khttpd_problem_property_specifier_to_string(struct sbuf *output,
 const char *
 khttpd_problem_ktr_print_property(struct khttpd_problem_property *prop_spec)
 {
-	struct khttpd_problem_property *ptr, *top, *next, *prev;
+	struct khttpd_problem_property *ptr, *bottom;
 	char *buf, *cp, *end;
 	size_t len;
 	int bufsiz;
@@ -325,43 +345,20 @@ khttpd_problem_ktr_print_property(struct khttpd_problem_property *prop_spec)
 	if (buf == NULL)
 		return ("<buffer full>");
 
-	ptr = top = prop_spec;
-
-	/* reverse the chain */
-
-	prev = NULL;
-	while (ptr != NULL) {
-		next = ptr->link;
-		ptr->link = prev;
-		prev = ptr;
-		ptr = next;
-	}
-
-	/*
-	 * Put the name of each prop_spec and reverse the chain simultaneously.
-	 */
-
 	cp = buf;
 	end = buf + bufsiz - 1;
-	ptr = prev;
-	prev = NULL;
-	while (ptr != NULL) {
-		if (prev != NULL) {
-			if (ptr->name[0] != '[' && cp < end)
-				*cp++ = '.';
-			prev->link = ptr;
-		}
+
+	for (ptr = bottom = khttpd_problem_reverse_prop_chain(prop_spec);
+	     ptr != NULL; ptr = ptr->link) {
+		if (ptr->name[0] != '[' && ptr != bottom && cp < end)
+			*cp++ = '.';
 		len = MIN(strlen(ptr->name), end - cp);
 		bcopy(ptr->name, cp, len);
 		cp += len;
-
-		prev = ptr;
-		ptr = ptr->link;
 	}
-	if (prev != NULL)
-		prev->link = NULL;
-
 	*cp++ = '\0';
+
+	khttpd_problem_reverse_prop_chain(bottom);
 
 	return (buf);
 }
@@ -463,6 +460,15 @@ khttpd_problem_set_detail(struct khttpd_mbuf_json *output,
 	khttpd_mbuf_json_property(output, "detail");
 	khttpd_mbuf_json_vformat(output, TRUE, fmt, args);
 	va_end(args);
+}
+
+void
+khttpd_problem_set_vdetail(struct khttpd_mbuf_json *output,
+    const char *fmt, va_list va)
+{
+
+	khttpd_mbuf_json_property(output, "detail");
+	khttpd_mbuf_json_vformat(output, TRUE, fmt, va);
 }
 
 void khttpd_problem_set_errno(struct khttpd_mbuf_json *output,

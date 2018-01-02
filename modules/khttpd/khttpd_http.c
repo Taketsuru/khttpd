@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -59,11 +59,13 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
+#include "khttpd_field.h"
 #include "khttpd_init.h"
 #include "khttpd_json.h"
 #include "khttpd_ktr.h"
 #include "khttpd_log.h"
 #include "khttpd_malloc.h"
+#include "khttpd_method.h"
 #include "khttpd_mbuf.h"
 #include "khttpd_port.h"
 #include "khttpd_problem.h"
@@ -74,18 +76,6 @@
 #include "khttpd_string.h"
 #include "khttpd_strtab.h"
 #include "khttpd_vhost.h"
-
-enum {
-	KHTTPD_FIELD_UNKNOWN = -1,
-
-	KHTTPD_FIELD_CONTENT_LENGTH,
-	KHTTPD_FIELD_TRANSFER_ENCODING,
-	KHTTPD_FIELD_CONNECTION,
-	KHTTPD_FIELD_EXPECT,
-	KHTTPD_FIELD_HOST,
-
-	KHTTPD_FIELD_END
-};
 
 struct khttpd_session;
 
@@ -106,17 +96,18 @@ struct khttpd_exchange {
 	off_t			request_payload_size;
 	off_t			response_content_length;
 	off_t			response_payload_size;
-	struct khttpd_location	*location;
 	const char		*query;
-	const char		*suffix;
 	struct mbuf		*request_line;
 	struct mbuf		*request_trailer;
 	struct mbuf		*response_header;
 	struct mbuf		*response_trailer;
 	struct mbuf		*response_buffer;
+	struct khttpd_location	*location;
+	const char		*suffix;
 	unsigned		close:1;
 	unsigned		close_requested:1;
 	unsigned		continue_requested:1;
+	unsigned		request_has_host:1;
 	unsigned		request_has_content_length:1;
 	unsigned		request_chunked:1;
 	unsigned		response_has_content_length:1;
@@ -198,27 +189,7 @@ static void khttpd_session_transmit(struct khttpd_session *session, ssize_t);
 
 /* --------------------------------------------------- variable definitions */
 
-static struct khttpd_strtab_entry khttpd_fields[] = {
-	{ "Content-Length" },
-	{ "Transfer-Encoding" },
-	{ "Connection" },
-	{ "Expect" },
-	{ "Host" },
-};
-
-CTASSERT(nitems(khttpd_fields) == KHTTPD_FIELD_END);
-
-/*
- * This value must be larger than the length of the longest name in
- * khttpd_fields.
- *
- * When the server finds a field whose name is longer than this value, it
- * respond with KHTTPD_STATUS_HEADER_FIELDS_TOO_LARGE.
- */
-#define KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH	32
-
 static const char khttpd_crlf[] = { '\r', '\n' };
-static struct khttpd_strtab_entry_slist khttpd_field_hash_table[16];
 static size_t khttpd_message_size_limit = 16384;
 static uma_zone_t khttpd_http_client_zone;
 static struct khttpd_log * volatile khttpd_http_logs[KHTTPD_HTTP_LOG_END];
@@ -236,6 +207,7 @@ khttpd_http_set_log(enum khttpd_http_log_id id, struct khttpd_log *log)
 {
 	struct khttpd_log *old;
 
+	KHTTPD_ENTRY("%s(%d,%p)", __func__, id, log);
 	old = (struct khttpd_log *)atomic_swap_ptr
 	    ((volatile uintptr_t *)&khttpd_http_logs[id], (uintptr_t)log);
 	khttpd_log_delete(old);
@@ -246,18 +218,6 @@ khttpd_http_get_log(enum khttpd_http_log_id id)
 {
 
 	return (khttpd_http_logs[id]);
-}
-
-static int
-khttpd_field_find(const char *begin, const char *end)
-{
-	struct khttpd_strtab_entry *entry;
-
-	entry = khttpd_strtab_find(khttpd_field_hash_table,
-		nitems(khttpd_field_hash_table), begin, end, TRUE);
-
-	return (entry == NULL ? KHTTPD_FIELD_UNKNOWN :
-	    entry - khttpd_fields);
 }
 
 static struct khttpd_session *
@@ -273,7 +233,6 @@ khttpd_exchange_access(struct khttpd_exchange *exchange)
 	struct timeval tv;
 	struct khttpd_log *log;
 	struct khttpd_session *session;
-	struct khttpd_location *location;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
@@ -282,19 +241,18 @@ khttpd_exchange_access(struct khttpd_exchange *exchange)
 		return;
 
 	session = khttpd_exchange_get_session(exchange);
-	location = exchange->location;
 	microtime(&tv);
 
 	khttpd_mbuf_json_property(&exchange->log_entry, "arrivalTime");
-	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ld.%06ld",
+	khttpd_mbuf_json_format(&exchange->log_entry, false, "%ld.%06ld",
 	    exchange->arrival_time.tv_sec, exchange->arrival_time.tv_usec);
 
 	khttpd_mbuf_json_property(&exchange->log_entry, "completionTime");
-	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ld.%06ld",
+	khttpd_mbuf_json_format(&exchange->log_entry, false, "%ld.%06ld",
 	    tv.tv_sec, tv.tv_usec);
 
 	khttpd_mbuf_json_property(&exchange->log_entry, "status");
-	khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%d",
+	khttpd_mbuf_json_format(&exchange->log_entry, false, "%d",
 	    exchange->status);
 
 	khttpd_mbuf_json_property(&exchange->log_entry, "peer");
@@ -308,14 +266,14 @@ khttpd_exchange_access(struct khttpd_exchange *exchange)
 	if (exchange->request_payload_size != 0) {
 		khttpd_mbuf_json_property(&exchange->log_entry,
 		    "requestPayloadSize");
-		khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ju",
+		khttpd_mbuf_json_format(&exchange->log_entry, false, "%ju",
 		    (uintmax_t)exchange->request_payload_size);
 	}
 
 	if (exchange->response_payload_size != 0) {
 		khttpd_mbuf_json_property(&exchange->log_entry,
 		    "responsePayloadSize");
-		khttpd_mbuf_json_format(&exchange->log_entry, FALSE, "%ju",
+		khttpd_mbuf_json_format(&exchange->log_entry, false, "%ju",
 		    (uintmax_t)exchange->response_payload_size);
 	}
 
@@ -376,9 +334,18 @@ khttpd_exchange_clear(struct khttpd_exchange *exchange)
 void
 khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 {
+
+	khttpd_exchange_respond_with_reason(exchange, status,
+	    khttpd_status_default_reason(status));
+}
+
+void
+khttpd_exchange_respond_with_reason(struct khttpd_exchange *exchange,
+    int status, const char *reason)
+{
 	struct mbuf *m;
 	struct khttpd_session *session;
-	boolean_t xmit_completed;
+	bool xmit_completed;
 
 	KHTTPD_ENTRY("%s(%p,%d), close_requested=%d, close=%d", __func__,
 	    exchange, status, exchange->close_requested, exchange->close);
@@ -388,7 +355,7 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 
 	if (session->receive != NULL) {
 		KHTTPD_BRANCH("%s postponed", __func__);
-		exchange->response_pending = TRUE;
+		exchange->response_pending = true;
 		return;
 	}
 
@@ -400,10 +367,10 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 
 	m = m_gethdr(M_WAITOK, MT_DATA);
 	status = exchange->status;
-	khttpd_mbuf_printf(m, "HTTP/1.%d %d n/a\r\n", exchange->version_minor,
-	    status);
+	khttpd_mbuf_printf(m, "HTTP/1.%d %d %s\r\n", exchange->version_minor,
+	    status, reason);
 
-	exchange->response_header_closed = TRUE;
+	exchange->response_header_closed = true;
 	m_cat(m, exchange->response_header);
 	exchange->response_header = NULL;
 
@@ -411,10 +378,10 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 
 	if (status == 204 || status == 304 ||
 	    exchange->method == KHTTPD_METHOD_HEAD) {
-		xmit_completed = TRUE;
+		xmit_completed = true;
 
 	} else if (exchange->response_chunked) {
-		xmit_completed = FALSE;
+		xmit_completed = false;
 
 	} else if (0 < exchange->response_content_length) {
 		if (exchange->response_buffer != NULL) {
@@ -428,7 +395,7 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 		    exchange->response_payload_size;
 
 	} else {
-		xmit_completed = TRUE;
+		xmit_completed = true;
 	}
 
 	if (xmit_completed)
@@ -460,7 +427,7 @@ khttpd_exchange_continue_receiving(struct khttpd_exchange *exchange)
 	KASSERT(session->receive == khttpd_session_receive_body,
 	    ("invalid state.  session->receive=%p", session->receive));
 
-	session->recv_paused = FALSE;
+	session->recv_paused = false;
 	khttpd_session_data_is_available(&session->stream);
 }
 
@@ -480,18 +447,88 @@ khttpd_session_abort(struct khttpd_session *session)
 	khttpd_exchange_close(&session->exchange);
 }
 
-static void
+void
 khttpd_exchange_reject(struct khttpd_exchange *exchange)
 {
 	int status;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	status = KHTTPD_STATUS_BAD_REQUEST;
-	khttpd_exchange_set_error_response_body(exchange, status, NULL);
+	if (exchange->status != 0) {
+		khttpd_session_abort(khttpd_exchange_get_session(exchange));
+		return;
+	}
 
+	status = KHTTPD_STATUS_BAD_REQUEST;
+	khttpd_exchange_set_error_response_body(exchange, status,
+	    NULL);
 	khttpd_session_abort(khttpd_exchange_get_session(exchange));
 	khttpd_exchange_respond(exchange, status);
+}
+
+void
+khttpd_exchange_reset(struct khttpd_exchange *exchange)
+{
+
+	panic("not implemented yet");
+}
+
+struct khttpd_location *
+khttpd_exchange_location(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->location);
+}
+
+const char *
+khttpd_exchange_query(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->query);
+}
+
+struct mbuf *
+khttpd_exchange_request_header(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->request_line);
+}
+
+const char *
+khttpd_exchange_suffix(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->suffix);
+}
+
+const struct sockaddr *
+khttpd_exchange_client_address(struct khttpd_exchange *exchange)
+{
+
+	return (khttpd_socket_peer_address
+	    (khttpd_exchange_get_session(exchange)->socket));
+}
+
+const struct sockaddr *
+khttpd_exchange_server_address(struct khttpd_exchange *exchange)
+{
+
+	return (khttpd_socket_name
+	    (khttpd_exchange_get_session(exchange)->socket));
+}
+
+const char *
+khttpd_exchange_host(struct khttpd_exchange *exchange)
+{
+
+	return (sbuf_data(&khttpd_exchange_get_session(exchange)->host));
+}
+
+void *
+khttpd_exchange_get_data(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->arg);
 }
 
 struct khttpd_port *
@@ -510,13 +547,6 @@ khttpd_exchange_set_ops(struct khttpd_exchange *exchange,
 	exchange->arg = arg;
 }
 
-struct khttpd_location *
-khttpd_exchange_location(struct khttpd_exchange *exchange)
-{
-
-	return (exchange->location);
-}
-
 void
 khttpd_exchange_error(struct khttpd_exchange *exchange,
     struct khttpd_mbuf_json *entry)
@@ -527,17 +557,38 @@ khttpd_exchange_error(struct khttpd_exchange *exchange,
 }
 
 const char *
-khttpd_exchange_suffix(struct khttpd_exchange *exchange)
-{
-
-	return (exchange->suffix);
-}
-
-const char *
 khttpd_exchange_get_target(struct khttpd_exchange *exchange)
 {
 
 	return (sbuf_data(&exchange->target));
+}
+
+bool
+khttpd_exchange_is_request_body_chunked(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->request_chunked);
+}
+
+bool
+khttpd_exchange_is_response_body_chunked(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->response_chunked);
+}
+
+bool
+khttpd_exchange_has_request_content_length(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->request_has_content_length);
+}
+
+size_t
+khttpd_exchange_get_request_content_length(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->request_content_length);
 }
 
 int
@@ -558,13 +609,13 @@ khttpd_exchange_get_request_header_field(struct khttpd_exchange *exchange,
 	    !khttpd_mbuf_get_header_field(&pos, name, dst) ? ENOENT : 0);
 }
 
-boolean_t
+bool
 khttpd_exchange_is_request_media_type_json(struct khttpd_exchange *exchange,
-	boolean_t default_is_json)
+	bool default_is_json)
 {
 	char content_type_buf[32];
 	struct sbuf content_type;
-	boolean_t has_content_type, result;
+	bool has_content_type, result;
 
 	sbuf_new(&content_type, content_type_buf, sizeof(content_type_buf),
 	    SBUF_AUTOEXTEND);
@@ -587,7 +638,33 @@ khttpd_exchange_enable_chunked_transfer(struct khttpd_exchange *exchange)
 
 	khttpd_exchange_add_response_field(exchange, "Transfer-Encoding",
 	    "chunked");
-	exchange->response_chunked = TRUE;
+	exchange->response_chunked = true;
+}
+
+void
+khttpd_exchange_clear_response_header(struct khttpd_exchange *exchange)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+	KASSERT(!exchange->response_header_closed,
+	    ("exchange %p, response header has already been closed", exchange));
+
+	m_freem(exchange->response_header);
+	exchange->response_header = NULL;
+
+	exchange->response_content_length = exchange->response_payload_size = 0;
+
+	m_freem(exchange->response_trailer);
+	exchange->response_trailer = NULL;
+
+	m_freem(exchange->response_buffer);
+	exchange->response_buffer = NULL;
+
+	exchange->close = false;
+	exchange->response_has_content_length = false;
+	exchange->response_chunked = false;
+	exchange->response_pending = false;
+	exchange->status = 0;
 }
 
 void khttpd_exchange_add_response_field(struct khttpd_exchange *exchange,
@@ -598,6 +675,37 @@ void khttpd_exchange_add_response_field(struct khttpd_exchange *exchange,
 	va_start(vl, value_fmt);
 	khttpd_exchange_vadd_response_field(exchange, field, value_fmt, vl);
 	va_end(vl);
+}
+
+void
+khttpd_exchange_add_response_field_line(struct khttpd_exchange *exchange,
+    const char *begin, const char *end)
+{
+	struct khttpd_mbuf_json problem;
+	struct mbuf *m;
+
+	if (exchange->response_header_closed) {
+		if (!exchange->response_chunked) {
+			khttpd_problem_internal_error_log_new(&problem);
+			khttpd_problem_set_detail(&problem,
+			    "payload transfer has been started");
+			khttpd_exchange_error(exchange, &problem);
+		}
+		m = exchange->response_trailer;
+		if (m == NULL) {
+			exchange->response_trailer = m = 
+			    m_gethdr(M_WAITOK, MT_DATA);
+		}
+	} else {
+		m = exchange->response_header;
+		if (m == NULL) {
+			exchange->response_header = m =
+			    m_gethdr(M_WAITOK, MT_DATA);
+		}
+	}
+
+	khttpd_mbuf_append(m, begin, end);
+	khttpd_mbuf_append(m, khttpd_crlf, khttpd_crlf + sizeof(khttpd_crlf));
 }
 
 void
@@ -643,7 +751,7 @@ khttpd_exchange_set_response_content_length(struct khttpd_exchange *exchange,
 
 	khttpd_exchange_add_response_field(exchange, "Content-Length", "%jd",
 	    (uintmax_t)length);
-	exchange->response_has_content_length = TRUE;
+	exchange->response_has_content_length = true;
 	exchange->response_content_length = length;
 }
 
@@ -654,7 +762,7 @@ khttpd_exchange_close(struct khttpd_exchange *exchange)
 	if (exchange->close)
 		return;
 
-	exchange->close = TRUE;
+	exchange->close = true;
 	khttpd_exchange_add_response_field(exchange, "Connection", "%s",
 	    "close");
 }
@@ -687,7 +795,7 @@ khttpd_exchange_set_response_body_json(struct khttpd_exchange *exchange,
 	    "application/json; charset=utf-8");
 }
 
-boolean_t
+bool
 khttpd_exchange_set_response_body_problem_json
     (struct khttpd_exchange *exchange, int status,
      struct khttpd_mbuf_json *response)
@@ -698,7 +806,7 @@ khttpd_exchange_set_response_body_problem_json
 	khttpd_exchange_add_response_field(exchange, "Content-Type",
 	    "application/problem+json; charset=utf-8");
 
-	return (TRUE);
+	return (true);
 }
 
 void
@@ -706,8 +814,8 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
     int status, struct khttpd_mbuf_json *response)
 {
 	struct khttpd_mbuf_json new_resp;
-	struct khttpd_location *location;
 	khttpd_location_set_error_response_fn_t fn;
+	struct khttpd_location *location;
 
 	KHTTPD_ENTRY("%s(%p,%d,%p)", __func__, exchange, status, response);
 
@@ -727,7 +835,7 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 		    status, response);
 }
 
-static boolean_t
+static bool
 khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange, 
     struct khttpd_mbuf_pos *pos)
 {
@@ -743,7 +851,7 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 		case '\n':
 			sbuf_finish(&exchange->target);
 			exchange->query = NULL;
-			return (TRUE);
+			return (true);
 
 		case '?':
 			sbuf_putc(&exchange->target, '\0');
@@ -753,12 +861,12 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 		case '%':
 			digit = khttpd_decode_hexdigit(khttpd_mbuf_getc(pos));
 			if (digit == -1)
-				return (TRUE);
+				return (true);
 			code = digit << 4;
 
 			digit = khttpd_decode_hexdigit(khttpd_mbuf_getc(pos));
 			if (digit == -1)
-				return (TRUE);
+				return (true);
 			code = digit | (code << 4);
 
 			if (isalpha(code) || isdigit(code) || code == '-' ||
@@ -770,7 +878,7 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 
 		default:
 			if (!isalpha(ch) && !isdigit(ch))
-				return (TRUE);
+				return (true);
 			/* FALLTHROUGH */
 
 		case ':': case '@': case '/':
@@ -784,31 +892,82 @@ khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
 
 	if (sbuf_finish(&exchange->target) != 0) {
 		exchange->query = NULL;
-		return (TRUE);
+		return (true);
 	}
 
 	exchange->query = query_off < 0 ? NULL :
 	    sbuf_data(&exchange->target) + query_off;
 
-	return (FALSE);
+	return (false);
 }
 
 static void
-khttpd_exchange_default_options_handler(struct khttpd_exchange *exchange)
+khttpd_exchange_set_allow_field(struct khttpd_exchange *exchange)
 {
-	char buf[256];
-	struct sbuf sbuf;
+	char buf[128];
+ 	struct sbuf sbuf;
+	struct khttpd_location_ops *ops;
+	struct khttpd_location *location;
+	int i;
+
+ 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+
+	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
+
+	location = exchange->location;
+	if (location == NULL)
+		for (i = 0; i < KHTTPD_METHOD_END; ++i)
+			sbuf_printf(&sbuf, ", %s", khttpd_method_name(i));
+
+	else if ((ops = khttpd_location_get_ops(location))->options != NULL)
+		ops->options(exchange, &sbuf);
+
+	else {
+		KASSERT(ops->catch_all == NULL,
+		    ("ops=%p, ops->catch_all=%p", ops, ops->catch_all));
+
+		sbuf_cpy(&sbuf, "OPTIONS");
+
+		for (i = 0; i < KHTTPD_METHOD_END; ++i)
+			if (i != KHTTPD_METHOD_OPTIONS &&
+			    ops->method[i] != NULL)
+				sbuf_printf(&sbuf, ", %s",
+				    khttpd_method_name(i));
+
+		if (ops->method[KHTTPD_METHOD_HEAD] == NULL &&
+		    ops->method[KHTTPD_METHOD_GET] != NULL)
+			sbuf_cat(&sbuf, ", HEAD");
+	}
+
+	sbuf_finish(&sbuf);
+	khttpd_exchange_add_response_field(exchange, "Allow", "%s",
+	    sbuf_data(&sbuf));
+
+	sbuf_delete(&sbuf);
+}
+
+void
+khttpd_exchange_options(struct khttpd_exchange *exchange)
+{
+
+ 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+
+	khttpd_exchange_set_response_content_length(exchange, 0);
+	khttpd_exchange_set_allow_field(exchange);
+	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
+}
+
+void
+khttpd_exchange_method_not_implemented(struct khttpd_exchange *exchange)
+{
+	int status;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	khttpd_location_get_options(khttpd_exchange_location(exchange), &sbuf);
-	sbuf_finish(&sbuf);
-	khttpd_exchange_set_response_content_length(exchange, 0);
-	khttpd_exchange_add_response_field(exchange, "Allow", "%s",
-	    sbuf_data(&sbuf));
-	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
-	sbuf_delete(&sbuf);
+	khttpd_exchange_set_allow_field(exchange);
+	status = KHTTPD_STATUS_METHOD_NOT_ALLOWED;
+	khttpd_exchange_set_error_response_body(exchange, status, NULL);
+	khttpd_exchange_respond(exchange, status);
 }
 
 static void
@@ -910,7 +1069,8 @@ khttpd_session_next(struct khttpd_session *session)
 
 	khttpd_session_set_receive_limit(session, khttpd_message_size_limit);
 	exchange = &session->exchange;
-	session->receive = exchange->close ? khttpd_session_receive_and_ignore :
+	session->receive = exchange->close ?
+	    khttpd_session_receive_and_ignore :
 	    khttpd_session_receive_request_line;
 	khttpd_exchange_clear(exchange);
 	if (session->recv_paused)
@@ -922,7 +1082,7 @@ khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 {
 	struct khttpd_exchange *exchange;
 	int flags;
-	boolean_t full;
+	bool full;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, session, m);
 
@@ -933,7 +1093,7 @@ khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 	khttpd_exchange_access(exchange);
 
 	if (full) {
-		session->xmit_waiting_for_drain = TRUE;
+		session->xmit_waiting_for_drain = true;
 		khttpd_stream_notify_of_drain(&session->stream);
 	} else
 		khttpd_session_next(session);
@@ -945,80 +1105,90 @@ khttpd_session_transmit(struct khttpd_session *session, ssize_t space)
 	struct khttpd_mbuf_json logent;
 	struct mbuf *head, *m;
 	struct khttpd_exchange *exchange;
-	size_t sent;
+	off_t resid;
+	u_int sent;
 	int error;
-	boolean_t pause;
 
+	KHTTPD_ENTRY("%s(%p,%#zx)", __func__, session, space);
 	exchange = &session->exchange;
 
-	if (exchange->ops->get == NULL) {
-		khttpd_problem_internal_error_log_new(&logent);
-		khttpd_problem_set_detail(&logent, 
-		    "exchange_op doesn't have neither get nor send method");
-		khttpd_session_error(&session->stream, &logent);
+again:
+	head = NULL;
+	error = exchange->ops->get == NULL ? 0 : 
+	    exchange->ops->get(exchange, exchange->arg, space, &head);
+	KHTTPD_ENTRY("%s error %d", __func__, error);
 
-		exchange->close = TRUE;
-		khttpd_session_transmit_finish(session, NULL);
+	if (error == EWOULDBLOCK) {
+		if (head != NULL) {
+			khttpd_problem_internal_error_log_new(&logent);
+			khttpd_problem_set_detail(&logent, 
+			    "exchange_ops::get sets data "
+			    "even though it returns EWOULDBLOCK");
+			khttpd_exchange_error(exchange, &logent);
+			m_freem(head);
+		}
 		return;
 	}
 
-	head = NULL;
-	pause = FALSE;
-	error = exchange->ops->get(exchange, exchange->arg, space, &head,
-	    &pause);
-	if (error == ENOMSG && exchange->response_chunked) {
-		if (pause) {
+	if (head == NULL) {
+		KHTTPD_NOTE("%s null data", __func__);
+		if (exchange->response_chunked) {
+			head = m_gethdr(M_WAITOK, MT_DATA);
+			khttpd_mbuf_printf(head, "0\r\n");
+			m_cat(head, exchange->response_trailer);
+			exchange->response_trailer = NULL;
+			khttpd_mbuf_printf(head, "\r\n");
+			khttpd_session_transmit_finish(session, head);
+		} else {
 			khttpd_problem_internal_error_log_new(&logent);
-			khttpd_problem_set_detail(&logent, 
-			    "exchange_ops::get try to pause the server"
-			    "but the transfer has been completed");
+			khttpd_problem_set_detail(&logent, "exchange_ops::get "
+			    "finishes sending data prematurely");
 			khttpd_exchange_error(exchange, &logent);
+			exchange->close = true;
+			khttpd_session_transmit_finish(session, NULL);
 		}
-
-		head = m_gethdr(M_WAITOK, MT_DATA);
-		khttpd_mbuf_printf(head, "0\r\n");
-		m_cat(head, exchange->response_trailer);
-		exchange->response_trailer = NULL;
-		khttpd_mbuf_printf(head, "\r\n");
-		khttpd_session_transmit_finish(session, head);
-
 		return;
 	}
 
 	if (error != 0) {
-		exchange->close = TRUE;
+		exchange->close = true;
 		khttpd_session_transmit_finish(session, NULL);
 		return;
 	}
 
 	sent = m_length(head, NULL);
-	exchange->response_payload_size += sent;
+	if (sent == 0) {
+		goto again;
+	}
 
 	if (exchange->response_chunked) {
+		exchange->response_payload_size += sent;
 		m = m_gethdr(M_WAITOK, MT_DATA);
 		khttpd_mbuf_printf(m, "%jx\r\n", (uintmax_t)sent);
 		m_cat(m, head);
 		khttpd_mbuf_printf(m, "\r\n");
 		head = m;
 		khttpd_stream_send(&session->stream, head, 0);
-		if (!pause)
-			khttpd_stream_notify_of_drain(&session->stream);
+		khttpd_stream_notify_of_drain(&session->stream);
 
-	} else if (exchange->response_payload_size <
-	    exchange->response_content_length) {
+	} else if (sent < (resid = exchange->response_content_length - 
+		exchange->response_payload_size)) {
+		exchange->response_payload_size += sent;
 		khttpd_stream_send(&session->stream, head, 0);
-		if (!pause)
-			khttpd_stream_notify_of_drain(&session->stream);
+		khttpd_stream_notify_of_drain(&session->stream);
 
-	} else if (!pause)
+	} else {
+		if (resid < sent) {
+			khttpd_problem_internal_error_log_new(&logent);
+			khttpd_problem_set_detail(&logent, 
+			    "exchange_ops::get sends too much data");
+			khttpd_exchange_error(exchange, &logent);
+			m_freem(m_split(head, resid, M_WAITOK));
+		}
+
+		exchange->response_payload_size = 
+		    exchange->response_content_length;
 		khttpd_session_transmit_finish(session, head);
-
-	else {
-		khttpd_problem_internal_error_log_new(&logent);
-		khttpd_problem_set_detail(&logent,
-		    "exchange_ops::get try to pause the server but "
-		    "the transfer has been completed");
-		khttpd_exchange_error(exchange, &logent);
 	}
 }
 
@@ -1060,6 +1230,7 @@ static void
 khttpd_session_receive_finish(struct khttpd_session *session)
 {
 	struct khttpd_exchange *exchange;
+	bool pause;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, session);
 
@@ -1068,8 +1239,8 @@ khttpd_session_receive_finish(struct khttpd_session *session)
 
 	exchange = &session->exchange;
 
-	if (exchange->ops->end != NULL)
-		exchange->ops->end(exchange, exchange->arg);
+	if (exchange->ops->put != NULL)
+		exchange->ops->put(exchange, exchange->arg, NULL, &pause);
 
 	if (exchange->response_pending)
 		khttpd_exchange_respond(exchange, exchange->status);
@@ -1350,17 +1521,18 @@ khttpd_session_receive_body(struct khttpd_session *session)
 	struct thread *td;
 	struct mbuf *m, *tail;
 	int error;
-	boolean_t pause;
+	bool pause;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
 	KASSERT(session->recv_leftovers == session->recv_ptr &&
 	    session->recv_off == 0,
 	    ("recv_leftovers=%p, recv_ptr=%p, recv_off=%d",
-		session->recv_leftovers, session->recv_ptr, session->recv_off));
+		session->recv_leftovers, session->recv_ptr,
+		session->recv_off));
 
 	td = curthread;
 	exchange = &session->exchange;
-	pause = FALSE;
+	pause = false;
 
 	m = session->recv_ptr;
 	if (m != NULL) {
@@ -1427,21 +1599,17 @@ khttpd_session_receive_body(struct khttpd_session *session)
 static void
 khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 {
-	char buf[128];
-	struct sbuf sbuf;
+	struct khttpd_exchange *exchange;
+	struct khttpd_location *location;
+	struct mbuf *m;
 	khttpd_method_fn_t handler;
 	struct khttpd_location_ops *ops;
-	struct khttpd_exchange *exchange;
-	struct mbuf *m;
-	int i, method, status;
+	int method;
 
 	exchange = &session->exchange;
 
 	KHTTPD_ENTRY("%s(%p), %s", __func__, session,
-		khttpd_ktr_printf("target %s, location %s",
-		    sbuf_data(&exchange->target),
-		    exchange->location == NULL ? "null" :
-		    khttpd_location_get_path(exchange->location)));
+		khttpd_ktr_printf("target %s", sbuf_data(&exchange->target)));
 
 	/*
 	 * If this is the end of a trailer, we've done for this request
@@ -1449,98 +1617,70 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 	 */
 
 	if (session->recv_in_chunk_or_trailer) {
-		session->recv_in_chunk_or_trailer = FALSE;
+		session->recv_in_chunk_or_trailer = false;
 		khttpd_session_receive_finish(session);
 		return;
 	}
 
 	khttpd_session_terminate_received_mbufs(session);
 
-	/*
-	 * If the request doesn't have Host field or no matching location,
-	 * send a 'bad request' response.
-	 */
-
-	if (exchange->location == NULL) {
-		if (exchange->method == KHTTPD_METHOD_OPTIONS &&
-		    strcmp(sbuf_data(&exchange->target), "*") == 0) {
-
-			sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-			sbuf_cpy(&sbuf, "OPTIONS");
-			for (i = 0; i < KHTTPD_METHOD_END; ++i)
-				if (i != KHTTPD_METHOD_OPTIONS)
-					sbuf_printf(&sbuf, ", %s",
-					    khttpd_method_name(i));
-			sbuf_finish(&sbuf);
-			khttpd_exchange_set_response_content_length(exchange,
-			    0);
-			khttpd_exchange_add_response_field(exchange, "Allow",
-			    "%s", sbuf_data(&sbuf));
-			khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
-			sbuf_delete(&sbuf);
-
-			goto quit;
-		}
-
+	if (!exchange->request_has_host) {
+		/*
+		 * If the request doesn't have Host field, send 'bad request'
+		 * response.
+		 */
 		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
 		khttpd_exchange_reject(exchange);
 		return;
 	}
 
-	/* 
-	 * If the given method is unknown, send response with "Not Implemented"
-	 * status.
-	 */
-
-	if (exchange->method == KHTTPD_METHOD_UNKNOWN) {
-		KHTTPD_BRANCH("%s exchange->method == KHTTPD_METHOD_UNKNOWN",
-		    __func__);
-		status = KHTTPD_STATUS_NOT_IMPLEMENTED;
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
-		goto quit;
-	}
-
-	/* Call method handler. */
-
-	ops = khttpd_location_get_ops(exchange->location);
+	location = exchange->location;
 	method = exchange->method;
-	handler = ops->method[method];
-	if (handler == NULL)
-		switch (method) {
-		case KHTTPD_METHOD_OPTIONS:
-			handler = khttpd_exchange_default_options_handler;
-			break;
-		case KHTTPD_METHOD_HEAD:
-			handler = ops->method[KHTTPD_METHOD_GET];
-			break;
-		default:
-			;	/* nothing */
+	if (method == KHTTPD_METHOD_UNKNOWN) {
+		khttpd_exchange_method_not_implemented(exchange);
+
+	} else if (location != NULL) {
+		ops = khttpd_location_get_ops(location);
+
+		if ((handler = ops->method[method]) == NULL) {
+			switch (method) {
+			case KHTTPD_METHOD_OPTIONS:
+				handler = khttpd_exchange_options;
+				break;
+			case KHTTPD_METHOD_HEAD:
+				handler = 
+				    ops->method[KHTTPD_METHOD_GET];
+				break;
+			default:
+				;	/* nothing */
+			}
 		}
 
-	if (handler != NULL)
-		(*handler)(exchange);
+		if (handler != NULL || (handler = ops->catch_all) != NULL) {
+			(*handler)(exchange);
+		} else {
+			khttpd_exchange_method_not_implemented(exchange);
+		}
 
-	else {
-		sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-		khttpd_location_get_options(exchange->location, &sbuf);
-		sbuf_finish(&sbuf);
-		khttpd_exchange_add_response_field(exchange, "Allow", "%s",
-		    sbuf_data(&sbuf));
-		sbuf_delete(&sbuf);
+	} else if (exchange->method == KHTTPD_METHOD_OPTIONS &&
+	    strcmp(sbuf_data(&exchange->target), "*") == 0) {
+		/*
+		 * If the request method is OPTIONS and the target is "*", send
+		 * OPTIONS response.
+		 */
+		khttpd_exchange_set_allow_field(exchange);
+		khttpd_exchange_set_response_content_length(exchange, 0);
+		khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
 
-		status = KHTTPD_STATUS_METHOD_NOT_ALLOWED;
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
+	} else {
+		/*
+		 * If the request doesn't have matching location, send a 'bad
+		 * request' response.
+		 */
+		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
+		khttpd_exchange_reject(exchange);
+		return;
 	}
-
- quit:
-	/* exchange_ops::send doesn't support chunked transfer. */
-
-	if (exchange->response_chunked && exchange->ops->get == NULL)
-		exchange->response_chunked = FALSE;
 
 	/* Send continue response if it has been requested. */
 
@@ -1587,9 +1727,7 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 	char buf[sizeof(session->host_buf)];
 	struct sbuf host;
 	struct khttpd_exchange *exchange;
-	struct khttpd_location *location;
 	struct khttpd_server *server;
-	const char *target;
 	int ch;
 
 	KHTTPD_ENTRY("%s(%p,{%p,%d,%d})", __func__, session, pos->ptr,
@@ -1597,7 +1735,7 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 
 	exchange = &session->exchange;
 
-	if (exchange->location != NULL) {
+	if (exchange->request_has_host) {
 		/* there is more than one host fields in a request */
 		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
 		khttpd_exchange_reject(exchange);
@@ -1634,11 +1772,8 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
  out:
 	sbuf_finish(&host);
 
-	if (sbuf_done(&session->host) &&
-	    strcmp(sbuf_data(&session->host), sbuf_data(&host)) == 0) {
-		server = session->server;
-
-	} else {
+	if (!sbuf_done(&session->host) ||
+	    strcmp(sbuf_data(&session->host), sbuf_data(&host)) != 0) {
 		/* 
 		 * Find the server.  If the specified Host doesn't exist, send
 		 * a 'bad request' response.
@@ -1647,8 +1782,8 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 		server = khttpd_vhost_find_server(session->port,
 		    sbuf_data(&host));
 		if (server == NULL) {
-			KHTTPD_BRANCH("%s %p reject %u", __func__, exchange,
-			    __LINE__);
+			KHTTPD_BRANCH("%s %p reject %u",
+			    __func__, exchange, __LINE__);
 			sbuf_delete(&host);
 			khttpd_exchange_reject(exchange);
 			return;
@@ -1661,11 +1796,16 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 
 	sbuf_delete(&host);
 
-	/* Find the route corresponds to the request target. */
+	exchange->request_has_host = true;
 
-	target = sbuf_data(&exchange->target);
-	exchange->location = location = khttpd_server_find_location(server,
-	    target, target + sbuf_len(&exchange->target), &exchange->suffix);
+	/*
+	 * Find location as soon as possible so that location specific
+	 * functions become available early.
+	 */
+
+	exchange->location =
+	    khttpd_server_route(session->server, &exchange->target, exchange,
+		&exchange->suffix, NULL);
 }
 
 static void
@@ -1698,7 +1838,7 @@ khttpd_session_receive_content_length_field(struct khttpd_session *session,
 		return;
 	}
 
-	exchange->request_has_content_length = TRUE;
+	exchange->request_has_content_length = true;
 	exchange->request_content_length = value;
 }
 
@@ -1753,7 +1893,7 @@ khttpd_session_receive_transfer_encoding_field(struct khttpd_session *session,
 			break;
 		}
 
-		exchange->request_chunked = TRUE;
+		exchange->request_chunked = true;
 	}
 
 	sbuf_delete(&token);
@@ -1764,10 +1904,10 @@ khttpd_session_receive_connection_field(struct khttpd_session *session,
     struct khttpd_mbuf_pos *pos)
 {
 
-	KHTTPD_ENTRY("%s(%p,{%p,%d,%d})", __func__, session, pos->ptr, pos->off,
-	    pos->unget);
+	KHTTPD_ENTRY("%s(%p,{%p,%d,%d})",
+	    __func__, session, pos->ptr, pos->off, pos->unget);
 	session->exchange.close_requested =
-	    khttpd_mbuf_list_contains_token(pos, "close", TRUE);
+	    khttpd_mbuf_list_contains_token(pos, "close", true);
 }
 
 static void
@@ -1779,8 +1919,8 @@ khttpd_session_receive_expect_field(struct khttpd_session *session,
 	struct sbuf token;
 	int error;
 
-	KHTTPD_ENTRY("%s(%p,{%p,%d,%d})", __func__, session, pos->ptr, pos->off,
-	    pos->unget);
+	KHTTPD_ENTRY("%s(%p,{%p,%d,%d})",
+	    __func__, session, pos->ptr, pos->off, pos->unget);
 
 	exchange = &session->exchange;
 
@@ -1800,7 +1940,7 @@ khttpd_session_receive_expect_field(struct khttpd_session *session,
 			continue;
 
 		if (strcasecmp(sbuf_data(&token), "100-continue") == 0) {
-			exchange->continue_requested = TRUE;
+			exchange->continue_requested = true;
 			break;
 		}
 	}
@@ -1811,12 +1951,12 @@ khttpd_session_receive_expect_field(struct khttpd_session *session,
 static int
 khttpd_session_receive_header_or_trailer(struct khttpd_session *session)
 {
-	char field[KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH];
+	char field[khttpd_field_maxlen() + 2];
 	struct khttpd_mbuf_pos pos, tmppos;
 	struct khttpd_exchange *exchange;
 	char *end;
 	int ch, error, field_enum, status;
-	boolean_t last_ch_is_ws;
+	bool last_ch_is_ws;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
 
@@ -1835,7 +1975,7 @@ khttpd_session_receive_header_or_trailer(struct khttpd_session *session)
 
 	case ENOBUFS:
 		status = KHTTPD_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE;
-		khttpd_exchange_set_error_response_body(exchange, status,
+		khttpd_exchange_set_error_response_body(exchange, status, 
 		    NULL);
 		khttpd_session_abort(session);
 		khttpd_exchange_respond(exchange, status);
@@ -1851,7 +1991,7 @@ khttpd_session_receive_header_or_trailer(struct khttpd_session *session)
 	 * If it's an empty line, we reached the end of a header or a trailer.
 	 */
 
-	khttpd_mbuf_pos_copy(&pos, &tmppos);
+	tmppos = pos;
 	ch = khttpd_mbuf_getc(&tmppos);
 	if (ch == '\r')
 		ch = khttpd_mbuf_getc(&tmppos);
@@ -1976,7 +2116,7 @@ khttpd_session_receive_request_line(struct khttpd_session *session)
 	switch (error) {
 
 	case 0: /* Ignore a line if it's empty. */
-		khttpd_mbuf_pos_copy(&pos, &tmppos);
+		tmppos = pos;
 		ch = khttpd_mbuf_getc(&tmppos);
 		if (ch == '\r')
 			ch = khttpd_mbuf_getc(&tmppos);
@@ -2123,7 +2263,7 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 			return;
 
 		case EBUSY:
-			session->recv_paused = TRUE;
+			session->recv_paused = true;
 			return;
 		default:
 			KHTTPD_BRANCH("%s error=%d", __func__, error);
@@ -2131,7 +2271,7 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 			return;
 		}
 
-	session->recv_paused = TRUE;
+	session->recv_paused = true;
 }
 
 static void
@@ -2141,7 +2281,7 @@ khttpd_session_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 
 	session = stream->up;
 	if (session->xmit_waiting_for_drain) {
-		session->xmit_waiting_for_drain = FALSE;
+		session->xmit_waiting_for_drain = false;
 		khttpd_session_next(session);
 	} else
 		khttpd_session_transmit(session, space);
@@ -2169,7 +2309,7 @@ khttpd_session_error(struct khttpd_stream *stream,
 
 	if (sbuf_done(&session->host)) {
 		khttpd_mbuf_json_property(entry, "host");
-		khttpd_mbuf_json_cstr(entry, TRUE, sbuf_data(&session->host));
+		khttpd_mbuf_json_cstr(entry, true, sbuf_data(&session->host));
 	}
 
 	khttpd_mbuf_json_property(entry, "peer");
@@ -2232,17 +2372,15 @@ khttpd_http_client_dtor(void *mem, int size, void *arg)
 }
 
 void
-khttpd_http_accept_http_client(void *arg)
+khttpd_http_accept_http_client(struct khttpd_port *port)
 {
 	struct khttpd_http_client *client;
 	struct khttpd_socket *socket;
 	struct khttpd_stream *stream;
-	struct khttpd_port *port;
 	int error;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
-	port = arg;
 	client = uma_zalloc(khttpd_http_client_zone, M_WAITOK);
 	client->session.port = khttpd_port_acquire(port);
 	stream = &client->session.stream;
@@ -2255,32 +2393,17 @@ khttpd_http_accept_http_client(void *arg)
 }
 
 void
-khttpd_http_accept_https_client(void *arg)
+khttpd_http_accept_https_client(struct khttpd_port *port)
 {
 
 	panic("%s: not implemented yet", __func__);
 }
 
-static void
-khttpd_http_check_field_name_size(void)
+struct khttpd_socket *
+khttpd_exchange_socket(struct khttpd_exchange *exchange)
 {
-#ifdef INVARIANTS
-	size_t len, longest;
-	int i;
 
-	KHTTPD_ENTRY("%s()", __func__);
-
-	longest = 0;
-	for (i = 0; i < nitems(khttpd_fields); ++i) {
-		len = strlen(khttpd_fields[i].name) + 1;
-		if (longest < len)
-			longest = len;
-	}
-
-	KASSERT(longest <= KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH,
-	    ("longest known field name expected:%zd, actual:%zd",
-		(size_t)KHTTPD_LONGEST_KNOWN_FIELD_NAME_LENGTH, longest));
-#endif
+	return (khttpd_exchange_get_session(exchange)->socket);
 }
 
 static int
@@ -2294,12 +2417,6 @@ khttpd_http_local_init(void)
 	    khttpd_http_client_ctor, khttpd_http_client_dtor,
 	    khttpd_http_client_init, khttpd_http_client_fini,
 	    UMA_ALIGN_PTR, 0);
-
-	khttpd_strtab_init(khttpd_field_hash_table,
-	    nitems(khttpd_field_hash_table), khttpd_fields,
-	    nitems(khttpd_fields));
-
-	khttpd_http_check_field_name_size();
 
 	return (0);
 }

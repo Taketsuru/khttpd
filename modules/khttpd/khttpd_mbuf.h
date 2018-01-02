@@ -39,15 +39,15 @@ struct sbuf;
 struct sockaddr;
 
 struct khttpd_mbuf_pos {
-	struct mbuf	*ptr;
-	int32_t		off;
+	struct mbuf    *ptr;
+	u_int		off;
 	int		unget;
 };
 
 struct khttpd_mbuf_json {
-	struct mbuf *mbuf;
-	unsigned is_first:1;
-	unsigned is_property_value:1;
+	struct mbuf    *mbuf;
+	unsigned	is_first:1;
+	unsigned	is_property_value:1;
 };
 
 int khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl);
@@ -55,10 +55,10 @@ int khttpd_mbuf_printf(struct mbuf *output, const char *fmt, ...);
 struct mbuf *khttpd_mbuf_append(struct mbuf *output, const char *begin,
     const char *end);
 struct mbuf *khttpd_mbuf_append_ch(struct mbuf *output, char ch);
+struct mbuf *khttpd_mbuf_copy_range(struct khttpd_mbuf_pos *begin,
+    struct khttpd_mbuf_pos *end);
 void khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *iter, struct mbuf *ptr,
     int off);
-void khttpd_mbuf_pos_copy(struct khttpd_mbuf_pos *x,
-    struct khttpd_mbuf_pos *y);
 int khttpd_mbuf_getc(struct khttpd_mbuf_pos *iter);
 void khttpd_mbuf_ungetc(struct khttpd_mbuf_pos *iter, int ch);
 boolean_t khttpd_mbuf_skip_ws(struct khttpd_mbuf_pos *iter);
@@ -70,6 +70,8 @@ boolean_t khttpd_mbuf_get_header_field(struct khttpd_mbuf_pos *iter,
 int khttpd_mbuf_next_segment(struct khttpd_mbuf_pos *iter, int term_ch);
 int khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos, int term_ch,
     char *buffer, size_t size, char **end_out);
+void khttpd_mbuf_copy_to_sbuf(struct khttpd_mbuf_pos *,
+    struct khttpd_mbuf_pos *, struct sbuf *);
 int khttpd_mbuf_parse_digits(struct khttpd_mbuf_pos *pos,
     uintmax_t *value_out);
 void khttpd_mbuf_base64_encode(struct mbuf *output, const char *buf,
@@ -91,6 +93,8 @@ void khttpd_mbuf_json_null(struct khttpd_mbuf_json *v);
 void khttpd_mbuf_json_boolean(struct khttpd_mbuf_json *v, boolean_t value);
 void khttpd_mbuf_json_cstr(struct khttpd_mbuf_json *v, boolean_t is_string,
     const char *value);
+void khttpd_mbuf_json_bytes(struct khttpd_mbuf_json *v, boolean_t is_string,
+    const char *begin, const char *end);
 void khttpd_mbuf_json_mbuf(struct khttpd_mbuf_json *v, boolean_t is_string,
     struct mbuf *m);
 void khttpd_mbuf_json_mbuf_1st_line(struct khttpd_mbuf_json *v,

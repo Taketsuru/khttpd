@@ -33,6 +33,7 @@
 
 struct mbuf;
 struct khttpd_mbuf_json;
+struct khttpd_mbuf_pos;
 struct khttpd_stream;
 
 enum {
@@ -44,17 +45,17 @@ typedef int (*khttpd_stream_receive_fn_t)
     (struct khttpd_stream *, ssize_t *, struct mbuf **);
 typedef void (*khttpd_stream_fn_t)(struct khttpd_stream *);
 typedef void (*khttpd_stream_cts_fn_t)(struct khttpd_stream *, ssize_t);
-typedef boolean_t (*khttpd_stream_send_fn_t)
+typedef bool (*khttpd_stream_send_fn_t)
     (struct khttpd_stream *, struct mbuf *, int);
-typedef void (*khttpd_stream_bufstat_fn_t)(struct khttpd_stream *, size_t *,
-    size_t *, size_t *);
+typedef void (*khttpd_stream_bufstat_fn_t)(struct khttpd_stream *, u_int *,
+    int *, long *);
 typedef void (*khttpd_stream_log_fn_t)(struct khttpd_stream *,
     struct khttpd_mbuf_json *);
 
 struct khttpd_stream_down_ops {
 	khttpd_stream_receive_fn_t	receive;
 	khttpd_stream_fn_t		continue_receiving;
-	khttpd_stream_fn_t		shutdown_receiver;
+	khttpd_stream_fn_t		reset;
 	khttpd_stream_send_fn_t		send;
 	khttpd_stream_bufstat_fn_t	send_bufstat;
 	khttpd_stream_fn_t		notify_of_drain;
@@ -74,6 +75,9 @@ struct khttpd_stream {
 	void	*down;
 };
 
+int khttpd_stream_receive_until(struct khttpd_stream *, int, off_t *,
+    struct khttpd_mbuf_pos *);
+
 inline int
 khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid, 
     struct mbuf **m_out)
@@ -90,13 +94,13 @@ khttpd_stream_continue_receiving(struct khttpd_stream *stream)
 }
 
 inline void
-khttpd_stream_shutdown_receiver(struct khttpd_stream *stream)
+khttpd_stream_reset(struct khttpd_stream *stream)
 {
 
-	stream->down_ops->shutdown_receiver(stream);
+	stream->down_ops->reset(stream);
 }
 
-inline boolean_t
+inline bool
 khttpd_stream_send(struct khttpd_stream *stream, struct mbuf *m, int flags)
 {
 
@@ -121,8 +125,8 @@ khttpd_stream_destroy(struct khttpd_stream *stream)
 }
 
 inline void
-khttpd_stream_send_bufstat(struct khttpd_stream *stream, size_t *hiwat,
-    size_t *lowat, size_t *space)
+khttpd_stream_send_bufstat(struct khttpd_stream *stream, u_int *hiwat,
+    int *lowat, long *space)
 {
 
 	return (stream->down_ops->send_bufstat(stream, hiwat, lowat, space));

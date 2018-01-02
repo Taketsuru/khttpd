@@ -131,12 +131,19 @@ khttpd_mbuf_append(struct mbuf *output, const char *begin, const char *end)
 
 	m_getm2(ptr, end - cp, M_WAITOK, MT_DATA, 0);
 
-	for (ptr = ptr->m_next; cp < end; ptr = ptr->m_next) {
+	ptr = ptr->m_next;
+	for (;;) {
+		KASSERT(cp < end, ("cp %p, end %p", cp, end));
 		len = MIN(end - cp, M_TRAILINGSPACE(ptr));
 		bcopy(cp, mtod(ptr, void *), len);
 		ptr->m_len = len;
 		cp += len;
+
+		if (ptr->m_next == NULL)
+			break;
+		ptr = ptr->m_next;
 	}
+	KASSERT(cp == end, ("cp %p, end %p", cp, end));
 
 	return (ptr);
 }
@@ -154,6 +161,51 @@ khttpd_mbuf_append_ch(struct mbuf *output, char ch)
 	return (ptr);
 }
 
+struct mbuf *
+khttpd_mbuf_copy_range(struct khttpd_mbuf_pos *begin,
+    struct khttpd_mbuf_pos *end)
+{
+	struct mbuf *ptr, *result;
+	int len, off;
+
+	ptr = begin->ptr;
+	off = begin->off;
+
+	if (ptr == end->ptr)
+		len = end->off - begin->off;
+
+	else {
+		if (begin->off == 0)
+			len = 0;
+		else {
+			len = ptr->m_len - begin->off;
+			ptr = ptr->m_next;
+		}
+
+		for (; ptr != end->ptr; ptr = ptr->m_next)
+			len += ptr->m_len;
+
+		len += end->off;
+	}
+
+	if (0 < off && begin->unget != -1) {
+		--off;
+		++len;
+	}
+
+	if (0 < len && end->unget != -1)
+		--len;
+
+	result = m_copym(begin->ptr, off, len, M_WAITOK);
+
+	if (off == 0 && begin->unget != -1) {
+		result = m_prepend(result, 1, M_WAITOK);
+		*mtod(result, char *) = begin->unget;
+	}
+
+	return (result);
+}
+
 void
 khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *iter, struct mbuf *ptr,
     int off)
@@ -162,13 +214,6 @@ khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *iter, struct mbuf *ptr,
 	iter->unget = -1;
 	iter->ptr = ptr;
 	iter->off = off;
-}
-
-void
-khttpd_mbuf_pos_copy(struct khttpd_mbuf_pos *x, struct khttpd_mbuf_pos *y)
-{
-
-	bcopy(x, y, sizeof(*x));
 }
 
 int
@@ -226,13 +271,15 @@ khttpd_mbuf_next_line(struct khttpd_mbuf_pos *iter)
 	int off;
 	boolean_t found;
 
+	KHTTPD_ENTRY("%s({%p,%d,%#x})",
+	    __func__, iter->ptr, iter->off, iter->unget);
+
 	if (iter->unget == '\n') {
 		iter->unget = -1;
 		return (TRUE);
 	}
 
-	if (iter->unget != -1)
-		iter->unget = -1;
+	iter->unget = -1;
 
 	ptr = iter->ptr;
 	off = iter->off;
@@ -240,9 +287,10 @@ khttpd_mbuf_next_line(struct khttpd_mbuf_pos *iter)
 	for (;;) {
 		begin = mtod(ptr, char *) + off;
 		end = mtod(ptr, char *) + ptr->m_len;
-		cp = khttpd_find_ch_in(begin, end, '\n');
+		KASSERT(begin <= end, ("begin %p, end %p", begin, end));
+		cp = memchr(begin, '\n', end - begin);
 		if (cp != NULL) {
-			off = cp + 1 - begin;
+			off = cp - mtod(ptr, char *) + 1;
 			found = TRUE;
 			break;
 		}
@@ -355,8 +403,8 @@ khttpd_mbuf_get_header_field(struct khttpd_mbuf_pos *iter, const char *name,
     struct sbuf *value)
 {
 	struct mbuf *ptr;
-	const char *begin, *cp, *end;
-	int off;
+	const char *begin, *cp;
+	int off, len;
 	int ch, nch, uch;
 
 	for (;;) {
@@ -380,8 +428,10 @@ khttpd_mbuf_get_header_field(struct khttpd_mbuf_pos *iter, const char *name,
 	uch = iter->unget;
 	iter->unget = -1;
 	
-	if (uch == '\n')
+	if (uch == '\n') {
+		KHTTPD_NOTE("%s uch lf", __func__);
 		return (TRUE);
+	}
 
 	if (uch != -1)
 		sbuf_putc(value, uch);
@@ -391,15 +441,15 @@ khttpd_mbuf_get_header_field(struct khttpd_mbuf_pos *iter, const char *name,
 
 	for (;;) {
 		begin = mtod(ptr, char *) + off;
-		end = begin + ptr->m_len;
-		cp = khttpd_find_ch_in(begin + off, end, '\n');
+		len = ptr->m_len - off;
+		cp = memchr(begin, '\n', len);
 		if (cp != NULL) {
 			sbuf_bcat(value, begin, cp - begin);
-			off = cp + 1 - begin;
+			off = cp + 1 - mtod(ptr, char *);
 			break;
 		}
 
-		sbuf_bcat(value, begin, end - begin);
+		sbuf_bcat(value, begin, len);
 
 		if (ptr->m_next == NULL) {
 			off = ptr->m_len;
@@ -543,6 +593,41 @@ end:
 		*end_out = bp;
 	
 	return (error);
+}
+
+void
+khttpd_mbuf_copy_to_sbuf(struct khttpd_mbuf_pos *begin,
+    struct khttpd_mbuf_pos *end, struct sbuf *dst)
+{
+	struct mbuf *ptr;
+
+	if (begin->unget)
+		sbuf_putc(dst, begin->unget);
+
+	ptr = begin->ptr;
+	if (ptr == end->ptr) {
+		KASSERT(begin->off <= end->off,
+		    ("ptr %p, begin off %d, end off %d",
+			ptr, begin->off, end->off));
+		sbuf_bcat(dst, mtod(ptr, char *) + begin->off,
+		    end->off - begin->off);
+
+	} else {
+		if (0 < begin->off) {
+			sbuf_bcat(dst, mtod(ptr, char *) + begin->off,
+			    ptr->m_len - begin->off);
+			ptr = ptr->m_next;
+		}
+
+		for (; ptr != end->ptr; ptr = ptr->m_next)
+			sbuf_bcat(dst, mtod(ptr, char *), ptr->m_len);
+	}
+
+	if (end->unget != -1) {
+		KASSERT(0 < sbuf_len(dst),
+		    ("sbuf_len(dst) %zd", sbuf_len(dst)));
+		sbuf_setpos(dst, sbuf_len(dst) - 1);
+	}
 }
 
 int
@@ -1106,6 +1191,22 @@ khttpd_mbuf_json_cstr(struct khttpd_mbuf_json *v, boolean_t is_string,
 		khttpd_mbuf_append_ch(tail, '"');
 	} else
 		khttpd_mbuf_append(v->mbuf, value, value + strlen(value));
+}
+
+void
+khttpd_mbuf_json_bytes(struct khttpd_mbuf_json *v, boolean_t is_string,
+    const char *begin, const char *end)
+{
+	struct mbuf *tail;
+
+	khttpd_mbuf_json_begin_element(v);
+
+	if (is_string) {
+		tail = khttpd_mbuf_append_ch(v->mbuf, '"');
+		tail = khttpd_mbuf_escape(tail, begin, end);
+		khttpd_mbuf_append_ch(tail, '"');
+	} else
+		khttpd_mbuf_append(v->mbuf, begin, end);
 }
 
 void

@@ -37,82 +37,83 @@
 #include "khttpd_init.h"
 #include "khttpd_strtab.h"
 
-static struct khttpd_strtab_entry khttpd_methods[] = {
-	{ "ACL" },
-	{ "BASELINE-CONTROL" },
-	{ "BIND" },
-	{ "CHECKIN" },
-	{ "CHECKOUT" },
-	{ "CONNECT" },
-	{ "COPY" },
-	{ "DELETE" },
-	{ "GET" },
-	{ "HEAD" },
-	{ "LABEL" },
-	{ "LINK" },
-	{ "LOCK" },
-	{ "MERGE" },
-	{ "MKACTIVITY" },
-	{ "MKCALENDAR" },
-	{ "MKCOL" },
-	{ "MKREDIRECTREF" },
-	{ "MKWORKSPACE" },
-	{ "MOVE" },
-	{ "OPTIONS" },
-	{ "ORDERPATCH" },
-	{ "PATCH" },
-	{ "POST" },
-	{ "PRI" },
-	{ "PROPFIND" },
-	{ "PROPPATCH" },
-	{ "PUT" },
-	{ "REBIND" },
-	{ "REPORT" },
-	{ "SEARCH" },
-	{ "TRACE" },
-	{ "UNBIND" },
-	{ "UNCHECKOUT" },
-	{ "UNLINK" },
-	{ "UNLOCK" },
-	{ "UPDATE" },
-	{ "UPDATEREDIRECTREF" },
-	{ "VERSION-CONTROL" },
+static const char *khttpd_methods[] = {
+	"ACL",
+	"BASELINE-CONTROL",
+	"BIND",
+	"CHECKIN",
+	"CHECKOUT",
+	"CONNECT",
+	"COPY",
+	"DELETE",
+	"GET",
+	"HEAD",
+	"LABEL",
+	"LINK",
+	"LOCK",
+	"MERGE",
+	"MKACTIVITY",
+	"MKCALENDAR",
+	"MKCOL",
+	"MKREDIRECTREF",
+	"MKWORKSPACE",
+	"MOVE",
+	"OPTIONS",
+	"ORDERPATCH",
+	"PATCH",
+	"POST",
+	"PRI",
+	"PROPFIND",
+	"PROPPATCH",
+	"PUT",
+	"REBIND",
+	"REPORT",
+	"SEARCH",
+	"TRACE",
+	"UNBIND",
+	"UNCHECKOUT",
+	"UNLINK",
+	"UNLOCK",
+	"UPDATE",
+	"UPDATEREDIRECTREF",
+	"VERSION-CONTROL",
 };
 
 CTASSERT(nitems(khttpd_methods) == KHTTPD_METHOD_END);
 
-static struct khttpd_strtab_entry_slist
-    khttpd_method_table[KHTTPD_STRTAB_POW2_CEIL(KHTTPD_METHOD_END)];
+static struct khttpd_strtab *khttpd_method_strtab;
 
 int
 khttpd_method_find(const char *begin, const char *end)
 {
-	struct khttpd_strtab_entry *entry;
 
-	entry = khttpd_strtab_find(khttpd_method_table,
-	    nitems(khttpd_method_table), begin, end, FALSE);
-
-	return (entry == NULL ? KHTTPD_METHOD_UNKNOWN :
-	    entry - khttpd_methods);
+	return (khttpd_strtab_find(khttpd_method_strtab, begin, end, FALSE));
 }
 
 const char *
 khttpd_method_name(int method)
 {
 
-	if (method < 0 || KHTTPD_METHOD_END <= method)
-		return (NULL);
-	return (khttpd_methods[method].name);
+	return (method < 0 || KHTTPD_METHOD_END <= method ? NULL :
+	    khttpd_methods[method]);
 }
 
 static int
 khttpd_method_init(void)
 {
 
-	khttpd_strtab_init(khttpd_method_table, nitems(khttpd_method_table),
-	    khttpd_methods, nitems(khttpd_methods));
+	khttpd_method_strtab = khttpd_strtab_new(khttpd_methods,
+	    nitems(khttpd_methods));
 
-	return (0);
+	return (khttpd_method_strtab != NULL ? 0 : ENOMEM);
 }
 
-KHTTPD_INIT(khttpd_method, khttpd_method_init, NULL, KHTTPD_INIT_PHASE_LOCAL);
+static void
+khttpd_method_fini(void)
+{
+
+	khttpd_strtab_delete(khttpd_method_strtab);
+}
+
+KHTTPD_INIT(khttpd_method, khttpd_method_init, khttpd_method_fini,
+    KHTTPD_INIT_PHASE_LOCAL);

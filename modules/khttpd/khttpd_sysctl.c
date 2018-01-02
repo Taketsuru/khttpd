@@ -65,8 +65,7 @@ static void khttpd_sysctl_put(struct khttpd_exchange *exchange);
 static void khttpd_sysctl_options(struct khttpd_exchange *exchange);
 static void khttpd_sysctl_put_data_dtor(struct khttpd_exchange *, void *);
 static void khttpd_sysctl_put_data_put(struct khttpd_exchange *, void *,
-    struct mbuf *, boolean_t *);
-static void khttpd_sysctl_put_data_end(struct khttpd_exchange *, void *);
+    struct mbuf *, bool *);
 
 static struct khttpd_location_ops khttpd_sysctl_location_ops = {
 	.set_error_response = khttpd_exchange_set_response_body_problem_json,
@@ -78,7 +77,6 @@ static struct khttpd_location_ops khttpd_sysctl_location_ops = {
 static struct khttpd_exchange_ops khttpd_sysctl_put_ops = {
 	.dtor = khttpd_sysctl_put_data_dtor,
 	.put = khttpd_sysctl_put_data_put,
-	.end = khttpd_sysctl_put_data_end,
 };	
 
 static const char *khttpd_sysctl_types[] = {
@@ -187,64 +185,64 @@ khttpd_sysctl_value_in_json(struct khttpd_mbuf_json *output, void *valbuf,
 	switch (kind & CTLTYPE) {
 
 	case CTLTYPE_INT:
-		khttpd_mbuf_json_format(output, FALSE, "%d", *(int *)valbuf);
+		khttpd_mbuf_json_format(output, false, "%d", *(int *)valbuf);
 		break;
 
 	case CTLTYPE_STRING:
-		khttpd_mbuf_json_format(output, TRUE, "%.*s", valbuflen,
+		khttpd_mbuf_json_format(output, true, "%.*s", valbuflen,
 		    valbuf);
 		break;
 
 	case CTLTYPE_S64:
-		khttpd_mbuf_json_format(output, FALSE, "%jd",
+		khttpd_mbuf_json_format(output, false, "%jd",
 		    (intmax_t)*(int64_t *)valbuf);
 		break;
 
 	case CTLTYPE_UINT:
-		khttpd_mbuf_json_format(output, FALSE, "%u", *(u_int *)valbuf);
+		khttpd_mbuf_json_format(output, false, "%u", *(u_int *)valbuf);
 		break;
 
 	case CTLTYPE_LONG:
-		khttpd_mbuf_json_format(output, FALSE, "%ld", *(long *)valbuf);
+		khttpd_mbuf_json_format(output, false, "%ld", *(long *)valbuf);
 		break;
 
 	case CTLTYPE_ULONG:
-		khttpd_mbuf_json_format(output, FALSE, "%lu",
+		khttpd_mbuf_json_format(output, false, "%lu",
 		    *(u_long *)valbuf);
 		break;
 
 	case CTLTYPE_U64:
-		khttpd_mbuf_json_format(output, FALSE, "%ju",
+		khttpd_mbuf_json_format(output, false, "%ju",
 		    (uintmax_t)*(uint64_t *)valbuf);
 		break;
 
 	case CTLTYPE_U8:
-		khttpd_mbuf_json_format(output, FALSE, "%u",
+		khttpd_mbuf_json_format(output, false, "%u",
 		    *(uint8_t *)valbuf);
 		break;
 
 	case CTLTYPE_U16:
-		khttpd_mbuf_json_format(output, FALSE, "%u",
+		khttpd_mbuf_json_format(output, false, "%u",
 		    *(uint16_t *)valbuf);
 		break;
 
 	case CTLTYPE_S8:
-		khttpd_mbuf_json_format(output, FALSE, "%d",
+		khttpd_mbuf_json_format(output, false, "%d",
 		    *(int8_t *)valbuf);
 		break;
 
 	case CTLTYPE_S16:
-		khttpd_mbuf_json_format(output, FALSE, "%d",
+		khttpd_mbuf_json_format(output, false, "%d",
 		    *(int16_t *)valbuf);
 		break;
 
 	case CTLTYPE_S32:
-		khttpd_mbuf_json_format(output, FALSE, "%d",
+		khttpd_mbuf_json_format(output, false, "%d",
 		    *(int32_t *)valbuf);
 		break;
 
 	case CTLTYPE_U32:
-		khttpd_mbuf_json_format(output, FALSE, "%u",
+		khttpd_mbuf_json_format(output, false, "%u",
 		    *(uint32_t *)valbuf);
 		break;
 	}
@@ -278,7 +276,7 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 	khttpd_mbuf_json_property(&body, "flags");
 	khttpd_mbuf_json_array_begin(&body);
 	for (i = 0; i < khttpd_sysctl_flags_count; ++i)
-		khttpd_mbuf_json_cstr(&body, TRUE,
+		khttpd_mbuf_json_cstr(&body, true,
 		    khttpd_sysctl_flags[i].field_name);
 	khttpd_mbuf_json_array_end(&body);
 
@@ -346,33 +344,33 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 		    next_oidlen / sizeof(int));
 		sbuf_finish(&sbuf);
 		khttpd_mbuf_json_property(&body, "href");
-		khttpd_mbuf_json_cstr(&body, TRUE, sbuf_data(&sbuf));
+		khttpd_mbuf_json_cstr(&body, true, sbuf_data(&sbuf));
 		sbuf_clear(&sbuf);
 
 		/* Print "name" property */
 		khttpd_mbuf_json_property(&body, "name");
-		khttpd_mbuf_json_cstr(&body, TRUE, namebuf);
+		khttpd_mbuf_json_cstr(&body, true, namebuf);
 
 		khttpd_mbuf_json_property(&body, "flags");
 		khttpd_mbuf_json_array_begin(&body);
 		for (i = 0; i < khttpd_sysctl_flags_count; ++i)
 			if ((kind & khttpd_sysctl_flags[i].flag) != 0)
-				khttpd_mbuf_json_cstr(&body, TRUE,
+				khttpd_mbuf_json_cstr(&body, true,
 				    khttpd_sysctl_flags[i].field_name);
 		khttpd_mbuf_json_array_end(&body);
 
 		if ((kind & CTLFLAG_SECURE) != 0) {
 			khttpd_mbuf_json_property(&body, "securelevel");
-			khttpd_mbuf_json_format(&body, FALSE, "%d",
+			khttpd_mbuf_json_format(&body, false, "%d",
 			    (kind & CTLMASK_SECURE) >> CTLSHIFT_SECURE);
 		}
 
 		khttpd_mbuf_json_property(&body, "type");
-		khttpd_mbuf_json_cstr(&body, TRUE,
+		khttpd_mbuf_json_cstr(&body, true,
 		    khttpd_sysctl_types[type - 1]);
 
 		khttpd_mbuf_json_property(&body, "format");
-		khttpd_mbuf_json_cstr(&body, TRUE, kindbuf + sizeof(kind));
+		khttpd_mbuf_json_cstr(&body, true, kindbuf + sizeof(kind));
 
 		/* Get the description of the next entry. */
 		next_oid[1] = 5; /* oiddescr */
@@ -389,7 +387,7 @@ khttpd_sysctl_get_index(struct khttpd_exchange *exchange)
 			if (error == 0 && 0 < len && descbuf[0] != '\0') {
 				khttpd_mbuf_json_property(&body,
 				    "description");
-				khttpd_mbuf_json_cstr(&body, TRUE, descbuf);
+				khttpd_mbuf_json_cstr(&body, true, descbuf);
 			}
 		}
 
@@ -578,53 +576,8 @@ khttpd_sysctl_put_data_dtor(struct khttpd_exchange *exchange,
 }
 
 static void
-khttpd_sysctl_put_data_put(struct khttpd_exchange *exchange,
-    void *arg, struct mbuf *m, boolean_t *pause)
-{
-	char buf[128];
-	struct khttpd_mbuf_json problem;
-	struct khttpd_sysctl_put_data *data;
-	int len, status;
-
-	data = arg;
-
-	if (data->rejected) {
-		m_freem(m);
-		return;
-	}
-
-	len = m_length(m, NULL);
-	if (data->limit < len) {
-		m_freem(m);
-		m_freem(data->head);
-		data->head = data->tail = NULL;
-		data->rejected = TRUE;
-
-		khttpd_mbuf_json_new(&problem);
-
-		status = KHTTPD_STATUS_REQUEST_ENTITY_TOO_LARGE;
-		khttpd_problem_response_begin(&problem, status, NULL, NULL);
-
-		snprintf(buf, sizeof(buf),
-		    "The maximum request body size for a sysctl is %d bytes",
-		    KHTTPD_SYSCTL_PUT_MAX);
-		khttpd_problem_set_detail(&problem, buf);
-
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    &problem);
-
-		khttpd_exchange_respond(exchange, status);
-
-		return;
-	}
-
-	data->limit -= len;
-	m_cat(data->tail, m);
-	m_length(data->tail, &data->tail);
-}
-
-static void
-khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
+khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange,
+    struct khttpd_sysctl_put_data *data)
 {
 	static struct int_trait {
 		int64_t min;
@@ -651,7 +604,6 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 
 	int oid[CTL_MAXNAME], tmpoid[CTL_MAXNAME + 2];
 	struct khttpd_mbuf_json problem;
-	struct khttpd_sysctl_put_data *data;
 	struct int_trait *traits;
 	struct khttpd_json *value;
 	struct thread *td;
@@ -675,7 +627,6 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 	} ival;
 
 	CTASSERT(sizeof(((struct sysctl_oid *)0)->oid_kind) == sizeof(kind));
-	data = arg;
 	value = NULL;
 	td = curthread;
 	khttpd_mbuf_json_new(&problem);
@@ -799,6 +750,57 @@ khttpd_sysctl_put_data_end(struct khttpd_exchange *exchange, void *arg)
 }
 
 static void
+khttpd_sysctl_put_data_put(struct khttpd_exchange *exchange,
+    void *arg, struct mbuf *m, bool *pause)
+{
+	char buf[128];
+	struct khttpd_mbuf_json problem;
+	struct khttpd_sysctl_put_data *data;
+	int len, status;
+
+	data = arg;
+
+	if (m == NULL) {
+		khttpd_sysctl_put_data_end(exchange, data);
+		return;
+	}
+
+	if (data->rejected) {
+		m_freem(m);
+		return;
+	}
+
+	len = m_length(m, NULL);
+	if (data->limit < len) {
+		m_freem(m);
+		m_freem(data->head);
+		data->head = data->tail = NULL;
+		data->rejected = true;
+
+		khttpd_mbuf_json_new(&problem);
+
+		status = KHTTPD_STATUS_REQUEST_ENTITY_TOO_LARGE;
+		khttpd_problem_response_begin(&problem, status, NULL, NULL);
+
+		snprintf(buf, sizeof(buf),
+		    "The maximum request body size for a sysctl is %d bytes",
+		    KHTTPD_SYSCTL_PUT_MAX);
+		khttpd_problem_set_detail(&problem, buf);
+
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    &problem);
+
+		khttpd_exchange_respond(exchange, status);
+
+		return;
+	}
+
+	data->limit -= len;
+	m_cat(data->tail, m);
+	m_length(data->tail, &data->tail);
+}
+
+static void
 khttpd_sysctl_put(struct khttpd_exchange *exchange)
 {
 	struct khttpd_sysctl_put_data *data;
@@ -813,7 +815,7 @@ khttpd_sysctl_put(struct khttpd_exchange *exchange)
 	data = khttpd_malloc(sizeof(*data));
 	data->head = data->tail = NULL;
 	data->limit = KHTTPD_SYSCTL_PUT_MAX;
-	data->rejected = FALSE;
+	data->rejected = false;
 	khttpd_exchange_set_ops(exchange, &khttpd_sysctl_put_ops, data);
 }
 
@@ -828,16 +830,16 @@ khttpd_sysctl_options(struct khttpd_exchange *exchange)
 	size_t buflen, oidlen;
 	u_int kind;
 	int error, status;
-	boolean_t writeable;
+	bool writeable;
 
 	td = curthread;
-	writeable = FALSE;
+	writeable = false;
 	khttpd_mbuf_json_new(&body);
 
 	suffix = khttpd_exchange_suffix(exchange);
 	if (suffix[0] == '\0')
 		/* the target is a node */
-		writeable = FALSE;
+		writeable = false;
 
 	else {
 		/* the target is a leaf */

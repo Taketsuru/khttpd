@@ -43,6 +43,8 @@ char *khttpd_rtrim_ws(const char *begin, const char *end);
 uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end,
     uint32_t hash);
 uint32_t khttpd_hash32_str_ci(const char *str, uint32_t hash);
+int khttpd_parse_digits_field(const char *_begin, const char *_end,
+    uintmax_t *_value_out);
 int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
 int khttpd_parse_ipv6_address(u_char *out, const char *value);
 void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
