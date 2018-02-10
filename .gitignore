@@ -45,17 +45,11 @@ modules/khttpd/vnode_if_newproto.h
 modules/khttpd/vnode_if_typedef.h
 usr.sbin/khttpd-init/khttpd-init
 usr.sbin/khttpd-init/khttpd-init.1.gz
-node_modules/
 modules/khttpd/commit
 modules/khttpd/crypto
 modules/khttpd/ddb
-test/access.log
 test/docroot/test.php
 test/docroot/wordpress/
-test/error.log
-test/khttpd.conf
-test/ktr.txt
-test/package-lock.json
 usr.sbin/khttpdctl/khttpdctl
 usr.sbin/khttpdctl/khttpdctl.debug
 usr.sbin/khttpdctl/khttpdctl.full

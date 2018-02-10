@@ -566,19 +566,27 @@ khttpd_server_next_prefix_locked(struct khttpd_server *server,
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, server, prefix);
 
 	/* If 'prefix' has a child, the first child is the result. */
-	if ((next_prefix = TAILQ_FIRST(&prefix->children_tailq)) != NULL)
+	if ((next_prefix = TAILQ_FIRST(&prefix->children_tailq)) != NULL) {
 		return (next_prefix);
+	}
+
+	/* If 'prefix' is the root, 'prefix' is the last element. */
+	if (prefix->parent == NULL) {
+		return (NULL);
+	}
 
 	/* If 'ptr' has a next sibling, it's the result. */
-	if ((next_prefix = TAILQ_NEXT(prefix, children_link)) != NULL)
+	if ((next_prefix = TAILQ_NEXT(prefix, children_link)) != NULL) {
 		return (next_prefix);
+	}
 
 	/* Find the first ancestor which has the next sibling. */
 	for (prefix = prefix->parent; (parent = prefix->parent) != NULL;
 	     prefix = parent) {
 		next_prefix = TAILQ_NEXT(prefix, children_link);
-		if (next_prefix != NULL)
+		if (next_prefix != NULL) {
 			return (next_prefix);
+		}
 	}
 
 	return (NULL);

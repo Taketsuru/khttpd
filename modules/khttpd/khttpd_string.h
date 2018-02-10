@@ -35,7 +35,6 @@
 
 struct sbuf;
 
-char *khttpd_find_ch_in(const char *begin, const char *end, char ch);
 char *khttpd_find_2ch_in(const char *begin, const char *end,
     char ch1, char ch2);
 char *khttpd_skip_ws(const char *ptr);

@@ -37,18 +37,6 @@
 #include "khttpd_malloc.h"
 
 char *
-khttpd_find_ch_in(const char *begin, const char *end, char ch)
-{
-	const char *ptr;
-
-	for (ptr = begin; ptr < end; ++ptr)
-		if (*ptr == ch)
-			return ((char *)ptr);
-
-	return (NULL);
-}
-
-char *
 khttpd_find_2ch_in(const char *begin, const char *end, char ch1, char ch2)
 {
 	const char *ptr;

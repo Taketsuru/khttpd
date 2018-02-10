@@ -372,7 +372,7 @@ void khttpd_mbuf_get_line_and_column(struct khttpd_mbuf_pos *origin,
 	while (ptr != NULL) {
 		begin = mtod(ptr, char *) + off;
 		end = mtod(ptr, char *) + (ptr == eptr ? eoff : ptr->m_len);
-		cp = khttpd_find_ch_in(begin, end, '\n');
+		cp = memchr(begin, '\n', end - begin);
 		if (cp != NULL) {
 			++line;
 			column = 1;
@@ -1237,10 +1237,10 @@ khttpd_mbuf_json_mbuf_1st_line(struct khttpd_mbuf_json *v, struct mbuf *m)
 	for (; m != NULL; m = m->m_next) {
 		begin = mtod(m, char *);
 		end = begin + m->m_len;
-		cp = khttpd_find_ch_in(begin, end, '\n');
-		if (cp == NULL)
+		cp = memchr(begin, '\n', end - begin);
+		if (cp == NULL) {
 			tail = khttpd_mbuf_escape(tail, begin, end);
-		else  {
+		} else {
 			tail = khttpd_mbuf_escape(tail, begin, cp + 1);
 			break;
 		}

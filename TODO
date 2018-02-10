@@ -1,9 +1,8 @@
-- New functional testing framework
-  - Goodbye jasmine and Node.js, welcome back Tcl!
+- More functional tests
 
 - Last-Modified: and ETag:
 
-- Content caching.
+- Caching
 
 - FastCGI timeout/redirect
 
@@ -14,8 +13,6 @@
 - Access control infrastructure
 
 - Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
-
-- Move khttpd_ctrl_parse_json to khttpd_webapi and rename it.
 
 - Currently, khttpd_file_get_exchange_get() limits io_size to MAXPHYS.
   See whether this is necessary or not.

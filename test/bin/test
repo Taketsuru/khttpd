@@ -1,0 +1,48 @@
+#!/bin/sh
+# \
+exec tclsh8.7 "$0" ${1+"$@"}
+
+proc match_test {testcase} {
+    global argc argv
+
+    if {$argc == 0} {
+	return 1
+    }
+
+    set class [info object class $testcase]
+    set result [string match !* [lindex $argv 0]]
+
+    foreach pattern $argv {
+	if {[string match !* $pattern]} {
+	    if {[regexp -- [string range $pattern 1 end] $class]} {
+		set result 0
+	    }
+	} else {
+	    if {[regexp -- $pattern $class]} {
+		set result 1
+	    }
+	}
+    }
+
+    return $result
+}
+
+
+set root [file join [file dirname [info script]] ..]
+lappend auto_path [file join $root lib]
+
+package require test
+
+test::test_driver new
+
+source functional/request.tcl
+#source functional/header.itcl
+#source functional/fcgi.itcl
+
+[test::test_driver instance] select {{testcase} {match_test $testcase}}
+[test::test_driver instance] run
+[test::test_driver instance] report stdout
+
+# Local Variables:
+# mode: tcl
+# End:

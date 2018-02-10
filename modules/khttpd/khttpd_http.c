@@ -367,8 +367,7 @@ khttpd_exchange_respond_with_reason(struct khttpd_exchange *exchange,
 
 	m = m_gethdr(M_WAITOK, MT_DATA);
 	status = exchange->status;
-	khttpd_mbuf_printf(m, "HTTP/1.%d %d %s\r\n", exchange->version_minor,
-	    status, reason);
+	khttpd_mbuf_printf(m, "HTTP/1.1 %d %s\r\n", status, reason);
 
 	exchange->response_header_closed = true;
 	m_cat(m, exchange->response_header);
@@ -915,11 +914,12 @@ khttpd_exchange_set_allow_field(struct khttpd_exchange *exchange)
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 
 	location = exchange->location;
-	if (location == NULL)
-		for (i = 0; i < KHTTPD_METHOD_END; ++i)
+	if (location == NULL) {
+		sbuf_printf(&sbuf, "%s", khttpd_method_name(0));
+		for (i = 1; i < KHTTPD_METHOD_END; ++i)
 			sbuf_printf(&sbuf, ", %s", khttpd_method_name(i));
 
-	else if ((ops = khttpd_location_get_ops(location))->options != NULL)
+	} else if ((ops = khttpd_location_get_ops(location))->options != NULL)
 		ops->options(exchange, &sbuf);
 
 	else {
@@ -1326,11 +1326,15 @@ khttpd_session_next_line(struct khttpd_session *session,
 	if (session->recv_ptr == NULL) {
 		error = khttpd_session_read(session);
 
-		if (error == ENOMSG)
-			khttpd_mbuf_pos_init(bol, NULL, 0);
-
-		if (error != 0)
+		if (error != 0) {
+			khttpd_mbuf_pos_init(bol, session->recv_bol_ptr,
+			    session->recv_bol_off);
+			if (error != EWOULDBLOCK) {
+				session->recv_bol_ptr = NULL;
+				session->recv_bol_off = 0;
+			}
 			return (error);
+		}
 	}
 
 	ptr = session->recv_ptr;
@@ -1346,13 +1350,14 @@ khttpd_session_next_line(struct khttpd_session *session,
 
 		begin = mtod(ptr, char *);
 		end = begin + ptr->m_len;
-		cp = khttpd_find_ch_in(begin + off, end, '\n');
+		cp = memchr(begin + off, '\n', end - begin - off);
 		if (cp != NULL) {
 			session->recv_ptr = ptr;
 			session->recv_off = cp + 1 - begin;
 			khttpd_mbuf_pos_init(bol, session->recv_bol_ptr,
 			    session->recv_bol_off);
 			session->recv_bol_ptr = NULL;
+			session->recv_bol_off = 0;
 			return (0);
 		}
 
@@ -1371,15 +1376,16 @@ khttpd_session_next_line(struct khttpd_session *session,
 			session->recv_off = off = ptr->m_len;
 			error = khttpd_session_read(session);
 
-			if (error == ENOMSG) {
+			if (error != 0) {
 				khttpd_mbuf_pos_init(bol,
 				    session->recv_bol_ptr, 
 				    session->recv_bol_off);
-				session->recv_bol_ptr = NULL;
-			}
-
-			if (error != 0)
+				if (error != EWOULDBLOCK) {
+					session->recv_bol_ptr = NULL;
+					session->recv_bol_off = 0;
+				}
 				return (error);
+			}
 		}
 	}
 }
@@ -1604,7 +1610,7 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 	struct mbuf *m;
 	khttpd_method_fn_t handler;
 	struct khttpd_location_ops *ops;
-	int method;
+	int method, status;
 
 	exchange = &session->exchange;
 
@@ -1674,12 +1680,15 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 
 	} else {
 		/*
-		 * If the request doesn't have matching location, send a 'bad
-		 * request' response.
+		 * If the request doesn't have matching location, send a 'not
+		 * found' response.
 		 */
-		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
-		khttpd_exchange_reject(exchange);
-		return;
+		KHTTPD_BRANCH("%s %p not found %u",
+		    __func__, exchange, __LINE__);
+		status = KHTTPD_STATUS_NOT_FOUND;
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    NULL);
+		khttpd_exchange_respond(exchange, status);
 	}
 
 	/* Send continue response if it has been requested. */
@@ -2141,6 +2150,8 @@ khttpd_session_receive_request_line(struct khttpd_session *session)
 		break;
 
 	default:
+		pos.ptr = NULL;
+		pos.off = 0;
 		break;
 	}
 
@@ -2149,6 +2160,29 @@ khttpd_session_receive_request_line(struct khttpd_session *session)
 
 	khttpd_mbuf_json_new(&exchange->log_entry);
 	khttpd_mbuf_json_object_begin(&exchange->log_entry);
+
+	/* Remove preceding empty lines. */
+
+	m = session->recv_leftovers;
+	session->recv_leftovers = NULL;
+	KHTTPD_TR("%s m=%p", __func__, m);
+
+	while (m != NULL && m != pos.ptr)
+		m = m_free(m);
+	m = pos.ptr;
+	KHTTPD_TR("%s pos.ptr=%p", __func__, m);
+	if (m != NULL && pos.off != 0) {
+		KHTTPD_TR("%s m=%p, recv_ptr=%p, recv_off=%d, pos.off=%d",
+		    __func__, m, session->recv_ptr,
+		    session->recv_off, pos.off);
+		if (m == session->recv_ptr)
+			session->recv_off -= pos.off;
+		m_adj(m, pos.off);
+		pos.off = 0;
+		session->recv_tail = m_last(m);
+	}
+	exchange->request_line = m;
+	KHTTPD_TR("%s request_line=%p", __func__, m);
 
 	/* 
 	 * If the request line is longer than khttpd_message_size_limit
@@ -2162,23 +2196,6 @@ khttpd_session_receive_request_line(struct khttpd_session *session)
 		khttpd_exchange_reject(exchange);
 		return (error);
 	}
-
-	/* Remove preceding empty lines. */
-
-	m = session->recv_leftovers;
-	session->recv_leftovers = NULL;
-
-	while (m != NULL && m != pos.ptr)
-		m = m_free(m);
-	m = pos.ptr;
-	if (pos.off != 0) {
-		if (m == session->recv_ptr)
-			session->recv_off -= pos.off;
-		m_adj(m, pos.off);
-		pos.off = 0;
-		session->recv_tail = m_last(m);
-	}
-	exchange->request_line = m;
 
 	/* Find the method of this request message. */
 

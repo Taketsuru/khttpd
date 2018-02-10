@@ -1,15 +1,7 @@
-all: khttpd.conf
+all: test
 
-test: khttpd.conf
-	rm -f ktr.txt access.log error.log
-	node_modules/jasmine/bin/jasmine.js
-
-depend:
-	npm install
+test:
+	bin/test
 
 clean:
-	rm -rf node_modules khttpd.conf
-
-khttpd.conf: khttpd.conf.tmpl
-	sed 's,$$PROJECT,'${.CURDIR}',g' <khttpd.conf.tmpl > khttpd.conf \
-	|| rm -f khttpd.conf
+	rm -f log/ktr.txt log/access.log log/error.log
