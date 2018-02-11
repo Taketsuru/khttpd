@@ -200,7 +200,7 @@ namespace eval test {
 	    return $_result
 	}
 
-	method ok {{result ""}} {
+	method done {{result ""}} {
 	    set _result $result
 	    set _wchan 1
 	}
@@ -216,14 +216,47 @@ namespace eval test {
 	}
     }
 
-    proc test_chan {chan timeout props body} {
-	set tester [test::event_tester new $chan $props]
-	oo::objdefine $tester $body
+    proc test_chan {args} {
+	if {[llength $args] < 1} {
+	    return -code error -errorcode [list KHTTPD TEST error] \
+		"wrong # args: should be \"test_chan ?-timeout millis?\
+		?-result result_var? ?-props props? chan body"
+	}
+
+	set props {}
+	set timeout 1000
+	set n [llength $args]
+	for {set i 0} {$i < $n - 2} {incr i} {
+	    set arg [lindex $args $i]
+	    switch -exact -- $arg {
+		-props {
+		    incr i
+		    set props [lindex $args $i]
+		}
+		-result {
+		    incr i
+		    upvar 1 [lindex $args $i] result
+		}
+		-timeout {
+		    incr i
+		    set timeout [lindex $args $i]
+		}
+		default {
+		    return -code error -errorcode [KHTTPD TEST error] \
+			"bad option \"$arg\": must be -props, -result,\
+			or -timeout"
+		}
+	    }
+	}
+
+	set tester [test::event_tester new [lindex $args end-1] $props]
 	try {
+	    oo::objdefine $tester [lindex $args end]
 	    set result [$tester test $timeout]
 	} finally {
 	    $tester destroy
 	}
+
 	return $result
     }
 

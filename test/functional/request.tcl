@@ -41,218 +41,20 @@ test::define khttpd_request_empty test::khttpd_1conn_testcase {
     close $sock write
 
     # The server close the connection without sending any data.
-    test::test_chan $sock 1000 {} {
-	method on_readable {chan} {
-	    set data [read $chan]
-	    test::assert {$data == "" && [eof $chan]}
-	    my ok
-	}
-    }
-}
-
-proc assert_immediate_eof {sock} {
-    test::test_chan $sock 1000 {} {
-	method on_readable {chan} {
-	    set data [read $chan]
-	    test::assert {$data == "" && [eof $chan]}
-	    my ok
-	}
-    }
+    test::assert_eof $sock
 }
 
 test::define khttpd_request_crlf_only test::khttpd_1conn_testcase {
     set sock [my socket]
 
     # The client sends CRLFs.
-    puts -nonewline $sock [string repeat "\r\n" 512]
+    puts -nonewline $sock [string repeat "\r\n" 4]
 
     # The client shuts down the socket.
     close $sock write
 
     # The server closes the connection without sending any data.
-    assert_immediate_eof $sock
-}
-
-proc create_options_asterisc_request {khttpd} {
-    set req "OPTIONS * HTTP/1.1\r\n"
-    append req "Host: [$khttpd host]\r\n\r\n"
-    return $req
-}
-
-proc assert_receiving_response_header {sock} {
-    return [test::test_chan $sock 1000 {} {
-	variable response
-
-	method _setup {} {
-	    set response ""
-	}
-
-	method _teardown {msg opts} {
-	    if {$opts != ""} {
-		test::add_data response $response
-	    }
-	}
-
-	method on_readable {chan} {
-	    append response [read $chan]
-
-	    set pos [string first "\r\n\r\n" $response]
-	    if {$pos == -1} {
-		test::assert {![eof $chan]}
-		return
-	    }
-
-	    set rest [string range $response [expr {$pos + 4}] end]
-	    set header [test::http_response_header new \
-			    [string range $response 0 [expr {$pos + 3}]]]
-	    my ok [list header $header rest $rest raw_data $response]
-	}
-    }]
-}
-
-proc receive_body {sock data_var len} {
-    upvar 1 $data_var data
-    set data [test::test_chan $sock 10000 [list data $data len $len] {
-	method on_readable {chan} {
-	    append data [read $chan]
-	    set data_len [string length $data]
-	    if {$data_len < $len} {
-		test::assert {![eof $chan]}
-		return
-	    }
-
-	    my ok $data
-	}
-    }]
-}
-
-proc assert_receiving_response {sock} {
-    set result [assert_receiving_response_header $sock]
-    set header [dict get $result header]
-    try {
-	set rest [dict get $result rest]
-	set content_length [$header field Content-Length]
-
-	# XXX chunk transfer is not supported yet.
-
-	if {$content_length != ""} {
-	    test::assert {[regexp -- {^(0|[1-9][0-9]*)$} $content_length]}
-
-	    set rest_len [string length $rest]
-	    if {$rest_len < $content_length} {
-		receive_body $sock rest $content_length
-		set rest_len [string length $rest]
-	    }
-
-	    dict set result body \
-		[string range $rest 0 [expr {$content_length - 1}]]
-	    dict set result rest [string range $rest $content_length end]
-	} else {
-	    dict set result body ""
-	}
-    } on error {msg opts} {
-	$header destroy
-	return -options $opts $msg
-    }
-
-    return $result
-}
-
-proc assert_receiving_options_asterisc_response {sock} {
-    set response [assert_receiving_response_header $sock]
-    set header [dict get $response header]
-    try {
-	test::assert {[dict get $response rest] == ""}
-
-	# The status is 200 (success)
-	test::assert {[$header status] == 200}
-
-	# The value of Content-Length: is 0
-	set content_length [$header field content-length]
-	test::assert {[llength $content_length] == 1 &&
-	    [lindex $content_length 0] == 0}
-
-	# There is an Allow field
-	set allow [$header field allow]
-	test::assert {[llength $allow] == 1}
-	test::assert {[lindex $allow 0] == "ACL, BASELINE-CONTROL,\
-	    BIND, CHECKIN, CHECKOUT, CONNECT, COPY, DELETE, GET, HEAD,\
-	    LABEL, LINK, LOCK, MERGE, MKACTIVITY, MKCALENDAR, MKCOL,\
-	    MKREDIRECTREF, MKWORKSPACE, MOVE, OPTIONS, ORDERPATCH,\
-	    PATCH, POST, PRI, PROPFIND, PROPPATCH, PUT, REBIND,\
-	    REPORT, SEARCH, TRACE, UNBIND, UNCHECKOUT, UNLINK, UNLOCK,\
-	    UPDATE, UPDATEREDIRECTREF, VERSION-CONTROL"}
-
-    } on error {msg opts} {
-	test::add_data response [dict get $response raw_data]
-	return -options $opts $msg
-
-    } finally {
-	$header destroy
-    }
-}
-
-proc check_access_log {khttpd reqs} {
-    global time_fudge
-
-    set logname [test::local_file [dict get [$khttpd logs] access-log]]
-
-    for {set retry 0} {$retry < 4} {incr retry} {
-	after 1000
-	update
-
-	set file [open $logname r]
-	set ents [json::many-json2dict [read $file]]
-	close $file
-
-	if {[llength $reqs] <= [llength $ents]} {
-	    break
-	}
-    }
-
-    test::assert {[llength $ents] == [llength $reqs]}
-
-    foreach entry $ents req $reqs {
-	set arrival_time [dict get $entry arrivalTime]
-	set completion_time [dict get $entry completionTime]
-	set actual_status [dict get $entry status]
-	set actual_peer_family [dict get $entry peer family]
-	set actual_peer_addr [dict get $entry peer address]
-	set actual_peer_port [dict get $entry peer port]
-	set actual_request [dict get $entry request]
-
-	set expected_header [dict get $req header]
-	set expected_request \
-	    [string range $expected_header 0 \
-		 [expr {[string first "\r\n" $expected_header] + 1}]]
-	set expected_status [dict get $req status]
-	set expected_arrival_time \
-	    [expr {[dict get $req arrival_time] / 1000.0}]
-	set expected_completion_time \
-	    [expr {[dict get $req completion_time] / 1000.0}]
-
-	test::assert {$arrival_time < $completion_time}
-	test::assert {abs($expected_arrival_time - $arrival_time) <
-	    $time_fudge}
-	test::assert {abs($expected_completion_time - $completion_time) < 
-	    $time_fudge}
-	test::assert {$actual_status == $expected_status}
-	if {$actual_status == 400} {
-	    test::assert {[string equal \
-			       -length [string length $actual_request] \
-			       $actual_request $expected_request]}
-	} else {
-	    test::assert {$actual_request eq $expected_request}
-	}
-	test::assert {$actual_peer_family == "inet"}
-	#test::assert {$actual_peer_address == ""}
-	#test::assert {$actual_peer_port == ""}
-    }
-}
-
-proc assert_error_log_is_empty {khttpd} {
-    set logname [test::local_file [dict get [$khttpd logs] error-log]]
-    test::assert {[file size $logname] == 0}
+    test::assert_eof $sock
 }
 
 test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
@@ -262,13 +64,13 @@ test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
     set reqs {}
 
     # The client sends a request 'OPTIONS * HTTP/1.1'.
-    set req [create_options_asterisc_request $khttpd]
+    set req [test::create_options_asterisc_request $khttpd]
     set arrival_time [clock milliseconds]
     puts -nonewline $sock $req
 
     # The server sends a successful response to the OPTIONS method.
-    assert_receiving_options_asterisc_response $sock
-    lappend reqs [list header $req status 200 peer $sock \
+    test::assert_receiving_options_asterisc_response $sock
+    lappend reqs [list message $req status 200 peer $sock \
 		      arrival_time $arrival_time \
 		      completion_time [clock milliseconds]]
 
@@ -276,13 +78,13 @@ test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
     close $sock write
 
     # The server close the connection without sending any data.
-    assert_immediate_eof $sock
+    test::assert_eof $sock
 
     # The server writes an entry for the request
-    check_access_log $khttpd $reqs
+    test::check_access_log $khttpd $reqs
 
     # The server doesn't write any error log entries.
-    assert_error_log_is_empty $khttpd
+    test::assert_error_log_is_empty $khttpd
 }
 
 test::define khttpd_request_crlfs_followed_by_options_asterisc \
@@ -296,16 +98,15 @@ test::define khttpd_request_crlfs_followed_by_options_asterisc \
     set reqs {}
 
     # The client sends a request 'OPTIONS * HTTP/1.1'.
-    set req [create_options_asterisc_request $khttpd]
-    set msg [string repeat "\r\n" \
-		 [expr {($message_size_max - [string length $req]) / 2}]]
+    set msg "\r\n\r\n\r\n"
+    set req [test::create_options_asterisc_request $khttpd]
     append msg $req
     set arrival_time [clock milliseconds]
-    puts -nonewline $sock $req
+    puts -nonewline $sock $msg
 
     # The server sends a successful response to the OPTIONS method.
-    assert_receiving_options_asterisc_response $sock
-    lappend reqs [list header $req status 200 peer $sock \
+    test::assert_receiving_options_asterisc_response $sock
+    lappend reqs [list message $req status 200 peer $sock \
 		      arrival_time $arrival_time \
 		      completion_time [clock milliseconds]]
 
@@ -313,13 +114,13 @@ test::define khttpd_request_crlfs_followed_by_options_asterisc \
     close $sock write
 
     # The server close the connection without sending any data.
-    assert_immediate_eof $sock
+    test::assert_eof $sock
 
     # The server writes an entry for the request
-    check_access_log $khttpd $reqs
+    test::check_access_log $khttpd $reqs
 
     # The server doesn't write any error log entries.
-    assert_error_log_is_empty $khttpd
+    test::assert_error_log_is_empty $khttpd
 }
 
 test::define khttpd_request_fragmented_options_asterisc \
@@ -329,7 +130,7 @@ test::define khttpd_request_fragmented_options_asterisc \
     set khttpd [my khttpd]
 
     set reqs {}
-    set req [create_options_asterisc_request $khttpd]
+    set req [test::create_options_asterisc_request $khttpd]
 
     for {set splitpoint 1} {$splitpoint < [string length $req]} \
 	{incr splitpoint} \
@@ -348,8 +149,8 @@ test::define khttpd_request_fragmented_options_asterisc \
 	puts -nonewline $sock $second_half
 
 	# The server sends a successful response to the OPTIONS request.
-	assert_receiving_options_asterisc_response $sock
-	lappend reqs [list header $req status 200 peer $sock \
+	test::assert_receiving_options_asterisc_response $sock
+	lappend reqs [list message $req status 200 peer $sock \
 			  arrival_time $arrival_time \
 			  completion_time [clock milliseconds]]
     }
@@ -358,13 +159,13 @@ test::define khttpd_request_fragmented_options_asterisc \
     close $sock write
 
     # The server close the connection without sending any data.
-    assert_immediate_eof $sock
+    test::assert_eof $sock
 
     # The server writes entries for the requests
-    check_access_log $khttpd $reqs
+    test::check_access_log $khttpd $reqs
 
     # The server doesn't write any error log entries.
-    assert_error_log_is_empty $khttpd
+    test::assert_error_log_is_empty $khttpd
 }
 
 test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
@@ -412,34 +213,43 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 	    set reqlen [string length $req]
 	    puts -nonewline $sock $req
 
-	    set response [assert_receiving_response $sock]
-	    set header [dict get $response header]
+	    set response [test::assert_receiving_response $sock OPTIONS]
 	    try {
-		test::assert {[dict get $response rest] == ""}
+		test::assert {[$response rest] == ""}
 
 		if {$message_size_max < $reqline_wo_tgt_len + $tgtlen} {
-		    test::assert {[$header status] == 400}
+		    # The request line is too large
+
+		    # The server sends Bad Request response.
+		    test::assert {[$response status] == 400}
 
 		    # The server closes the connection
-		    set connection [$header field Connection]
+		    set connection [$response field Connection]
 		    test::assert {[llength $connection] == 1 &&
 			[lindex $connection 0] == "close"}
-		    assert_immediate_eof $sock
+		    test::assert_eof $sock
 
 		} elseif {$message_size_max < $reqlen} {
-		    test::assert {[$header status] == 431}
+		    # The request header field is too large
+
+		    # The server sends Request header field too large response.
+		    test::assert {[$response status] == 431}
 
 		    # The server closes the connection
-		    set connection [$header field Connection]
+		    set connection [$response field Connection]
 		    test::assert {[llength $connection] == 1 &&
 			[lindex $connection 0] == "close"}
-		    assert_immediate_eof $sock
+		    test::assert_eof $sock
 
 		} else {
-		    test::assert {[$header status] == 404}
+		    # The request is small enough but the request target
+		    # xxx... is not found.
+
+		    # The server sends Not Found response.
+		    test::assert {[$response status] == 404}
 
 		    # The server doesn't close the connection
-		    test::assert {[llength [$header field Connection]] == 0}
+		    test::assert {[llength [$response field Connection]] == 0}
 		    test::assert {![eof $sock]}
 
 		    # The client shuts down the socket.
@@ -447,36 +257,35 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 
 		    # The server closes the connection without sending any
 		    # data.
-		    assert_immediate_eof $sock
-
+		    test::assert_eof $sock
 		}
 
 		# When the server sends the above error responses, Content-Type
 		# field value is application/problem+json.
-		set content_type [$header field Content-Type]
+		set content_type [$response field Content-Type]
 		test::assert {[llength $content_type] == 1 &&
 		    [lindex $content_type 0] eq
 		    "application/problem+json; charset=utf-8"}
 
 		# The response body is a JSON object.
-		set ents [json::many-json2dict [dict get $response body]]
+		set ents [json::many-json2dict [$response body]]
 		test::assert {[llength $ents] == 1}
 
 		# The object's property 'status' has the same status code as
 		# the status line of the response.
 		test::assert {[dict get [lindex $ents 0] status] ==
-		    [$header status]}
+		    [$response status]}
 
-		lappend reqs [list header $req status [$header status] \
+		lappend reqs [list message $req status [$response status] \
 				  peer $sock arrival_time $arrival_time \
 				  completion_time [clock milliseconds]]
 
 	    } on error {msg opts} {
-		test::add_data response [dict get $response raw_data]
+		test::add_data response [$response response]
 		return -options $opts $msg
 
 	    } finally {
-		$header destroy
+		$response destroy
 	    }
 	} finally {
 	    close $sock
@@ -484,8 +293,8 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
     }
 
     # The server writes entries for the requests
-    check_access_log $khttpd $reqs
+    test::check_access_log $khttpd $reqs
 
     # The server doesn't write any error log entries.
-    assert_error_log_is_empty $khttpd
+    test::assert_error_log_is_empty $khttpd
 }

@@ -2657,7 +2657,7 @@ khttpd_ctrl_start_helper(void *arg)
 
 	cmd = arg;
 	data = cmd->data;
-	KHTTPD_ENTRY("khttpd_ctrl_start({data=%p})", data);
+	KHTTPD_ENTRY("%s({data=%p})", __func__, data);
 
 	prop_spec.link = NULL;
 	khttpd_mbuf_json_new(&output);
@@ -2795,6 +2795,8 @@ khttpd_ctrl_start(void *arg)
 {
 	struct khttpd_main_start_command *cmd;
 
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
 	cmd = arg;
 	khttpd_socket_run_later(NULL, khttpd_ctrl_start_helper, arg);
 	sx_slock(&khttpd_ctrl_lock);
@@ -2833,6 +2835,8 @@ khttpd_ctrl_ioctl_start(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 		return (EINVAL);
 	}
 
+	bzero(&cmdbuf, sizeof(cmdbuf));
+	cmdbuf.hdr.error = -1;
 	cmdbuf.hdr.handler = khttpd_ctrl_start;
 	cmdbuf.data = m_get(M_WAITOK, MT_DATA);
 	buf = malloc(roundup2(args->size, sizeof(u_int)) + sizeof(u_int),

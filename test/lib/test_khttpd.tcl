@@ -29,7 +29,152 @@ package provide test_khttpd 0.0
 package require test
 
 namespace eval test {
-    namespace export khttpd khttpd_testcase
+    namespace export assert_eof assert_error_log_is_empty \
+	assert_receiving_options_asterisc_response assert_receiving_response \
+	check_access_log create_options_asterisc_request \
+	khttpd khttpd_testcase khttpd_1conn_testcase
+
+    proc assert_eof {sock} {
+	test_chan $sock {
+	    method on_readable {chan} {
+		set data [read $chan]
+		test::assert {$data == "" && [eof $chan]}
+		my done
+	    }
+	}
+    }
+
+    proc assert_error_log_is_empty {khttpd} {
+	set logname [local_file [dict get [$khttpd logs] error-log]]
+	assert {[file size $logname] == 0}
+    }
+
+    proc assert_receiving_options_asterisc_response {sock} {
+	set response [assert_receiving_response $sock OPTIONS]
+	try {
+	    assert {[$response rest] == ""}
+
+	    # The status is 200 (success)
+	    assert {[$response status] == 200}
+
+	    # The value of Content-Length: is 0
+	    set content_length [$response field Content-Length]
+	    assert {[llength $content_length] == 1 &&
+		[lindex $content_length 0] == 0}
+
+	    # There is an Allow field
+	    set allow [$response field allow]
+	    assert {[llength $allow] == 1}
+	    assert {[lindex $allow 0] == "ACL, BASELINE-CONTROL,\
+	    BIND, CHECKIN, CHECKOUT, CONNECT, COPY, DELETE, GET, HEAD,\
+	    LABEL, LINK, LOCK, MERGE, MKACTIVITY, MKCALENDAR, MKCOL,\
+	    MKREDIRECTREF, MKWORKSPACE, MOVE, OPTIONS, ORDERPATCH,\
+	    PATCH, POST, PRI, PROPFIND, PROPPATCH, PUT, REBIND,\
+	    REPORT, SEARCH, TRACE, UNBIND, UNCHECKOUT, UNLINK, UNLOCK,\
+	    UPDATE, UPDATEREDIRECTREF, VERSION-CONTROL"}
+
+	} on error {msg opts} {
+	    add_data response [$response response]
+	    return -options $opts $msg
+
+	} finally {
+	    $response destroy
+	}
+    }
+
+    proc assert_receiving_response {sock method {rest ""}} {
+	set result [http_response new $method]
+	try {
+	    $result append $rest
+
+	    test_chan -props [list response $result] $sock {
+		variable response
+
+		method on_readable {chan} {
+		    set data [read $chan]
+		    if {[$response append $data]} {
+			my done
+		    } else {
+			test::assert {![eof $chan]}
+		    }
+		}
+	    }
+	} on error {msg opts} {
+	    $result destroy
+	    return -options $opts $msg
+	}
+
+	return $result
+    }
+
+    proc check_access_log {khttpd reqs} {
+	global time_fudge
+
+	set logname [local_file [dict get [$khttpd logs] access-log]]
+
+	for {set retry 0} {$retry < 4} {incr retry} {
+	    after 1000
+	    update
+
+	    try {
+		set file [open $logname r]
+		set ents [json::many-json2dict [read $file]]
+		if {[llength $reqs] <= [llength $ents]} {
+		    break
+		}
+
+	    } on error {msg opts} {
+		continue
+
+	    } finally {
+		close $file
+	    }
+	}
+
+	assert {[llength $ents] == [llength $reqs]}
+
+	foreach entry $ents req $reqs {
+	    set arrival_time [dict get $entry arrivalTime]
+	    set completion_time [dict get $entry completionTime]
+	    set actual_status [dict get $entry status]
+	    set actual_peer_family [dict get $entry peer family]
+	    set actual_peer_addr [dict get $entry peer address]
+	    set actual_peer_port [dict get $entry peer port]
+	    set actual_request [dict get $entry request]
+
+	    set reqmsg [dict get $req message]
+	    set expected_request \
+		[string range $reqmsg 0 [string first "\r\n" $reqmsg]+1]
+	    set expected_status [dict get $req status]
+	    set expected_arrival_time \
+		[expr {[dict get $req arrival_time] / 1000.0}]
+	    set expected_completion_time \
+		[expr {[dict get $req completion_time] / 1000.0}]
+
+	    assert {$arrival_time < $completion_time}
+	    assert {abs($expected_arrival_time - $arrival_time) <
+		$time_fudge}
+	    assert {abs($expected_completion_time - $completion_time) < 
+		$time_fudge}
+	    assert {$actual_status == $expected_status}
+	    if {$actual_status == 400} {
+		assert {[string equal \
+				   -length [string length $actual_request] \
+				   $actual_request $expected_request]}
+	    } else {
+		assert {$actual_request eq $expected_request}
+	    }
+	    assert {$actual_peer_family == "inet"}
+	    #assert {$actual_peer_address == ""}
+	    #assert {$actual_peer_port == ""}
+	}
+    }
+
+    proc create_options_asterisc_request {khttpd} {
+	set req "OPTIONS * HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n\r\n"
+	return $req
+    }
 
     oo::class create khttpd {
 	variable handler host loaded module_dirname port \
@@ -137,9 +282,9 @@ namespace eval test {
 	    try {
 		chan configure $sock -blocking 0 -buffering none -eofchar "" \
 		    -translation binary -encoding binary
-		test::test_chan $sock 1000 {} {
+		test::test_chan $sock {
 		    method on_writable {chan} {
-			my ok
+			my done
 		    }
 		}
 	    } on error {msg opts} {

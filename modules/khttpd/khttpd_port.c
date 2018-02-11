@@ -342,6 +342,9 @@ khttpd_socket_worker_find(void)
 	static SIPHASH_CTX siphash_ctx;
 	u_long count, hash;
 
+	KASSERT(0 < khttpd_socket_worker_count,
+	    ("khttpd_socket_worker_count %d", khttpd_socket_worker_count));
+
 	count = atomic_fetchadd_long(&khttpd_port_siphash_counter, 1);
 	hash = SipHash24(&siphash_ctx, khttpd_port_siphash_key,
 	    &count, sizeof(count));
@@ -730,6 +733,8 @@ khttpd_socket_run_later(struct khttpd_socket *socket, void (*fn)(void *),
 	struct khttpd_socket_job *job;
 	struct khttpd_socket_worker *worker;
 
+	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, fn, arg);
+
 	job = khttpd_malloc(sizeof(struct khttpd_socket_job));
 	bzero(job, sizeof(*job));
 	job->fn = fn;
@@ -1067,7 +1072,6 @@ khttpd_socket_worker_main(void *arg)
 	    khttpd_ktr_printf("%s", curthread->td_name));
 
 	worker = arg;
-	worker->thread = curthread;
 
 	mtx_lock(&worker->lock);
 	for (;;) {
@@ -1135,7 +1139,6 @@ static int
 khttpd_port_run(void)
 {
 	struct khttpd_socket_worker **workers, *worker;
-	struct thread *thr;
 	size_t worker_size;
 	int error, i, n;
 
@@ -1171,9 +1174,10 @@ khttpd_port_run(void)
 		STAILQ_INIT(&worker->queue);
 		SLIST_INIT(&worker->free);
 		mtx_init(&worker->lock, "prtwrkr", NULL, MTX_DEF | MTX_NEW);
+		worker->thread = NULL;
 
 		error = kthread_add(khttpd_socket_worker_main, worker, curproc,
-		    &thr, 0, 0, "prtwrkr%d", i);
+		    &worker->thread, 0, 0, "prtwrkr%d", i);
 		if (error != 0) {
 			mtx_destroy(&worker->lock);
 			khttpd_free(worker);
@@ -1186,7 +1190,7 @@ khttpd_port_run(void)
 		}
 
 		SLIST_INSERT_HEAD(&khttpd_socket_worker_table
-		    [khttpd_socket_worker_hash(thr)], worker, sle);
+		    [khttpd_socket_worker_hash(worker->thread)], worker, sle);
 	}
 
 	khttpd_socket_worker_count = i;

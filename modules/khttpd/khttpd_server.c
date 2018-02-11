@@ -567,16 +567,19 @@ khttpd_server_next_prefix_locked(struct khttpd_server *server,
 
 	/* If 'prefix' has a child, the first child is the result. */
 	if ((next_prefix = TAILQ_FIRST(&prefix->children_tailq)) != NULL) {
+		KHTTPD_NOTE("%s child %p", __func__, next_prefix);
 		return (next_prefix);
 	}
 
 	/* If 'prefix' is the root, 'prefix' is the last element. */
 	if (prefix->parent == NULL) {
+		KHTTPD_NOTE("%s root", __func__);
 		return (NULL);
 	}
 
 	/* If 'ptr' has a next sibling, it's the result. */
 	if ((next_prefix = TAILQ_NEXT(prefix, children_link)) != NULL) {
+		KHTTPD_NOTE("%s sibling %p", __func__, next_prefix);
 		return (next_prefix);
 	}
 
@@ -585,9 +588,13 @@ khttpd_server_next_prefix_locked(struct khttpd_server *server,
 	     prefix = parent) {
 		next_prefix = TAILQ_NEXT(prefix, children_link);
 		if (next_prefix != NULL) {
+			KHTTPD_NOTE("%s sibling of ancestor %p", __func__,
+			    next_prefix);
 			return (next_prefix);
 		}
 	}
+
+	KHTTPD_NOTE("%s finish", __func__);
 
 	return (NULL);
 }
