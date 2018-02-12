@@ -48,41 +48,33 @@ namespace eval test {
 	assert {[file size $logname] == 0}
     }
 
-    proc assert_receiving_options_asterisc_response {sock} {
-	set response [assert_receiving_response $sock OPTIONS]
-	try {
-	    assert {[$response rest] == ""}
+    proc assert_it_is_options_asterisc_response {response} {
+	# The status is 200 (success)
+	assert {[$response status] == 200}
 
-	    # The status is 200 (success)
-	    assert {[$response status] == 200}
+	# The value of Content-Length: is 0
+	set content_length [$response field Content-Length]
+	assert {[llength $content_length] == 1 &&
+	    [lindex $content_length 0] == 0}
 
-	    # The value of Content-Length: is 0
-	    set content_length [$response field Content-Length]
-	    assert {[llength $content_length] == 1 &&
-		[lindex $content_length 0] == 0}
-
-	    # There is an Allow field
-	    set allow [$response field allow]
-	    assert {[llength $allow] == 1}
-	    assert {[lindex $allow 0] == "ACL, BASELINE-CONTROL,\
+	# There is an Allow field
+	set allow [$response field allow]
+	assert {[llength $allow] == 1}
+	assert {[lindex $allow 0] == "ACL, BASELINE-CONTROL,\
 	    BIND, CHECKIN, CHECKOUT, CONNECT, COPY, DELETE, GET, HEAD,\
 	    LABEL, LINK, LOCK, MERGE, MKACTIVITY, MKCALENDAR, MKCOL,\
 	    MKREDIRECTREF, MKWORKSPACE, MOVE, OPTIONS, ORDERPATCH,\
 	    PATCH, POST, PRI, PROPFIND, PROPPATCH, PUT, REBIND,\
 	    REPORT, SEARCH, TRACE, UNBIND, UNCHECKOUT, UNLINK, UNLOCK,\
 	    UPDATE, UPDATEREDIRECTREF, VERSION-CONTROL"}
-
-	} on error {msg opts} {
-	    add_data response [$response response]
-	    return -options $opts $msg
-
-	} finally {
-	    $response destroy
-	}
     }
 
-    proc assert_receiving_response {sock method {rest ""}} {
-	set result [http_response new $method]
+    proc assert_receiving_response {sock req {arrival_time ""} {rest ""}} {
+	if {$arrival_time eq ""} {
+	    set arrival_time [expr {[clock milliseconds] / 1000.0}]
+	}
+
+	set result [http_response new $req $arrival_time]
 	try {
 	    $result append $rest
 
@@ -140,18 +132,10 @@ namespace eval test {
 	    set actual_peer_port [dict get $entry peer port]
 	    set actual_request [dict get $entry request]
 
-	    set reqmsg [dict get $req message]
-	    set crlf_pos [string first "\r\n" $reqmsg]
-	    if {$crlf_pos == -1} {
-		set expected_request $reqmsg
-	    } else {
-		set expected_request [string range $reqmsg 0 $crlf_pos+1]
-	    }
-	    set expected_status [dict get $req status]
-	    set expected_arrival_time \
-		[expr {[dict get $req arrival_time] / 1000.0}]
-	    set expected_completion_time \
-		[expr {[dict get $req completion_time] / 1000.0}]
+	    set expected_request [$req request_line]
+	    set expected_status [$req status]
+	    set expected_arrival_time [$req arrival_time]
+	    set expected_completion_time [$req completion_time]
 
 	    assert {$arrival_time < $completion_time}
 	    assert {abs($expected_arrival_time - $arrival_time) <
@@ -362,18 +346,27 @@ namespace eval test {
 
     oo::class create khttpd_testcase {
 	superclass test::testcase
-	variable _khttpd _port_id _server_id
+	variable _khttpd _port_id _server_id _responses
 
 	constructor {} {
 	    next
 	    set _khttpd [test::khttpd new 192.168.56.3 80]
 	    set _port_id [test::uuid_new]
 	    set _server_id [test::uuid_new]
+	    set _responses ""
 	}
 
 	destructor {
+	    foreach response $_responses {
+		$response destroy
+	    }
+
 	    $_khttpd destroy
 	    next
+	}
+
+	method check_access_log {} {
+	    test::check_access_log $_khttpd $_responses
 	}
 
 	method create_config {rewriters_json_list locations_json_list} {
@@ -388,6 +381,27 @@ namespace eval test {
 
 	method khttpd {} {
 	    return $_khttpd
+	}
+
+	method receive_response {sock req {arrival_time ""} {rest ""}} {
+	    set response [test::assert_receiving_response \
+			      $sock $req $arrival_time $rest]
+	    lappend _responses $response
+	    return $response
+	}
+
+	method responses {} {
+	    return $_responses
+	}
+
+	method with_connection {var body} {
+	    set sock [$_khttpd connect]
+	    try {
+		return [uplevel set [list $var] [list $sock]\; $body]
+
+	    } finally {
+		close $sock
+	    }
 	}
 
 	method _config {} {
@@ -417,7 +431,15 @@ namespace eval test {
 	}
 
 	method _collect {data_dict} {
-	    return [dict merge [next $data_dict] [$_khttpd collect_logs]]
+	    if {$_responses eq ""} {
+		return [dict merge [next $data_dict] [$_khttpd collect_logs]]
+
+	    } else {
+		set response [lindex $_responses end]
+		return [dict merge [next $data_dict] [$_khttpd collect_logs] \
+			    [list request [$response request] \
+				 response [$response response]]]
+	    }
 	}
 
     }

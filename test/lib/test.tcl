@@ -589,7 +589,7 @@ namespace eval test {
 	method select {filter} {
 	    my _clear_objs
 
-	    foreach class [lsort [dict keys $test_classes]] {
+	    foreach class [dict keys $test_classes] {
 		set obj [$class new]
 		try {
 		    if {[apply $filter $obj]} {

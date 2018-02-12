@@ -101,16 +101,22 @@ namespace eval test {
     }
 
     oo::class create http_response {
-	variable _body_ranges _chunk_pos _end _fields _fields_pos \
-	    _method _response _trailer_pos
+	variable _arrival_time _body_ranges _completion_time \
+	    _chunk_pos _end _fields \
+	    _fields_pos _request _response _trailer_pos
 
-	constructor {method} {
-	    set _method $method
+	constructor {request arrival_time} {
+	    set _request $request
+	    set _arrival_time $arrival_time
 	    set _trailer_pos ""
 
 	    oo::objdefine [self] method append {data} {
 		tailcall my _append_1st_line $data
 	    }
+	}
+
+	method arrival_time {} {
+	    return $_arrival_time
 	}
 
 	method body {} {
@@ -130,6 +136,10 @@ namespace eval test {
 	    }
 	}
 
+	method completion_time {} {
+	    return $_completion_time
+	}
+
 	method response {} {
 	    return $_response
 	}
@@ -142,6 +152,19 @@ namespace eval test {
 
 	method rest {} {
 	    return [string range $_response $_end end]
+	}
+
+	method request {} {
+	    return $_request
+	}
+
+	method request_line {} {
+	    set pos [string first "\r\n" $_request]
+	    if {$pos == -1} {
+		return $_request
+	    } else {
+		return [string range $_request 0 $pos+1]
+	    }
 	}
 
 	method status {} {
@@ -225,6 +248,7 @@ namespace eval test {
 
 	    if {$_chunk_pos == 0} {
 		set _end $end
+		set _completion_time [expr {[clock milliseconds] / 1000.0}]
 		return 1
 	    }
 
@@ -287,14 +311,19 @@ namespace eval test {
 
 	    if {$_trailer_pos != ""} {
 		set _end $end
+		set _completion_time [expr {[clock milliseconds] / 1000.0}]
 		return 1
 	    }
 
 	    test::assume {[regexp -- {^[^ ]+ ([0-9]+)} $_response match status]}
 	    set status_type [expr {$status / 100}]
 
-	    if {$_method eq "HEAD" ||
-		($_method eq "CONNECT" && $status_type == 2) ||
+	    if {![regexp -- {(^[^ ]+) } $_request match method]} {
+		set method ""
+	    }
+
+	    if {$method eq "HEAD" ||
+		($method eq "CONNECT" && $status_type == 2) ||
 		$status_type == 1 || $status == 204 || $status == 304} {
 		lappend _body_ranges $end $end
 		tailcall my _done

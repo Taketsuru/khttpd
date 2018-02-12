@@ -31,7 +31,7 @@ package require test
 package require test_http
 package require test_khttpd
 
-test::define khttpd_request_empty test::khttpd_1conn_testcase {
+test::define immediate_eof test::khttpd_1conn_testcase {
     set sock [my socket]
 
     # The client shuts down the socket without sending any data.
@@ -41,7 +41,7 @@ test::define khttpd_request_empty test::khttpd_1conn_testcase {
     test::assert_eof $sock
 }
 
-test::define khttpd_request_crlf_only test::khttpd_1conn_testcase {
+test::define crlf_only test::khttpd_1conn_testcase {
     set sock [my socket]
 
     # The client sends CRLFs.
@@ -54,22 +54,18 @@ test::define khttpd_request_crlf_only test::khttpd_1conn_testcase {
     test::assert_eof $sock
 }
 
-test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
+test::define options_asterisc test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
 
-    set reqs {}
-
     # The client sends a request 'OPTIONS * HTTP/1.1'.
     set req [test::create_options_asterisc_request $khttpd]
-    set arrival_time [clock milliseconds]
     puts -nonewline $sock $req
 
     # The server sends a successful response to the OPTIONS method.
-    test::assert_receiving_options_asterisc_response $sock
-    lappend reqs [list message $req status 200 peer $sock \
-		      arrival_time $arrival_time \
-		      completion_time [clock milliseconds]]
+    set response [my receive_response $sock $req]
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_options_asterisc_response $response
 
     # The client shuts down the socket.
     close $sock write
@@ -77,32 +73,26 @@ test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    test::check_access_log $khttpd $reqs
+    my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define khttpd_request_crlfs_followed_by_options_asterisc \
-    test::khttpd_1conn_testcase \
-{
+test::define crlfs_followed_by_request test::khttpd_1conn_testcase {
     variable ::test::message_size_max
 
     set sock [my socket]
     set khttpd [my khttpd]
 
-    set reqs {}
-
     # The client sends a request 'OPTIONS * HTTP/1.1'.
     set msg "\r\n\r\n\r\n"
     set req [test::create_options_asterisc_request $khttpd]
     append msg $req
-    set arrival_time [clock milliseconds]
     puts -nonewline $sock $msg
 
     # The server sends a successful response to the OPTIONS method.
-    test::assert_receiving_options_asterisc_response $sock
-    lappend reqs [list message $req status 200 peer $sock \
-		      arrival_time $arrival_time \
-		      completion_time [clock milliseconds]]
+    set response [my receive_response $sock $req]
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_options_asterisc_response $response
 
     # The client shuts down the socket.
     close $sock write
@@ -110,40 +100,32 @@ test::define khttpd_request_crlfs_followed_by_options_asterisc \
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    test::check_access_log $khttpd $reqs
+    my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define khttpd_request_fragmented_options_asterisc \
-    test::khttpd_1conn_testcase \
-{
+test::define fragmented_request test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
-
-    set reqs {}
     set req [test::create_options_asterisc_request $khttpd]
 
     for {set splitpoint 1} {$splitpoint < [string length $req]} \
 	{incr splitpoint} \
     {
-	# The client sends a request 'OPTIONS * HTTP/1.1' splitted into 2
-	# segments.
+	# The client sends a request 'OPTIONS * HTTP/1.1' splitted
+	# into 2 segments.
+	set arrival_time [expr {[clock milliseconds] / 1000.0}]
 	set first_half [string range $req 0 [expr {$splitpoint - 1}]]
 	set second_half [string range $req $splitpoint end]
-
 	puts -nonewline $sock $first_half
-
 	after 100
 	update
-
-	set arrival_time [clock milliseconds]
 	puts -nonewline $sock $second_half
 
 	# The server sends a successful response to the OPTIONS request.
-	test::assert_receiving_options_asterisc_response $sock
-	lappend reqs [list message $req status 200 peer $sock \
-			  arrival_time $arrival_time \
-			  completion_time [clock milliseconds]]
+	set response [my receive_response $sock $req $arrival_time]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
     }
 
     # The client shuts down the socket.
@@ -152,17 +134,14 @@ test::define khttpd_request_fragmented_options_asterisc \
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    test::check_access_log $khttpd $reqs
+    my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
+test::define size_limit_in_the_midst_of_request test::khttpd_testcase {
     variable ::test::message_size_max
 
     set khttpd [my khttpd]
-
-    set reqs {}
-
     set reqline_head "OPTIONS "
     set reqline_tail " HTTP/1.1\r\n"
     set fields "Host: [$khttpd host]\r\n\r\n"
@@ -193,117 +172,79 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 	[expr {[string length $reqline_head] + [string length $reqline_tail]}]
 
     foreach tgtlen $tgtlen_list {
-	set sock [[my khttpd] connect]
-	try {
+	my with_connection sock {
 	    set target [string repeat x $tgtlen]
-	    set arrival_time [clock milliseconds]
 	    set req $reqline_head$target$reqline_tail$fields
 	    set reqlen [string length $req]
 	    puts -nonewline $sock $req
 
-	    set response [test::assert_receiving_response $sock OPTIONS]
-	    try {
-		test::assert {[$response rest] == ""}
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response rest] == ""}
+	    test::assert_it_is_default_error_response $response
 
-		if {$message_size_max < $reqline_wo_tgt_len + $tgtlen} {
-		    # The request line is too large
+	    if {$message_size_max < $reqline_wo_tgt_len + $tgtlen} {
+		# The request line is too large
 
-		    # The server sends Bad Request response.
-		    test::assert {[$response status] == 400}
+		# The server sends Bad Request response.
+		test::assert {[$response status] == 400}
 
-		    test::assert_it_is_the_last_response $sock $response
+		test::assert_it_is_the_last_response $sock $response
 
-		} elseif {$message_size_max < $reqlen} {
-		    # The request header field is too large
+	    } elseif {$message_size_max < $reqlen} {
+		# The request header field is too large
 
-		    # The server sends Request header field too large response.
-		    test::assert {[$response status] == 431}
+		# The server sends Request header field too large response.
+		test::assert {[$response status] == 431}
 
-		    test::assert_it_is_the_last_response $sock $response
+		test::assert_it_is_the_last_response $sock $response
 
-		} else {
-		    # The request is small enough but the request target
-		    # xxx... is not found.
+	    } else {
+		# The request is small enough but the request target
+		# xxx... is not found.
 
-		    # The server sends Not Found response.
-		    test::assert {[$response status] == 404}
+		# The server sends Not Found response.
+		test::assert {[$response status] == 404}
 
-		    # The server doesn't close the connection
-		    test::assert {[llength [$response field Connection]] == 0}
-		    test::assert {![eof $sock]}
+		# The server doesn't close the connection
+		test::assert {[llength [$response field Connection]] == 0}
+		test::assert {![eof $sock]}
 
-		    # The client shuts down the socket.
-		    close $sock write
+		# The client shuts down the socket.
+		close $sock write
 
-		    # The server closes the connection without sending any
-		    # data.
-		    test::assert_eof $sock
-		}
-
-		test::assert_it_is_default_error_response $response
-
-		lappend reqs [list message $req status [$response status] \
-				  peer $sock arrival_time $arrival_time \
-				  completion_time [clock milliseconds]]
-
-	    } on error {msg opts} {
-		test::add_data response [$response response]
-		return -options $opts $msg
-
-	    } finally {
-		$response destroy
+		# The server closes the connection without sending any
+		# data.
+		test::assert_eof $sock
 	    }
-
-	} finally {
-	    close $sock
 	}
     }
 
-    test::check_access_log $khttpd $reqs
+    my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define khttpd_request_partial_request test::khttpd_testcase {
+test::define partial_request test::khttpd_testcase {
     set khttpd [my khttpd]
-
-    set reqs {}
-
-    set req "OPTIONS * HTTP/1.1\r\nHost: [$khttpd host]\r\n\r\n"
+    set req [test::create_options_asterisc_request $khttpd]
     set len [string length $req]
 
     for {set i 0} {$i < $len - 1} {incr i} {
-	set sock [[my khttpd] connect]
-	try {
-	    set arrival_time [clock milliseconds]
+	my with_connection {sock} {
 	    set preq [string range $req 0 $i]
 	    puts -nonewline $sock $preq
 
 	    # The client shuts down the socket.
 	    close $sock write
 
-	    set response [test::assert_receiving_response $sock OPTIONS]
-	    try {
-		# The server sends Bad Request response.
-		test::assert {[$response status] == 400}
-		test::assert_it_is_the_last_response $sock $response
-		test::assert_it_is_default_error_response $response
+	    set response [my receive_response $sock $preq]
 
-		lappend reqs [list message $preq status [$response status] \
-				  peer $sock arrival_time $arrival_time \
-				  completion_time [clock milliseconds]]
-
-	    } on error {msg opts} {
-		test::add_data response [$response response]
-		return -options $opts $msg
-
-	    } finally {
-		$response destroy
-	    }
-	} finally {
-	    close $sock
+	    # The server sends Bad Request response.
+	    test::assert {[$response status] == 400}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
 	}
     }
 
-    test::check_access_log $khttpd $reqs
+    my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
