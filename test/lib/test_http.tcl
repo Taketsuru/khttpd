@@ -27,11 +27,14 @@
 
 package provide test_http 0.0
 
+package require json
+package require test
+
 namespace eval test {
 
-    namespace export http_status
+    namespace export {[a-z]*}
 
-    variable header_only_fields [lmap {v} {
+    variable _header_only_fields [lmap {v} {
 	Age
 	Authorization
 	Cache-Control
@@ -59,6 +62,30 @@ namespace eval test {
 	WWW-Authenticate
     } { string tolower $v }]
     variable token_regexp {[a-zA-Z0-9!#$%&'*+-.^_`|~]+}
+
+    proc assert_it_is_default_error_response {response} {
+	set content_type [$response field Content-Type]
+	assert {[llength $content_type] == 1 &&
+	    [lindex $content_type 0] eq
+	    "application/problem+json; charset=utf-8"}
+
+	# The response body is a JSON object.
+	set ents [json::many-json2dict [$response body]]
+	assert {[llength $ents] == 1}
+
+	# The object's property 'status' has the same status code as
+	# the status line of the response.
+	assert {[dict get [lindex $ents 0] status] ==
+	    [$response status]}
+    }
+
+    proc assert_it_is_the_last_response {sock response} {
+	set connection [$response field Connection]
+	test::assert {[llength $connection] == 1 &&
+	    [lindex $connection 0] == "close"}
+	test::assert {[$response rest] == ""}
+	test::assert_eof $sock
+    }
 
     proc is_token {str} {
 	variable ::test::token_regexp
@@ -124,7 +151,7 @@ namespace eval test {
 	}
 
 	method _add_fields {str} {
-	    variable ::test::header_only_fields
+	    variable ::test::_header_only_fields
 
 	    set lines [split $str "\n"]
 	    foreach line $lines {
@@ -151,7 +178,7 @@ namespace eval test {
 
 		# Some fields can't be used in trailers.
 		test::assert {$_trailer_pos == "" ||
-		    [string tolower $name] ni $header_only_fields}
+		    [string tolower $name] ni $_header_only_fields}
 
 		# For the sake of readability, the server inserts a
 		# whitespace just after ':'.

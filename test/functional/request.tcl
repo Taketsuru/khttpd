@@ -31,9 +31,6 @@ package require test
 package require test_http
 package require test_khttpd
 
-set message_size_max 16384
-set time_fudge 1.0
-
 test::define khttpd_request_empty test::khttpd_1conn_testcase {
     set sock [my socket]
 
@@ -80,17 +77,14 @@ test::define khttpd_request_options_asterisc test::khttpd_1conn_testcase {
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    # The server writes an entry for the request
     test::check_access_log $khttpd $reqs
-
-    # The server doesn't write any error log entries.
     test::assert_error_log_is_empty $khttpd
 }
 
 test::define khttpd_request_crlfs_followed_by_options_asterisc \
     test::khttpd_1conn_testcase \
 {
-    global message_size_max
+    variable ::test::message_size_max
 
     set sock [my socket]
     set khttpd [my khttpd]
@@ -116,10 +110,7 @@ test::define khttpd_request_crlfs_followed_by_options_asterisc \
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    # The server writes an entry for the request
     test::check_access_log $khttpd $reqs
-
-    # The server doesn't write any error log entries.
     test::assert_error_log_is_empty $khttpd
 }
 
@@ -161,15 +152,12 @@ test::define khttpd_request_fragmented_options_asterisc \
     # The server close the connection without sending any data.
     test::assert_eof $sock
 
-    # The server writes entries for the requests
     test::check_access_log $khttpd $reqs
-
-    # The server doesn't write any error log entries.
     test::assert_error_log_is_empty $khttpd
 }
 
 test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
-    global message_size_max
+    variable ::test::message_size_max
 
     set khttpd [my khttpd]
 
@@ -223,11 +211,7 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 		    # The server sends Bad Request response.
 		    test::assert {[$response status] == 400}
 
-		    # The server closes the connection
-		    set connection [$response field Connection]
-		    test::assert {[llength $connection] == 1 &&
-			[lindex $connection 0] == "close"}
-		    test::assert_eof $sock
+		    test::assert_it_is_the_last_response $sock $response
 
 		} elseif {$message_size_max < $reqlen} {
 		    # The request header field is too large
@@ -235,11 +219,7 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 		    # The server sends Request header field too large response.
 		    test::assert {[$response status] == 431}
 
-		    # The server closes the connection
-		    set connection [$response field Connection]
-		    test::assert {[llength $connection] == 1 &&
-			[lindex $connection 0] == "close"}
-		    test::assert_eof $sock
+		    test::assert_it_is_the_last_response $sock $response
 
 		} else {
 		    # The request is small enough but the request target
@@ -260,23 +240,55 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 		    test::assert_eof $sock
 		}
 
-		# When the server sends the above error responses, Content-Type
-		# field value is application/problem+json.
-		set content_type [$response field Content-Type]
-		test::assert {[llength $content_type] == 1 &&
-		    [lindex $content_type 0] eq
-		    "application/problem+json; charset=utf-8"}
-
-		# The response body is a JSON object.
-		set ents [json::many-json2dict [$response body]]
-		test::assert {[llength $ents] == 1}
-
-		# The object's property 'status' has the same status code as
-		# the status line of the response.
-		test::assert {[dict get [lindex $ents 0] status] ==
-		    [$response status]}
+		test::assert_it_is_default_error_response $response
 
 		lappend reqs [list message $req status [$response status] \
+				  peer $sock arrival_time $arrival_time \
+				  completion_time [clock milliseconds]]
+
+	    } on error {msg opts} {
+		test::add_data response [$response response]
+		return -options $opts $msg
+
+	    } finally {
+		$response destroy
+	    }
+
+	} finally {
+	    close $sock
+	}
+    }
+
+    test::check_access_log $khttpd $reqs
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define khttpd_request_partial_request test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    set reqs {}
+
+    set req "OPTIONS * HTTP/1.1\r\nHost: [$khttpd host]\r\n\r\n"
+    set len [string length $req]
+
+    for {set i 0} {$i < $len - 1} {incr i} {
+	set sock [[my khttpd] connect]
+	try {
+	    set arrival_time [clock milliseconds]
+	    set preq [string range $req 0 $i]
+	    puts -nonewline $sock $preq
+
+	    # The client shuts down the socket.
+	    close $sock write
+
+	    set response [test::assert_receiving_response $sock OPTIONS]
+	    try {
+		# The server sends Bad Request response.
+		test::assert {[$response status] == 400}
+		test::assert_it_is_the_last_response $sock $response
+		test::assert_it_is_default_error_response $response
+
+		lappend reqs [list message $preq status [$response status] \
 				  peer $sock arrival_time $arrival_time \
 				  completion_time [clock milliseconds]]
 
@@ -292,9 +304,6 @@ test::define khttpd_request_size_limit_in_request test::khttpd_testcase {
 	}
     }
 
-    # The server writes entries for the requests
     test::check_access_log $khttpd $reqs
-
-    # The server doesn't write any error log entries.
     test::assert_error_log_is_empty $khttpd
 }

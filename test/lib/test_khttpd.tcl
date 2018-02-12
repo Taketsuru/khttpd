@@ -29,10 +29,9 @@ package provide test_khttpd 0.0
 package require test
 
 namespace eval test {
-    namespace export assert_eof assert_error_log_is_empty \
-	assert_receiving_options_asterisc_response assert_receiving_response \
-	check_access_log create_options_asterisc_request \
-	khttpd khttpd_testcase khttpd_1conn_testcase
+    namespace export {[a-z]*}
+
+    variable message_size_max 16384
 
     proc assert_eof {sock} {
 	test_chan $sock {
@@ -108,8 +107,7 @@ namespace eval test {
     }
 
     proc check_access_log {khttpd reqs} {
-	global time_fudge
-
+	set time_fudge 1.0
 	set logname [local_file [dict get [$khttpd logs] access-log]]
 
 	for {set retry 0} {$retry < 4} {incr retry} {
@@ -143,8 +141,12 @@ namespace eval test {
 	    set actual_request [dict get $entry request]
 
 	    set reqmsg [dict get $req message]
-	    set expected_request \
-		[string range $reqmsg 0 [string first "\r\n" $reqmsg]+1]
+	    set crlf_pos [string first "\r\n" $reqmsg]
+	    if {$crlf_pos == -1} {
+		set expected_request $reqmsg
+	    } else {
+		set expected_request [string range $reqmsg 0 $crlf_pos+1]
+	    }
 	    set expected_status [dict get $req status]
 	    set expected_arrival_time \
 		[expr {[dict get $req arrival_time] / 1000.0}]
@@ -158,15 +160,14 @@ namespace eval test {
 		$time_fudge}
 	    assert {$actual_status == $expected_status}
 	    if {$actual_status == 400} {
-		assert {[string equal \
-				   -length [string length $actual_request] \
-				   $actual_request $expected_request]}
+		assert {[string equal -length [string length $actual_request] \
+			     $actual_request $expected_request]}
 	    } else {
 		assert {$actual_request eq $expected_request}
 	    }
 	    assert {$actual_peer_family == "inet"}
-	    #assert {$actual_peer_address == ""}
-	    #assert {$actual_peer_port == ""}
+	    #test::assert {$actual_peer_address == ""}
+	    #test::assert {$actual_peer_port == ""}
 	}
     }
 
