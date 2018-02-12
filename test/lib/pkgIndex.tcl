@@ -11,4 +11,3 @@
 package ifneeded test 0.0 [list source [file join $dir test.tcl]]
 package ifneeded test_http 0.0 [list source [file join $dir test_http.tcl]]
 package ifneeded test_khttpd 0.0 [list source [file join $dir test_khttpd.tcl]]
-package ifneeded uuid 0.0 [list source [file join $dir uuid.tcl]]

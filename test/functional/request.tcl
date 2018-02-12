@@ -31,28 +31,27 @@ package require test
 package require test_http
 package require test_khttpd
 
+# The server closes the connection with no reply if the client closes a
+# connection without sending any data.
+
 test::define immediate_eof test::khttpd_1conn_testcase {
     set sock [my socket]
-
-    # The client shuts down the socket without sending any data.
     close $sock write
-
-    # The server close the connection without sending any data.
     test::assert_eof $sock
 }
+
+# The server closes the connection with no reply if the client sends only
+# CRLF sequences and closes the connection.
 
 test::define crlf_only test::khttpd_1conn_testcase {
     set sock [my socket]
-
-    # The client sends CRLFs.
     puts -nonewline $sock [string repeat "\r\n" 4]
-
-    # The client shuts down the socket.
     close $sock write
-
-    # The server closes the connection without sending any data.
     test::assert_eof $sock
 }
+
+# The server sends a successful OPTIONS response if the client sends
+# 'OPTIONS * HTTP/1.1 request'.
 
 test::define options_asterisc test::khttpd_1conn_testcase {
     set sock [my socket]
@@ -99,6 +98,56 @@ test::define crlfs_followed_by_request test::khttpd_1conn_testcase {
 
     # The server close the connection without sending any data.
     test::assert_eof $sock
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define request_to_close_connection test::khttpd_1conn_testcase {
+    set sock [my socket]
+    set khttpd [my khttpd]
+
+    # The client sends a request 'OPTIONS * HTTP/1.1' with 'Connection:
+    # close' field.
+    set req "OPTIONS * HTTP/1.1\r\n"
+    append req "Host: [$khttpd host]\r\n"
+    append req "Connection: close\r\n\r\n"
+    puts -nonewline $sock $req
+
+    # The server sends a successful response to the OPTIONS method.
+    set response [my receive_response $sock $req]
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_the_last_response $sock $response
+    test::assert_it_is_options_asterisc_response $response
+
+    # The client sends a request but there is no access log entry for the
+    # request.
+    set req [test::create_options_asterisc_request $khttpd]
+    puts -nonewline $sock $req
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define invalid_protocol_version test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    foreach version {HTTP/0.0 http/1.1
+	PTTH/1.1 HTTP/0.9 veryyyyyyyyyyyyyyloooooong/1.1 sht/1.1} \
+    {
+	my with_connection sock {
+	    # The client sends a request 'OPTIONS * <version>'
+	    set req "OPTIONS * $version\r\nHost: [$khttpd host]\r\n\r\n"
+	    puts -nonewline $sock $req
+
+	    # The server sends Bad Request error response
+	    set response [my receive_response $sock $req]
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+	    test::assert {[$response status] == 400}
+	    test::assert {[$response rest] == ""}
+	}
+    }
 
     my check_access_log
     test::assert_error_log_is_empty $khttpd
