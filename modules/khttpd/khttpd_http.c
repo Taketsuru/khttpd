@@ -91,7 +91,8 @@ struct khttpd_exchange {
 	 * Members from khttpd_exchange_zctor_begin to
 	 * khttpd_exchange_zctor_end is cleared by ctor.
 	 */
-#define khttpd_exchange_zctor_begin	request_content_length
+#define khttpd_exchange_zctor_begin	request_body_resid
+	off_t			request_body_resid;
 	off_t			request_content_length;
 	off_t			request_payload_size;
 	off_t			response_content_length;
@@ -1402,8 +1403,9 @@ khttpd_session_terminate_received_mbufs(struct khttpd_session *session)
 
 #if 0
 	/*
-	 * Commented out temporarily.  This assertion is supposed to be
-	 * valid but not satisfied.
+	 * The following assertion is not valid.  In example, recv_leftovers
+	 * points at the start of chunk-body when khttpd_session_receive_chunk
+	 * calls this function.
 	 */
 	KASSERT(session->recv_leftovers == NULL,
 	    ("recv_leftovers=%p(data=%p)", session->recv_leftovers,
@@ -1443,7 +1445,6 @@ khttpd_session_receive_chunk(struct khttpd_session *session)
 	for (;;) {
 		ch = khttpd_mbuf_getc(&pos);
 		if (!isxdigit(ch)) {
-			khttpd_mbuf_ungetc(&pos, ch);
 			break;
 		}
 
@@ -1457,6 +1458,17 @@ khttpd_session_receive_chunk(struct khttpd_session *session)
 		len = (len << 4) + nibble;
 	}
 
+	if (ch != '\r' && ch != ';') {
+		KHTTPD_NOTE("%s reject %u", __func__, __LINE__);
+		khttpd_exchange_reject(exchange);
+		return (0);
+	}
+
+	KHTTPD_TR("%s len %#x", __func__, len);
+
+	/* pos.ptr points the mbuf chain to which recv_leftovers points */
+	session->recv_leftovers = NULL;
+
 	khttpd_session_terminate_received_mbufs(session);
 	m_freem(pos.ptr);
 
@@ -1467,7 +1479,7 @@ khttpd_session_receive_chunk(struct khttpd_session *session)
 		goto too_large;
 
 	else {
-		exchange->request_payload_size += len;
+		exchange->request_body_resid = len;
 		khttpd_session_set_receive_limit(session, len);
 		session->receive = khttpd_session_receive_body;
 	}
@@ -1522,14 +1534,15 @@ static int
 khttpd_session_receive_body(struct khttpd_session *session)
 {
 	struct khttpd_mbuf_json logent;
-	off_t resid;
 	struct khttpd_exchange *exchange;
 	struct thread *td;
 	struct mbuf *m, *tail;
+	u_int len;
 	int error;
 	bool pause;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
+
 	KASSERT(session->recv_leftovers == session->recv_ptr &&
 	    session->recv_off == 0,
 	    ("recv_leftovers=%p, recv_ptr=%p, recv_off=%d",
@@ -1540,15 +1553,21 @@ khttpd_session_receive_body(struct khttpd_session *session)
 	exchange = &session->exchange;
 	pause = false;
 
+	KASSERT(OFF_MAX - exchange->request_payload_size >=
+	    exchange->request_body_resid,
+	    ("request_payload_size %#jx, request_body_resid %#jx",
+		(uintmax_t)exchange->request_payload_size,
+		(uintmax_t)exchange->request_body_resid));
+
 	m = session->recv_ptr;
 	if (m != NULL) {
 		session->recv_ptr = NULL;
-		resid = exchange->request_content_length -
-		    exchange->request_payload_size;
-		tail = m_split(m, resid, M_WAITOK);
+		tail = m_split(m, exchange->request_body_resid, M_WAITOK);
 		session->recv_leftovers = session->recv_ptr = tail;
 		session->recv_off = 0;
-		exchange->request_payload_size += resid;
+		len = m_length(m, NULL);
+		exchange->request_payload_size += len;
+		exchange->request_body_resid -= len;
 
 		if (exchange->ops->put == NULL)
 			m_freem(m);
@@ -1557,8 +1576,7 @@ khttpd_session_receive_body(struct khttpd_session *session)
 
 	}
 
-	session->recv_limit = exchange->request_content_length -
-	    exchange->request_payload_size;
+	session->recv_limit = exchange->request_body_resid;
 	while (0 < session->recv_limit) {
 		if (pause)
 			return (EBUSY);
@@ -1573,8 +1591,9 @@ khttpd_session_receive_body(struct khttpd_session *session)
 
 		m = session->recv_ptr;
 		session->recv_ptr = NULL;
-		exchange->request_payload_size =
-		    exchange->request_content_length - session->recv_limit;
+		len = m_length(m, NULL);
+		exchange->request_payload_size += len;
+		exchange->request_body_resid -= len;
 
 		if (exchange->ops->put == NULL)
 			m_freem(m);
@@ -1726,6 +1745,7 @@ khttpd_session_end_of_header_or_trailer(struct khttpd_session *session)
 
 	khttpd_session_set_receive_limit(session, 
 	    exchange->request_content_length);
+	exchange->request_body_resid = exchange->request_content_length;
 	session->receive = khttpd_session_receive_body;
 }
 
