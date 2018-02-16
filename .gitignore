@@ -48,6 +48,7 @@ usr.sbin/khttpd-init/khttpd-init.1.gz
 modules/khttpd/commit
 modules/khttpd/crypto
 modules/khttpd/ddb
+test/log/
 test/docroot/test.php
 test/docroot/wordpress/
 usr.sbin/khttpdctl/khttpdctl
