@@ -297,3 +297,77 @@ test::define partial_request test::khttpd_testcase {
     my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
+
+test::define nonchunked_request_body test::khttpd_1conn_testcase {
+    set sock [my socket]
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach content_length {0 1 2 20 16384} {
+	set body [string repeat x $content_length]
+	set req "${hdr}Content-Length: $content_length\r\n\r\n$body"
+
+	puts -nonewline $sock $req
+
+	set response [my receive_response $sock $req]
+
+	# The server ignores the request body and sends a OPTIONS response.
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+
+	# The client sends an OPTIONS request and the server sends a reply as
+	# usual.
+	puts -nonewline $sock $optreq
+	set response [my receive_response $sock $optreq]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+proc test_single_chunked_request_body {sock obj chunk_size trailer} {
+    set khttpd [$obj khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+    set req "${hdr}Transfer-Encoding: chunked\r\n\r\n"
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    puts -nonewline $sock $req
+
+    if {0 < $chunk_size} {
+	set body [string repeat x $chunk_size]
+	puts -nonewline $sock "[format {%x} $chunk_size]\r\n$body\r\n"
+    }
+
+    puts -nonewline $sock "0\r\n$trailer\r\n"
+
+    set response [$obj receive_response $sock $req]
+
+    # The server ignores the request body and sends a OPTIONS response.
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_options_asterisc_response $response
+
+    # The client sends an OPTIONS request and the server sends a reply as
+    # usual.
+    puts -nonewline $sock $optreq
+    set response [$obj receive_response $sock $optreq]
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_options_asterisc_response $response
+}
+
+test::define single_chunked_request_body test::khttpd_1conn_testcase {
+    set sock [my socket]
+    set khttpd [my khttpd]
+
+    foreach chunk_size {0 1 2 20 16384} {
+	test_single_chunked_request_body $sock [self] $chunk_size ""
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
