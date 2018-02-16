@@ -384,8 +384,14 @@ namespace eval test {
 	}
 
 	method receive_response {sock req {arrival_time ""} {rest ""}} {
-	    set response [test::assert_receiving_response \
-			      $sock $req $arrival_time $rest]
+	    if {$rest eq ""} {
+		set last_response [lindex $_responses end]
+		if {$last_response ne ""} {
+		    set rest [$last_response rest]
+		}
+	    }
+	    set response [test::assert_receiving_response $sock $req \
+			      $arrival_time $rest]
 	    lappend _responses $response
 	    return $response
 	}
