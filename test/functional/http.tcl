@@ -335,30 +335,54 @@ proc test_single_chunked_request_body {sock obj chunk_size chunk_ext trailer} {
     set req "OPTIONS * HTTP/1.1\r\n"
     append req "Host: [$khttpd host]\r\n"
     append req "Transfer-Encoding: chunked\r\n\r\n"
+    set hdrlen [string length $req]
     set optreq [test::create_options_asterisc_request $khttpd]
 
     if {0 < $chunk_size} {
 	append req "[format {%x} $chunk_size]$chunk_ext\r\n"
+	set chunk_end [string length $req]
 	append req [string repeat x $chunk_size]
 	append req "\r\n"
     }
 
+    set last_chunk_pos [string length $req]
     append req "0\r\n$trailer\r\n"
+    set reqlen [string length $req]
 
-    puts -nonewline $sock $req
+    if {0 < $chunk_size} {
+	for {set i $hdrlen} {$i <= $chunk_end} {incr i} {
+	    lappend split_points $i
+	}
+	for {set i [expr {$last_chunk_pos - 2}]} {$i < $reqlen} {incr i} {
+	    lappend split_points $i
+	}
+    } else {
+	for {set i $last_chunk_pos} {$i < $reqlen} {incr i} {
+	    lappend split_points $i
+	}
+    }
 
-    set response [$obj receive_response $sock $req]
+    foreach split_pos $split_points {
+	set first_half [string range $req 0 $split_pos-1]
+	set second_half [string range $req $split_pos end]
+	puts -nonewline $sock $first_half
+	after 100
+	update
+	puts -nonewline $sock $second_half
 
-    # The server ignores the request body and sends a OPTIONS response.
-    test::assert {[$response rest] == ""}
-    test::assert_it_is_options_asterisc_response $response
+	set response [$obj receive_response $sock $req]
 
-    # The client sends an OPTIONS request and the server sends a reply as
-    # usual.
-    puts -nonewline $sock $optreq
-    set response [$obj receive_response $sock $optreq]
-    test::assert {[$response rest] == ""}
-    test::assert_it_is_options_asterisc_response $response
+	# The server ignores the request body and sends a OPTIONS response.
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+
+	# The client sends an OPTIONS request and the server sends a reply as
+	# usual.
+	puts -nonewline $sock $optreq
+	set response [$obj receive_response $sock $optreq]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+    }
 }
 
 test::define single_chunked_request_body test::khttpd_1conn_testcase {

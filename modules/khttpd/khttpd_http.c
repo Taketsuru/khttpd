@@ -1511,7 +1511,8 @@ khttpd_session_receive_chunk_terminator(struct khttpd_session *session)
 	if (error == EWOULDBLOCK)
 		return (error);
 	if (error != 0) {
-		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
+		KHTTPD_BRANCH("%s %p reject %u error %d",
+		    __func__, exchange, __LINE__, error);
 		khttpd_exchange_reject(exchange);
 		return (error);
 	}
@@ -1520,7 +1521,8 @@ khttpd_session_receive_chunk_terminator(struct khttpd_session *session)
 	if (ch == '\r')
 		ch = khttpd_mbuf_getc(&pos);
 	if (ch != '\n') {
-		KHTTPD_BRANCH("%s %p reject %u", __func__, exchange, __LINE__);
+		KHTTPD_BRANCH("%s %p reject %u ch %#x",
+		    __func__, exchange, __LINE__, ch);
 		khttpd_exchange_reject(exchange);
 		return (0);
 	}
