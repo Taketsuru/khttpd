@@ -330,21 +330,22 @@ test::define nonchunked_request_body test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-proc test_single_chunked_request_body {sock obj chunk_size trailer} {
+proc test_single_chunked_request_body {sock obj chunk_size chunk_ext trailer} {
     set khttpd [$obj khttpd]
-    set hdr "OPTIONS * HTTP/1.1\r\n"
-    append hdr "Host: [$khttpd host]\r\n"
-    set req "${hdr}Transfer-Encoding: chunked\r\n\r\n"
+    set req "OPTIONS * HTTP/1.1\r\n"
+    append req "Host: [$khttpd host]\r\n"
+    append req "Transfer-Encoding: chunked\r\n\r\n"
     set optreq [test::create_options_asterisc_request $khttpd]
 
-    puts -nonewline $sock $req
-
     if {0 < $chunk_size} {
-	set body [string repeat x $chunk_size]
-	puts -nonewline $sock "[format {%x} $chunk_size]\r\n$body\r\n"
+	append req "[format {%x} $chunk_size]$chunk_ext\r\n"
+	append req [string repeat x $chunk_size]
+	append req "\r\n"
     }
 
-    puts -nonewline $sock "0\r\n$trailer\r\n"
+    append req "0\r\n$trailer\r\n"
+
+    puts -nonewline $sock $req
 
     set response [$obj receive_response $sock $req]
 
@@ -365,7 +366,7 @@ test::define single_chunked_request_body test::khttpd_1conn_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
-	test_single_chunked_request_body $sock [self] $chunk_size ""
+	test_single_chunked_request_body $sock [self] $chunk_size "" ""
     }
 
     my check_access_log
