@@ -1,4 +1,4 @@
-# Copyright (c) 2017, Taketsuru <taketsuru11@gmail.com>
+# Copyright (c) 2018, Taketsuru <taketsuru11@gmail.com>
 # All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
