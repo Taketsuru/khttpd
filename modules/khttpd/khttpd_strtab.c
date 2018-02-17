@@ -62,8 +62,10 @@ khttpd_strtab_hash(struct khttpd_strtab *table, const char *begin,
 	srcp = begin;
 	critical_enter();
 	dstp = buf = table->buf[PCPU_GET(cpuid)];
-	while ((ch = *srcp++) != '\0')
+	while (srcp != end) {
+		ch = *srcp++;
 		*dstp++ = tolower(ch);
+	}
 	h = murmur3_32_hash(buf, dstp - buf, 0);
 	critical_exit();
 

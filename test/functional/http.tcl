@@ -133,18 +133,23 @@ test::define invalid_protocol_version test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach version {HTTP/0.0 http/1.1
-	PTTH/1.1 HTTP/0.9 veryyyyyyyyyyyyyyloooooong/1.1 sht/1.1} \
-    {
+	PTTH/1.1 HTTP/0.9 veryyyyyyyyyyyyyyloooooong/1.1 sht/1.1
+	" HTTP/1.1" "HTTP/1.1 " HTTP/1.a HTTP/a.0 HTTP/2.0} {
 	my with_connection sock {
 	    # The client sends a request 'OPTIONS * <version>'
 	    set req "OPTIONS * $version\r\nHost: [$khttpd host]\r\n\r\n"
 	    puts -nonewline $sock $req
 
-	    # The server sends Bad Request error response
+	    # The server sends 'Http Version Not Supported' or 'Bad Request'
+	    # error response
 	    set response [my receive_response $sock $req]
 	    test::assert_it_is_default_error_response $response
 	    test::assert_it_is_the_last_response $sock $response
-	    test::assert {[$response status] == 400}
+	    if {[string match {HTTP/[0-9].[0-9]} $version]} {
+		test::assert {[$response status] == 505}
+	    } else {
+		test::assert {[$response status] == 400}
+	    }
 	    test::assert {[$response rest] == ""}
 	}
     }
@@ -221,10 +226,14 @@ test::define size_limit_in_the_midst_of_request test::khttpd_testcase {
 	[expr {[string length $reqline_head] + [string length $reqline_tail]}]
 
     foreach tgtlen $tgtlen_list {
+	puts [[test::test_driver instance] log_chan] "target_len: $tgtlen"
+
 	my with_connection sock {
 	    set target [string repeat x $tgtlen]
 	    set req $reqline_head$target$reqline_tail$fields
 	    set reqlen [string length $req]
+	    puts [[test::test_driver instance] log_chan] \
+		"reqlen: [string length $req]"
 	    puts -nonewline $sock $req
 
 	    set response [my receive_response $sock $req]
@@ -396,3 +405,8 @@ test::define single_chunked_request_body test::khttpd_1conn_testcase {
     my check_access_log
     test::assert_error_log_is_empty $khttpd
 }
+
+# testcase: Bad Request response is sent while the server is parsing
+# Content-Type field.
+
+# testcase: Multiple 'Bad Request' cases.

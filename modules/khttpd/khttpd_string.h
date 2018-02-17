@@ -50,3 +50,7 @@ void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
 boolean_t khttpd_is_json_media_type(const char *input);
 int khttpd_decode_hexdigit(char);
 int khttpd_unescape_uri(struct sbuf *, const char *);
+void	khttpd_string_trim(const char **_begin, const char **_end);
+void	khttpd_string_for_each_token(const char *_begin, const char *_end,
+	    bool (*_fn)(void *_arg, const char *_begin, const char *_end),
+	    void *_arg);

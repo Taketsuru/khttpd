@@ -500,19 +500,22 @@ khttpd_vhost_set_server_list(struct khttpd_port *port,
 }
 
 struct khttpd_server *
-khttpd_vhost_find_server(struct khttpd_port *port, const char *host)
+khttpd_vhost_find_server(struct khttpd_port *port, const char *host_begin,
+	const char *host_end)
 {
 	struct khttpd_server *server;
 	struct khttpd_vhost_port_data *data;
 	struct khttpd_vhost_server_data *server_data;
 	struct khttpd_vhost_tie *tie;
 	char *canonical_name, **exact_aliases;
+	size_t host_len;
 	int exact_alias_count, i;
 
-	KHTTPD_ENTRY("%s(%p,%s)", __func__, port,
-	    khttpd_ktr_printf("%s", host));
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, port, khttpd_ktr_printf("%.*s",
+		(int)(host_end - host_begin), host_begin));
 
 	data = khttpd_costruct_get(port, khttpd_vhost_port_key);
+	host_len = host_end - host_begin;
 
 	rw_rlock(&khttpd_vhost_lock);
 
@@ -527,7 +530,8 @@ khttpd_vhost_find_server(struct khttpd_port *port, const char *host)
 		 */
 		canonical_name = server_data->name->canonical_name;
 		if (canonical_name != NULL && 
-		    strcmp(host, canonical_name) == 0) {
+		    strncasecmp(host_begin, canonical_name, host_len) == 0 &&
+		    canonical_name[host_len] == '\0') {
 			khttpd_server_acquire(server);
 			goto found;
 		}
@@ -539,7 +543,9 @@ khttpd_vhost_find_server(struct khttpd_port *port, const char *host)
 		exact_alias_count = server_data->name->exact_alias_count;
 		exact_aliases = server_data->name->exact_aliases;
 		for (i = 0; i < exact_alias_count; ++i)
-			if (strcmp(host, exact_aliases[i]) == 0) {
+			if (strncasecmp(host_begin, exact_aliases[i], 
+				host_len) == 0 &&
+			    exact_aliases[i][host_len] == '\0') {
 				khttpd_server_acquire(server);
 				goto found;
 			}

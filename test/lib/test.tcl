@@ -224,7 +224,7 @@ namespace eval test {
 	}
 
 	set props {}
-	set timeout 1000
+	set timeout 2000
 	set n [llength $args]
 	for {set i 0} {$i < $n - 2} {incr i} {
 	    set arg [lindex $args $i]

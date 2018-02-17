@@ -547,23 +547,17 @@ khttpd_fcgi_process_content_length_field(struct khttpd_fcgi_conn *conn,
 	if (khttpd_exchange_is_response_body_chunked(exchange))
 		return (false);
 
+	if (begin == end) {
+		return (false);
+	}
+
 	error = khttpd_parse_digits_field(begin, end, &value);
-	if (error == 0 && OFF_MAX < value)
-		error = ERANGE;
+	if (error == ERANGE || (error == 0 && OFF_MAX < value)) {
+		khttpd_fcgi_hdr_error(conn, "out of range");
+		return (false);
+	}
 	if (error != 0) {
-		switch (error) {
-		case ENOENT:
-			khttpd_fcgi_hdr_error(conn, "no field value");
-			break;
-		case EINVAL:
-			khttpd_fcgi_hdr_error(conn, "invalid value");
-			break;
-		case ERANGE:
-			khttpd_fcgi_hdr_error(conn, "out of range");
-			break;
-		default:
-			;
-		}
+		khttpd_fcgi_hdr_error(conn, "invalid value");
 		return (false);
 	}
 
@@ -865,12 +859,12 @@ khttpd_fcgi_send_stdin(struct khttpd_fcgi_conn *conn, long space)
 
 static struct mbuf *
 khttpd_fcgi_append_param(struct mbuf **head, struct mbuf *tail,
-    u_int *len_inout, const char *name, const char *value)
+    u_int *len_inout, const char *name, const char *value, size_t vallen)
 {
 	char buf[8];
 	struct khttpd_fcgi_hdr *hdr;
 	char *bp;
-	size_t namelen, vallen, oldlen, newlen, len;
+	size_t namelen, oldlen, newlen, len;
 
 	KHTTPD_ENTRY("%s(%s,%s), *len_inout=%#x", __func__, name,
 	    khttpd_ktr_printf("%s", value), *len_inout);
@@ -887,7 +881,6 @@ khttpd_fcgi_append_param(struct mbuf **head, struct mbuf *tail,
 		*bp++ = namelen & 0xff;
 	}
 
-	vallen = strlen(value);
 	if (vallen < 0x80)
 		*bp++ = vallen;
 	else {
@@ -965,83 +958,99 @@ khttpd_fcgi_append_sockaddr_param(struct mbuf **head, struct mbuf *out,
 	if (has_remote_addr) {
 		sbuf_finish(tmp_sbuf);
 		out = khttpd_fcgi_append_param(head, out, len_inout,
-		    addr_var_name, sbuf_data(tmp_sbuf));
+		    addr_var_name, sbuf_data(tmp_sbuf), sbuf_len(tmp_sbuf));
 		sbuf_clear(tmp_sbuf);
 		sbuf_printf(tmp_sbuf, "%d", port);
 		sbuf_finish(tmp_sbuf);
 		out = khttpd_fcgi_append_param(head, out, len_inout, 
-		    port_var_name, sbuf_data(tmp_sbuf));
+		    port_var_name, sbuf_data(tmp_sbuf), sbuf_len(tmp_sbuf));
 		sbuf_clear(tmp_sbuf);
 	}
 
 	return (out);
 }
 
-static int
-khttpd_fcgi_request_header_field_found(void *arg, int field, const char *name,
-    const char *value)
+static struct mbuf *
+khttpd_fcgi_convert_request_header_field(struct khttpd_exchange *exchange,
+    struct mbuf **head, struct mbuf *tail, u_int *len, struct sbuf *sbuf)
 {
-	struct khttpd_fcgi_request_header_context *ctx;
+	const char *bolp, *eolp, *hdrend;
+	const char *begin, *end;
+	const char *sp;
 	const char *cp;
+	size_t header_size;
 	int ch;
 
-	KHTTPD_ENTRY("%s(%p,%d)", __func__, arg, field);
-	ctx = arg;
+	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	switch (field) {
+	bolp = khttpd_exchange_request_header(exchange, &header_size);
+	hdrend = bolp + header_size;
+	eolp = memchr(bolp, '\n', header_size);
 
-	case KHTTPD_FIELD_CONTENT_LENGTH:
-	case KHTTPD_FIELD_TRANSFER_ENCODING:
-	case KHTTPD_FIELD_CONNECTION:
-	case KHTTPD_FIELD_EXPECT:
-	case KHTTPD_FIELD_CONTENT_TYPE:
-		break;
+	for (bolp = eolp + 1; bolp < hdrend; bolp = eolp + 1) {
+		sp = memchr(bolp, ':', hdrend - bolp);
+		KASSERT(sp != NULL && bolp < sp &&
+		    sp[-1] != ' ' && sp[-1] != '\t', ("field format error"));
 
-	default:
-		sbuf_cpy(&ctx->sbuf, "HTTP_");
-		for (cp = name; (ch = *cp) != '\0'; ++cp) {
-			if (ch == '-') {
-				sbuf_putc(&ctx->sbuf, '_');
-			} else {
-				sbuf_putc(&ctx->sbuf, toupper(ch));
+		eolp = memchr(sp + 1, '\n', hdrend - sp - 1);
+		KASSERT(eolp != NULL, ("no LF at the end of the last field"));
+
+		switch (khttpd_field_find(bolp, sp)) {
+
+		case KHTTPD_FIELD_CONTENT_LENGTH:
+		case KHTTPD_FIELD_TRANSFER_ENCODING:
+		case KHTTPD_FIELD_CONNECTION:
+		case KHTTPD_FIELD_EXPECT:
+		case KHTTPD_FIELD_CONTENT_TYPE:
+			break;
+
+		default:
+			for (begin = sp + 1;
+			     begin < end && 
+			     ((ch = *begin) == ' ' || ch == '\t');
+			     ++begin) {
 			}
+
+			for (end = eolp;
+			     begin < end - 1 &&
+			     ((ch = end[-1]) == ' ' || ch == '\t');
+			     --end) {
+			}
+
+			sbuf_cpy(sbuf, "HTTP_");
+			for (cp = bolp; cp < sp; ++cp) {
+				if (ch == '-') {
+					sbuf_putc(sbuf, '_');
+				} else {
+					sbuf_putc(sbuf, toupper(ch));
+				}
+			}
+			sbuf_finish(sbuf);
+
+			tail = khttpd_fcgi_append_param(head,
+			    tail, len, sbuf_data(sbuf), begin, end - begin);
+
+			sbuf_clear(sbuf);
 		}
-		sbuf_finish(&ctx->sbuf);
-
-		ctx->tail = khttpd_fcgi_append_param(&ctx->head, ctx->tail,
-		    &ctx->len, sbuf_data(&ctx->sbuf), value);
-
-		sbuf_clear(&ctx->sbuf);
 	}
 
-	return (0);
-}
-
-static int
-khttpd_fcgi_request_header_field_error(void *arg, int reason, const char *line)
-{
-
-	KHTTPD_ENTRY("%s(%p,%d,\"%s\")",
-	    __func__, arg, reason, khttpd_ktr_printf("%s", line));
-	return (0);
+	return (tail);
 }
 
 static void
 khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
     struct khttpd_fcgi_xchg_data *xchg_data, struct mbuf *m)
 {
-	char buf[128];
-	struct khttpd_fcgi_request_header_context parser_arg;
-	struct khttpd_field_parser parser;
-	struct khttpd_mbuf_pos pos;
+	char buf[1024];
 	struct sbuf sbuf;
+	const char *query, *method_name;
 	struct khttpd_exchange *exchange;
 	struct khttpd_location *location, *tmploc;
 	struct khttpd_server *server;
 	struct khttpd_fcgi_hdr *hdr;
-	const struct sockaddr *addr;
-	const char *query;
 	struct mbuf *head, *tail;
+	const struct sockaddr *addr;
+	int method;
 	u_int len;
 
 	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, xchg_data, m);
@@ -1060,23 +1069,22 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	sbuf_cat(&sbuf, sbuf_data(&xchg_data->script_name));
 	sbuf_finish(&sbuf);
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "SCRIPT_FILENAME", sbuf_data(&sbuf));
+	    "SCRIPT_FILENAME", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len, 
-	    "QUERY_STRING", query == NULL ? "" : query);
+	    "QUERY_STRING", query == NULL ? "" : query, strlen(query));
 
-	KHTTPD_NOTE("%s method=%d", __func__, khttpd_exchange_method(exchange));
+	method = khttpd_exchange_method(exchange);
+	method_name = khttpd_method_name(method);
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "REQUEST_METHOD", 
-	    khttpd_method_name(khttpd_exchange_method(exchange)));
+	    "REQUEST_METHOD", method_name, strlen(method_name));
 
-	if (khttpd_exchange_get_request_header_field(exchange, "Content-Type",
-		&sbuf) == 0) {
+	if (khttpd_exchange_get_request_content_type(exchange, &sbuf)) {
 		KHTTPD_NOTE("%s content-type", __func__);
 		sbuf_finish(&sbuf);
 		tail = khttpd_fcgi_append_param(&head, tail, &len, 
-		    "CONTENT_TYPE", sbuf_data(&sbuf));
+		    "CONTENT_TYPE", sbuf_data(&sbuf), sbuf_len(&sbuf));
 		sbuf_clear(&sbuf);
 	}
 
@@ -1086,7 +1094,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 		    khttpd_exchange_get_request_content_length(exchange));
 		sbuf_finish(&sbuf);
 		tail = khttpd_fcgi_append_param(&head, tail, &len, 
-		    "CONTENT_LENGTH", sbuf_data(&sbuf));
+		    "CONTENT_LENGTH", sbuf_data(&sbuf), sbuf_len(&sbuf));
 		sbuf_clear(&sbuf);
 	}
 
@@ -1094,7 +1102,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	sbuf_cat(&sbuf, sbuf_data(&xchg_data->script_name));
 	sbuf_finish(&sbuf);
 	tail = khttpd_fcgi_append_param(&head, tail, &len, 
-	    "SCRIPT_NAME", sbuf_data(&sbuf));
+	    "SCRIPT_NAME", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
 	sbuf_cpy(&sbuf, khttpd_exchange_get_target(exchange));
@@ -1104,24 +1112,25 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	}
 	sbuf_finish(&sbuf);
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "REQUEST_URI", sbuf_data(&sbuf));
+	    "REQUEST_URI", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "DOCUMENT_URI", khttpd_exchange_get_target(exchange));
+	    "DOCUMENT_URI", khttpd_exchange_get_target(exchange),
+		khttpd_exchange_get_target_length(exchange));
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "SERVER_PROTOCOL", "HTTP/1.1");
+	    "SERVER_PROTOCOL", "HTTP/1.1", sizeof("HTTP/1.1") - 1);
 
 	/* no https support yet. */
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "REQUEST_SCHEME", "http");
+	    "REQUEST_SCHEME", "http", sizeof("http") - 1);
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "GATEWAY_INTERFACE", "CGI/1.1");
+	    "GATEWAY_INTERFACE", "CGI/1.1", sizeof("CGI/1.1") - 1);
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "SERVER_SOFTWARE", "khttpd/0.0");
+	    "SERVER_SOFTWARE", "khttpd/0.0", sizeof("khttpd/0.0") - 1);
 
 	addr = khttpd_exchange_client_address(exchange);
 	tail = khttpd_fcgi_append_sockaddr_param(&head, tail, &len,
@@ -1133,14 +1142,16 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 		    addr, &sbuf, "SERVER_ADDR", "SERVER_PORT");
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "SERVER_NAME", khttpd_exchange_host(exchange));
+	    "SERVER_NAME", khttpd_exchange_host(exchange),
+	    khttpd_exchange_host_length(exchange));
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "REDIRECT_STATUS", "200");
+	    "REDIRECT_STATUS", "200", 3);
 
 	if (0 < sbuf_len(&xchg_data->path_info)) {
 		tail = khttpd_fcgi_append_param(&head, tail, &len,
-		    "PATH_INFO", sbuf_data(&xchg_data->path_info));
+		    "PATH_INFO", sbuf_data(&xchg_data->path_info),
+		    sbuf_len(&xchg_data->path_info));
 
 		server = khttpd_location_get_server(location);
 		tmploc = khttpd_server_route(server, &xchg_data->path_info,
@@ -1148,30 +1159,15 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 		khttpd_location_release(tmploc);
 		sbuf_finish(&sbuf);
 		tail = khttpd_fcgi_append_param(&head, tail, &len,
-		    "PATH_TRANSLATED", sbuf_data(&sbuf));
+		    "PATH_TRANSLATED", sbuf_data(&sbuf), sbuf_len(&sbuf));
 		sbuf_clear(&sbuf);
 	}
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len, "DOCUMENT_ROOT",
-	    loc_data->fs_path);
+	    loc_data->fs_path, strlen(loc_data->fs_path));
 
-	khttpd_mbuf_pos_init(&pos, khttpd_exchange_request_header(exchange), 0);
-	khttpd_mbuf_next_line(&pos);
-	KASSERT(pos.unget == -1, ("unget %#x", pos.unget));
-
-	sbuf_new(&parser_arg.sbuf, parser_arg.buf, sizeof(parser_arg.buf),
-	    SBUF_AUTOEXTEND);
-	parser_arg.head = head;
-	parser_arg.tail = tail;
-	parser_arg.len = len;
-	khttpd_field_parse_init(&parser, KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH,
-	    false, pos.ptr, pos.off);
-	khttpd_field_parse(&parser, &parser_arg,
-	    khttpd_fcgi_request_header_field_found,
-	    khttpd_fcgi_request_header_field_error);
-	head = parser_arg.head;
-	tail = parser_arg.tail;
-	len = parser_arg.len;
+	tail = khttpd_fcgi_convert_request_header_field(exchange, &head, tail,
+	    &len, &sbuf);
 
 	khttpd_fcgi_add_padding(tail, len);
 	if (tail->m_next != NULL)

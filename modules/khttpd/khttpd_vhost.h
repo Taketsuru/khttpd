@@ -62,7 +62,7 @@ void khttpd_vhost_set_server_list(struct khttpd_port *port,
 void khttpd_vhost_clear_port_list(struct khttpd_server *server);
 void khttpd_vhost_clear_server_list(struct khttpd_port *port);
 struct khttpd_server *khttpd_vhost_find_server(struct khttpd_port *port,
-    const char *host);
+    const char *host_begin, const char *host_end);
 struct khttpd_vhost_tie *
 khttpd_vhost_port_iterator(struct khttpd_server *server);
 struct khttpd_vhost_tie *

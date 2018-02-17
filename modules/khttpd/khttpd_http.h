@@ -68,6 +68,7 @@ const struct sockaddr *khttpd_exchange_client_address
 const struct sockaddr *khttpd_exchange_server_address
     (struct khttpd_exchange *);
 const char *khttpd_exchange_host(struct khttpd_exchange *);
+size_t khttpd_exchange_host_length(struct khttpd_exchange *);
 struct khttpd_port *khttpd_exchange_get_port(struct khttpd_exchange *exchange);
 void khttpd_exchange_set_ops(struct khttpd_exchange *, 
     struct khttpd_exchange_ops *, void *);
@@ -75,6 +76,7 @@ void *khttpd_exchange_get_data(struct khttpd_exchange *);
 void khttpd_exchange_error(struct khttpd_exchange *, 
     struct khttpd_mbuf_json *);
 const char *khttpd_exchange_get_target(struct khttpd_exchange *exchange);
+size_t khttpd_exchange_get_target_length(struct khttpd_exchange *exchange);
 bool khttpd_exchange_is_request_body_chunked(struct khttpd_exchange *);
 bool khttpd_exchange_is_response_body_chunked(struct khttpd_exchange *);
 size_t khttpd_exchange_get_request_content_length
@@ -82,10 +84,13 @@ size_t khttpd_exchange_get_request_content_length
 bool khttpd_exchange_has_request_content_length
     (struct khttpd_exchange *exchange);
 int khttpd_exchange_method(struct khttpd_exchange *exchange);
-int khttpd_exchange_get_request_header_field(struct khttpd_exchange *,
-    const char *, struct sbuf *);
-struct mbuf *
-	khttpd_exchange_request_header(struct khttpd_exchange *_exchange);
+bool	khttpd_exchange_get_request_header_field(struct khttpd_exchange *,
+	    const char *, struct sbuf *);
+bool	khttpd_exchange_get_request_content_type(struct khttpd_exchange *_xchg,
+	    struct sbuf *_dst);
+const char *
+	khttpd_exchange_request_header(struct khttpd_exchange *_exchange,
+	    size_t *_size_out);
 bool khttpd_exchange_is_request_media_type_json(struct khttpd_exchange *,
 	bool);
 void khttpd_exchange_enable_chunked_transfer(struct khttpd_exchange *exchange);
@@ -116,7 +121,7 @@ void khttpd_exchange_respond_with_reason(struct khttpd_exchange *_exchange,
 void khttpd_exchange_reject(struct khttpd_exchange *exchange);
 void khttpd_exchange_reset(struct khttpd_exchange *exchange);
 void khttpd_exchange_options(struct khttpd_exchange *);
-void khttpd_exchange_method_not_implemented(struct khttpd_exchange *);
+void khttpd_exchange_method_not_allowed(struct khttpd_exchange *);
 
 // XXX The following functions should be safe to call always.  Khttpd_http
 // should not assume that the stream doesn't call

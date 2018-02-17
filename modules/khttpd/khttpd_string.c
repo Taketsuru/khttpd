@@ -112,40 +112,25 @@ khttpd_hash32_str_ci(const char *str, uint32_t hash)
 }
 
 int
-khttpd_parse_digits_field(const char *begin, const char *end,
+khttpd_parse_digits_field(const char *begin, const char *end, 
     uintmax_t *value_out)
 {
-	uintmax_t value, digit;
-	const char *digits_begin, *cp;
-	int ch;
+	uintmax_t value;
+	const char *cp;
+	int ch, digit;
 
-	cp = begin;
-	while (cp < end && ((ch = *cp++) == ' ' || ch == '\t'))
-		; /* nothing */
-	--cp;
-
-	digits_begin = cp;
 	value = 0;
-	while (cp < end) {
-		ch = *cp++;
-		if (!isdigit(ch))
-			break;
+	for (cp = begin; cp < end; ++cp) {
+		ch = *cp;
+		if (!isdigit(ch)) {
+			return (EINVAL);
+		}
 		digit = ch - '0';
-		if (value * 10 + digit < value)
+		if (value * 10 + digit < value) {
 			return (ERANGE);
+		}
 		value = value * 10 + digit;
 	}
-
-	if (cp == digits_begin + 1)
-		return (ENOENT);
-
-	while (cp < end && ((ch = *cp++) == ' ' || ch == '\t'))
-		; /* nothing */
-
-	if (ch == '\r')
-		ch = *cp++;
-	if (ch != '\n')
-		return (EINVAL);
 
 	*value_out = value;
 
@@ -374,4 +359,58 @@ khttpd_unescape_uri(struct sbuf *out, const char *in)
 	sbuf_cat(out, src);
 
 	return (0);
+}
+
+void
+khttpd_string_trim(const char **begin_io, const char **end_io)
+{
+	const char *begin, *end;
+	int ch;
+
+	begin = *begin_io;
+	end = *end_io;
+
+	for (; begin < end && ((ch = *begin) == ' ' || ch == '\t'); ++begin) {
+	}
+
+	for (; begin < end - 1 && ((ch = end[-1]) == ' ' || ch == '\t');
+	     --end) {
+	}
+
+	*begin_io = begin;
+	*end_io = end;
+}
+
+void
+khttpd_string_for_each_token(const char *begin, const char *end,
+    bool (*fn)(void *arg, const char *begin, const char *end), void *arg)
+{
+	const char *cp, *ep, *sp;
+	int ch;
+
+	cp = begin;
+	for (;;) {
+		sp = memchr(cp, ',', end - cp);
+
+		if (sp == NULL) {
+			ep = end;
+		} else {
+			for (ep = sp;
+			     cp < ep - 1 &&
+			     ((ch = ep[-1]) == ' ' || ch == '\t');
+			     --ep) {
+			}
+		}
+
+		if (cp < ep && !fn(arg, cp, ep)) {
+			break;
+		}
+
+		if (sp == NULL) {
+			break;
+		}
+
+		for (cp = sp + 1; (ch = *cp) == ' ' || ch == '\t'; ++cp) {
+		}
+	}
 }

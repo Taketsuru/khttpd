@@ -65,8 +65,6 @@ boolean_t khttpd_mbuf_skip_ws(struct khttpd_mbuf_pos *iter);
 boolean_t khttpd_mbuf_next_line(struct khttpd_mbuf_pos *iter);
 void khttpd_mbuf_get_line_and_column(struct khttpd_mbuf_pos *origin,
     struct khttpd_mbuf_pos *pos, unsigned *line_out, unsigned *column_out);
-boolean_t khttpd_mbuf_get_header_field(struct khttpd_mbuf_pos *iter,
-    const char *name, struct sbuf *value);
 int khttpd_mbuf_next_segment(struct khttpd_mbuf_pos *iter, int term_ch);
 int khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos, int term_ch,
     char *buffer, size_t size, char **end_out);
