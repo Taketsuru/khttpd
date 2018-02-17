@@ -35,21 +35,13 @@
 
 struct sbuf;
 
-char *khttpd_find_2ch_in(const char *begin, const char *end,
-    char ch1, char ch2);
-char *khttpd_skip_ws(const char *ptr);
-char *khttpd_rtrim_ws(const char *begin, const char *end);
-uint32_t khttpd_hash32_buf_ci(const char *begin, const char *end,
-    uint32_t hash);
-uint32_t khttpd_hash32_str_ci(const char *str, uint32_t hash);
-int khttpd_parse_digits_field(const char *_begin, const char *_end,
-    uintmax_t *_value_out);
-int khttpd_parse_ip_addresss(uint32_t *out, const char *value);
-int khttpd_parse_ipv6_address(u_char *out, const char *value);
-void khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr);
-boolean_t khttpd_is_json_media_type(const char *input);
-int khttpd_decode_hexdigit(char);
-int khttpd_unescape_uri(struct sbuf *, const char *);
+int	khttpd_parse_digits(uintmax_t *_value,
+	    const char *_begin, const char *_end);
+int	khttpd_parse_ip_addresss(uint32_t *_dst, const char *_value);
+int	khttpd_parse_ipv6_address(u_char *_dst, const char *_value);
+void	khttpd_print_ipv6_address(struct sbuf *_dst, const uint8_t *_value);
+int	khttpd_decode_hexdigit(int _ch);
+int	khttpd_unescape_uri(struct sbuf *_dst, const char *_src);
 void	khttpd_string_trim(const char **_begin, const char **_end);
 void	khttpd_string_for_each_token(const char *_begin, const char *_end,
 	    bool (*_fn)(void *_arg, const char *_begin, const char *_end),

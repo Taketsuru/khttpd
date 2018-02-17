@@ -551,7 +551,7 @@ khttpd_fcgi_process_content_length_field(struct khttpd_fcgi_conn *conn,
 		return (false);
 	}
 
-	error = khttpd_parse_digits_field(begin, end, &value);
+	error = khttpd_parse_digits(&value, begin, end);
 	if (error == ERANGE || (error == 0 && OFF_MAX < value)) {
 		khttpd_fcgi_hdr_error(conn, "out of range");
 		return (false);
@@ -946,7 +946,8 @@ khttpd_fcgi_append_sockaddr_param(struct mbuf **head, struct mbuf *out,
 	case AF_INET6:
 		addr_in6 = (const struct sockaddr_in6 *)addr;
 		port = ntohs(addr_in6->sin6_port);
-		khttpd_print_ipv6_addr(tmp_sbuf, addr_in6->sin6_addr.s6_addr8);
+		khttpd_print_ipv6_address(tmp_sbuf,
+		    addr_in6->sin6_addr.s6_addr8);
 		has_remote_addr = true;
 		break;
 
@@ -1005,20 +1006,13 @@ khttpd_fcgi_convert_request_header_field(struct khttpd_exchange *exchange,
 			break;
 
 		default:
-			for (begin = sp + 1;
-			     begin < end && 
-			     ((ch = *begin) == ' ' || ch == '\t');
-			     ++begin) {
-			}
-
-			for (end = eolp;
-			     begin < end - 1 &&
-			     ((ch = end[-1]) == ' ' || ch == '\t');
-			     --end) {
-			}
+			begin = sp + 1;
+			end = eolp;
+			khttpd_string_trim(&begin, &end);
 
 			sbuf_cpy(sbuf, "HTTP_");
 			for (cp = bolp; cp < sp; ++cp) {
+				ch = *cp;
 				if (ch == '-') {
 					sbuf_putc(sbuf, '_');
 				} else {

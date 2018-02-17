@@ -654,7 +654,6 @@ khttpd_exchange_get_request_header_field(struct khttpd_exchange *exchange,
 	const char *begin, *end;
 	const char *sp;
 	size_t namelen;
-	int ch;
 	bool found;
 
 	KHTTPD_ENTRY("%s(%p,%s,%p)", __func__, exchange, name, dst);
@@ -681,17 +680,9 @@ khttpd_exchange_get_request_header_field(struct khttpd_exchange *exchange,
 		KASSERT(eolp != NULL, ("no LF at the end of the last field"));
 
 		if (sp - bolp == namelen && strcasecmp(bolp, name) == 0) {
-			for (begin = sp + 1;
-			     begin < eolp &&
-			     ((ch = *begin) == ' ' || ch == '\t');
-			     ++begin) {
-			}
-
-			for (end = eolp;
-			     begin < end - 1 &&
-			     ((ch = end[-1]) == ' ' || ch == '\t');
-			     --end) {
-			}
+			begin = sp + 1;
+			end = eolp;
+			khttpd_string_trim(&begin, &end);
 
 			if (found) {
 				sbuf_cat(dst, ", ");
@@ -710,9 +701,22 @@ bool
 khttpd_exchange_is_request_media_type_json(struct khttpd_exchange *exchange,
 	bool default_is_json)
 {
+	static const char app_json[] = "application/json";
+	const char *type, *cp;
+	size_t len;
 
-	return (exchange->request_content_type == NULL ? default_is_json :
-	    khttpd_is_json_media_type(exchange->request_content_type));
+	if ((type = exchange->request_content_type) == NULL) {
+		return (default_is_json);
+	}
+
+	len = exchange->request_content_type_len;
+	cp = memchr(type, ';', len);
+	if (cp != NULL) {
+		len = cp - type;
+	}
+
+	return (sizeof(app_json) -1 == len &&
+	    strncmp(type, app_json, len) == 0);
 }
 
 void
@@ -920,8 +924,9 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 		    status, response);
 }
 
-static char *
-khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange, char *pos)
+static const char *
+khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
+    const char *pos)
 {
 	const char *reqend;
 	ssize_t query_off;
@@ -1766,7 +1771,7 @@ khttpd_session_receive_content_length_field(struct khttpd_session *session,
 
 	exchange = &session->exchange;
 
-	error = khttpd_parse_digits_field(begin, end, &value);
+	error = khttpd_parse_digits(&value, begin, end);
 	if (error == ERANGE || OFF_MAX < value) {
 		KHTTPD_NOTE("reject %u error %d value %jx",
 		    __LINE__, error, value);
@@ -1901,9 +1906,9 @@ static int
 khttpd_session_receive_request(struct khttpd_session *session)
 {
 	static const char version_prefix[] = "HTTP/";
-	char *begin, *end;
-	char *bolp, *eolp;
-	char *cp, *reqend;
+	const char *begin, *end;
+	const char *bolp, *eolp;
+	const char *cp, *reqend;
 	khttpd_method_fn_t handler;
 	struct khttpd_exchange *exchange;
 	struct khttpd_location *location;
@@ -2039,15 +2044,9 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 		/* Trim whitespaces around the field value. */
 
-		for (begin = cp + 1;
-		     begin < eolp && ((ch = *begin) == ' ' || ch == '\t');
-		     ++begin) {
-		}
-
-		for (end = eolp; 
-		     begin < end - 1 && ((ch = end[-1]) == ' ' || ch == '\t');
-		     --end) {
-		}
+		begin = cp + 1;
+		end = eolp;
+		khttpd_string_trim(&begin, &end);
 
 		/* Apply a field handler. */
 

@@ -570,7 +570,7 @@ khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *dst,
 		    addr_in6->sin6_addr.s6_addr32[1] != 0 ||
 		    addr_in6->sin6_addr.s6_addr32[0] != 0) {
 			sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-			khttpd_print_ipv6_addr(&sbuf,
+			khttpd_print_ipv6_address(&sbuf,
 			    addr_in6->sin6_addr.s6_addr8);
 			sbuf_finish(&sbuf);
 			khttpd_mbuf_json_property(dst, "address");

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,91 +29,12 @@
 
 #include <sys/param.h>
 #include <sys/ctype.h>
-#include <sys/hash.h>
 #include <sys/sbuf.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
-#include "khttpd_malloc.h"
-
-char *
-khttpd_find_2ch_in(const char *begin, const char *end, char ch1, char ch2)
-{
-	const char *ptr;
-
-	for (ptr = begin; ptr < end; ++ptr)
-		if (*ptr == ch1 || *ptr == ch2)
-			return ((char *)ptr);
-
-	return (NULL);
-}
-
-char *
-khttpd_skip_ws(const char *ptr)
-{
-	const char *cp;
-
-	for (cp = ptr; *cp == ' ' || *cp == '\t'; ++cp)
-		; /* nothing */
-
-	return ((char *)cp);
-}
-
-char *
-khttpd_rtrim_ws(const char *begin, const char *end)
-{
-	const char *cp;
-
-	for (cp = end; begin < cp && (cp[-1] == ' ' || cp[-1] == '\t'); --cp)
-		; /* nothing */
-
-	return ((char *)cp);
-}
-
-uint32_t
-khttpd_hash32_buf_ci(const char *begin, const char *end, uint32_t hash)
-{
-	char buf[128];
-	char *bp;
-	size_t len;
-	uint32_t result;
-	int i;
-
-	len = (const char *)end - (const char *)begin;
-	bp = len <= sizeof(buf) ? buf : khttpd_malloc(len);
-	for (i = 0; i < len; ++i)
-		bp[i] = tolower(begin[i]);
-	result = murmur3_32_hash(bp, len, hash);
-	if (sizeof(buf) < len)
-		khttpd_free(bp);
-
-	return (hash);
-}
-
-uint32_t
-khttpd_hash32_str_ci(const char *str, uint32_t hash)
-{
-	char buf[128];
-	const char *srcp;
-	char *bp, *dstp;
-	size_t len;
-	uint32_t result;
-	char ch;
-
-	len = strlen(str);
-	bp = len <= sizeof(buf) ? buf : khttpd_malloc(len);
-	for (srcp = str, dstp = bp; ((ch = *srcp) != '\0'); ++srcp, ++dstp)
-		*dstp = tolower(ch);
-	result = murmur3_32_hash(bp, len, hash);
-	if (sizeof(buf) < len)
-		khttpd_free(bp);
-
-	return (hash);
-}
-
 int
-khttpd_parse_digits_field(const char *begin, const char *end, 
-    uintmax_t *value_out)
+khttpd_parse_digits(uintmax_t *value_out, const char *begin, const char *end)
 {
 	uintmax_t value;
 	const char *cp;
@@ -248,7 +169,7 @@ khttpd_parse_ipv6_address(u_char *out, const char *value)
 }
 
 void
-khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr)
+khttpd_print_ipv6_address(struct sbuf *out, const uint8_t *addr)
 {
 	const uint8_t *ap;
 	uint16_t v, lv;
@@ -303,23 +224,8 @@ khttpd_print_ipv6_addr(struct sbuf *out, const uint8_t *addr)
 	}
 }
 
-boolean_t
-khttpd_is_json_media_type(const char *input)
-{
-	const char *begin, *cp;
-	size_t len;
-
-	begin = khttpd_skip_ws(input);
-	len = strlen(begin);
-	cp = memchr(begin, ';', len);
-	if (cp == NULL)
-		cp = begin + len;
-	cp = khttpd_rtrim_ws(begin, cp);
-	return (strncmp(begin, "application/json", cp - begin) == 0);
-}
-
 int
-khttpd_decode_hexdigit(char ch)
+khttpd_decode_hexdigit(int ch)
 {
 	if ('0' <= ch && ch <= '9')
 		return (ch - '0');
