@@ -1,0 +1,7 @@
+- modules/khttpd/khttpd_mbuf.c
+
+-- khttpd_mbuf_vprintf
+
+--- for each boundary cases of the length of an output string, such as
+    just MCBYTES bytes etc.
+

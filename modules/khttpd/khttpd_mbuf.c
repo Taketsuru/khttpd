@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,7 +27,6 @@
 
 #include "khttpd_mbuf.h"
 
-#include <sys/types.h>
 #include <sys/limits.h>
 #include <sys/ctype.h>
 #include <sys/sbuf.h>
@@ -36,7 +35,6 @@
 #include <sys/systm.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-
 #include <netinet/in.h>
 
 #include "khttpd.h"
@@ -53,6 +51,52 @@ static const char khttpd_mbuf_comma[] = ", ";
 static struct mbuf *khttpd_mbuf_escape(struct mbuf *, const char *,
     const char *);
 
+struct mbuf *
+khttpd_mbuf_append_ch(struct mbuf *dst, char ch)
+{
+	struct mbuf *ptr;
+
+	ptr = m_last(dst);
+	if (M_TRAILINGSPACE(ptr) == 0) {
+		ptr = ptr->m_next = m_get(M_WAITOK, MT_DATA);
+	}
+	mtod(ptr, char *)[ptr->m_len++] = ch;
+
+	return (ptr);
+}
+
+struct mbuf *
+khttpd_mbuf_append(struct mbuf *dst, const char *begin, const char *end)
+{
+	const char *cp;
+	struct mbuf *ptr;
+	size_t space, len;
+
+	ptr = m_last(dst);
+	cp = begin;
+
+	if (0 < (space = M_TRAILINGSPACE(ptr))) {
+		len = MIN(end - cp, space);
+		bcopy(cp, mtod(ptr, char *) + ptr->m_len, len);
+		ptr->m_len += len;
+		cp += len;
+	}
+
+	if (end <= cp) {
+		return (ptr);
+	}
+
+	for (ptr = ptr->m_next = m_getm2(NULL, end - cp, M_WAITOK, MT_DATA, 0);
+	     ptr != NULL; ptr = ptr->m_next) {
+		len = MIN(end - cp, M_TRAILINGSPACE(ptr));
+		bcopy(cp, mtod(ptr, void *), len);
+		ptr->m_len = len;
+		cp += len;
+	}
+
+	return (ptr);
+}
+
 static void
 khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
 {
@@ -61,22 +105,23 @@ khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
 }
 
 int
-khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
+khttpd_mbuf_vprintf(struct mbuf *dst, const char *fmt, va_list vl)
 {
 	char *extbuf;
 	struct mbuf *buf;
-	int req, buflen;
 	va_list vlcopy;
+	int req, buflen;
 
 	va_copy(vlcopy, vl);
 
-	m_length(output, &buf);
+	buf = m_last(dst);
 	buflen = M_TRAILINGSPACE(buf);
 	req = vsnprintf(mtod(buf, char *) + buf->m_len, buflen, fmt, vl);
 	if (buflen < req + 1) {
-		if (req + 1 <= MCLBYTES) {
-			m_getm2(buf, req + 1, M_WAITOK, MT_DATA, 0);
-			buf = buf->m_next;
+		if (req < MCLBYTES) {
+			buf = buf->m_next =
+			    m_getm2(NULL, req + 1, M_WAITOK, MT_DATA, 0);
+
 		} else {
 			buf = buf->m_next = m_get(M_WAITOK, MT_DATA);
 			extbuf = khttpd_malloc(sizeof(u_int) + req + 1);
@@ -98,760 +143,20 @@ khttpd_mbuf_vprintf(struct mbuf *output, const char *fmt, va_list vl)
 }
 
 int
-khttpd_mbuf_printf(struct mbuf *output, const char *fmt, ...)
+khttpd_mbuf_printf(struct mbuf *dst, const char *fmt, ...)
 {
 	va_list vl;
 	int result;
 
 	va_start(vl, fmt);
-	result = khttpd_mbuf_vprintf(output, fmt, vl);
+	result = khttpd_mbuf_vprintf(dst, fmt, vl);
 	va_end(vl);
 
 	return (result);
 }
 
-struct mbuf *
-khttpd_mbuf_append(struct mbuf *output, const char *begin, const char *end)
-{
-	struct mbuf *ptr;
-	const char *cp;
-	size_t space, len;
-
-	m_length(output, &ptr);
-	cp = begin;
-	while (cp < end && 0 < (space = M_TRAILINGSPACE(ptr))) {
-		len = MIN(end - cp, space);
-		bcopy(cp, mtod(ptr, char *) + ptr->m_len, len);
-		ptr->m_len += len;
-		cp += len;
-	}
-
-	if (end <= cp)
-		return (ptr);
-
-	m_getm2(ptr, end - cp, M_WAITOK, MT_DATA, 0);
-
-	ptr = ptr->m_next;
-	for (;;) {
-		KASSERT(cp < end, ("cp %p, end %p", cp, end));
-		len = MIN(end - cp, M_TRAILINGSPACE(ptr));
-		bcopy(cp, mtod(ptr, void *), len);
-		ptr->m_len = len;
-		cp += len;
-
-		if (ptr->m_next == NULL)
-			break;
-		ptr = ptr->m_next;
-	}
-	KASSERT(cp == end, ("cp %p, end %p", cp, end));
-
-	return (ptr);
-}
-
-struct mbuf *
-khttpd_mbuf_append_ch(struct mbuf *output, char ch)
-{
-	struct mbuf *ptr;
-
-	m_length(output, &ptr);
-	if (M_TRAILINGSPACE(ptr) == 0)
-		ptr = ptr->m_next = m_get(M_WAITOK, MT_DATA);
-	mtod(ptr, char *)[ptr->m_len++] = ch;
-
-	return (ptr);
-}
-
-struct mbuf *
-khttpd_mbuf_copy_range(struct khttpd_mbuf_pos *begin,
-    struct khttpd_mbuf_pos *end)
-{
-	struct mbuf *ptr, *result;
-	int len, off;
-
-	ptr = begin->ptr;
-	off = begin->off;
-
-	if (ptr == end->ptr)
-		len = end->off - begin->off;
-
-	else {
-		if (begin->off == 0)
-			len = 0;
-		else {
-			len = ptr->m_len - begin->off;
-			ptr = ptr->m_next;
-		}
-
-		for (; ptr != end->ptr; ptr = ptr->m_next)
-			len += ptr->m_len;
-
-		len += end->off;
-	}
-
-	if (0 < off && begin->unget != -1) {
-		--off;
-		++len;
-	}
-
-	if (0 < len && end->unget != -1)
-		--len;
-
-	result = m_copym(begin->ptr, off, len, M_WAITOK);
-
-	if (off == 0 && begin->unget != -1) {
-		result = m_prepend(result, 1, M_WAITOK);
-		*mtod(result, char *) = begin->unget;
-	}
-
-	return (result);
-}
-
-void
-khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *iter, struct mbuf *ptr,
-    int off)
-{
-
-	iter->unget = -1;
-	iter->ptr = ptr;
-	iter->off = off;
-}
-
-int
-khttpd_mbuf_getc(struct khttpd_mbuf_pos *iter)
-{
-	int result;
-
-	if (0 <= iter->unget) {
-		result = iter->unget;
-		iter->unget = -1;
-		return (result);
-	}
-
-	while (iter->ptr != NULL && iter->ptr->m_len <= iter->off) {
-		iter->off = 0;
-		iter->ptr = iter->ptr->m_next;
-	}
-
-	if (iter->ptr == NULL)
-		return (-1);
-
-	result = mtod(iter->ptr, unsigned char *)[iter->off];
-	++iter->off;
-
-	return (result);
-}
-
-void
-khttpd_mbuf_ungetc(struct khttpd_mbuf_pos *iter, int ch)
-{
-
-	KASSERT(iter->unget == -1, ("unget=%#02x", iter->unget));
-	iter->unget = ch;
-}
-
-boolean_t
-khttpd_mbuf_skip_ws(struct khttpd_mbuf_pos *iter)
-{
-	int ch;
-
-	while ((ch = khttpd_mbuf_getc(iter)) != -1)
-		if (!isspace(ch)) {
-			khttpd_mbuf_ungetc(iter, ch);
-			return (TRUE);
-		}
-
-	return (FALSE);
-}
-
-boolean_t
-khttpd_mbuf_next_line(struct khttpd_mbuf_pos *iter)
-{
-	struct mbuf *ptr;
-	const char *begin, *cp, *end;
-	int off;
-	boolean_t found;
-
-	KHTTPD_ENTRY("%s({%p,%d,%#x})",
-	    __func__, iter->ptr, iter->off, iter->unget);
-
-	if (iter->unget == '\n') {
-		iter->unget = -1;
-		return (TRUE);
-	}
-
-	iter->unget = -1;
-
-	ptr = iter->ptr;
-	off = iter->off;
-
-	for (;;) {
-		begin = mtod(ptr, char *) + off;
-		end = mtod(ptr, char *) + ptr->m_len;
-		KASSERT(begin <= end, ("begin %p, end %p", begin, end));
-		cp = memchr(begin, '\n', end - begin);
-		if (cp != NULL) {
-			off = cp - mtod(ptr, char *) + 1;
-			found = TRUE;
-			break;
-		}
-
-		if (ptr->m_next == NULL) {
-			off = ptr->m_len;
-			found = FALSE;
-			break;
-		}
-
-		ptr = ptr->m_next;
-		off = 0;
-	}
-
-	iter->ptr = ptr;
-	iter->off = off;
-
-	return (found);
-}
-
-void khttpd_mbuf_get_line_and_column(struct khttpd_mbuf_pos *origin,
-    struct khttpd_mbuf_pos *pos, unsigned *line_out, unsigned *column_out)
-{
-	enum {
-		tab_width = 8
-	};
-	struct mbuf *ptr, *eptr;
-	const char *begin, *cp, *end;
-	int off, eoff;
-	unsigned line, column;
-
-	KASSERT(origin->unget == -1 || 0 < origin->off,
-	    ("origin->unget=%#x, origin->off=%d", origin->unget, origin->off));
-
-	eptr = pos->ptr;
-	eoff = pos->off;
-
-	if (pos->unget != -1) {
-		if (0 < eoff) {
-			--eoff;
-		} else {
-			KASSERT(eptr != origin->ptr,
-			    ("origin->ptr=%p, eptr=%p, eoff=0",
-				origin->ptr, eptr));
-
-			eptr = NULL;
-			eoff = 0;
-			
-			for (ptr = origin->ptr; ; ptr = ptr->m_next) {
-				if (0 < ptr->m_len) {
-					eptr = ptr;
-					eoff = ptr->m_len - 1;
-				}
-
-				if (ptr->m_next == pos->ptr)
-					break;
-			}
-
-			KASSERT(eptr != NULL, ("chain of empty mbufs"));
-		}
-	}
-
-	ptr = origin->ptr;
-	off = origin->off;
-
-	KASSERT(ptr != eptr || (origin->unget == -1 ? off : off - 1) < eoff,
-	    ("ptr=%p, off=%#x, eptr=%p, eoff=%#x", ptr, off, eptr, eoff));
-
-	line = 1;
-	column = 1;
-
-	if (origin->unget == '\n')
-		++line;
-	else if (origin->unget == '\t')
-		column = 9;
-	else if (origin->unget != -1)
-		++column;
-
-	while (ptr != NULL) {
-		begin = mtod(ptr, char *) + off;
-		end = mtod(ptr, char *) + (ptr == eptr ? eoff : ptr->m_len);
-		cp = memchr(begin, '\n', end - begin);
-		if (cp != NULL) {
-			++line;
-			column = 1;
-			off = cp + 1 - mtod(ptr, char *);
-			continue;
-		}
-
-		for (cp = begin; cp < end; ++cp)
-			if (*cp == '\t')
-				column = roundup2(column - 1 + tab_width,
-				    tab_width) + 1;
-			else
-				++column;
-
-		if (ptr == eptr && eoff <= off)
-			break;
-
-		off = 0;
-		ptr = ptr->m_next;
-	}
-
-	*line_out = line;
-	*column_out = column;
-}
-
-int
-khttpd_mbuf_next_segment(struct khttpd_mbuf_pos *iter, int term_ch)
-{
-	struct mbuf *ptr;
-	const char *begin, *cp, *end, *found;
-	int error, off, uch;
-
-	uch = iter->unget;
-	if (uch == '\n')
-		return (ENOENT);
-	if (uch == term_ch) {
-		iter->unget = -1;
-		return (0);
-	}
-
-	error = 0;
-	ptr = iter->ptr;
-	off = iter->off;
-
-	while (ptr != NULL) {
-		begin = mtod(ptr, char *);
-		end = begin + ptr->m_len;
-		cp = begin + off;
-		found = khttpd_find_2ch_in(cp, end, term_ch, '\n');
-		if (found != NULL) {
-			off = found + 1 - begin;
-			if (*found == '\n')
-				break;
-			goto end;
-		}
-
-		off = 0;
-		ptr = ptr->m_next;
-	}
-
-	error = ENOENT;
-
-end:
-	iter->ptr = ptr;
-	iter->off = off;
-
-	return (error);
-}
-
-int
-khttpd_mbuf_copy_segment(struct khttpd_mbuf_pos *pos,
-    int term_ch, char *buffer, size_t size, char **end_out)
-{
-	struct mbuf *ptr;
-	const char *begin, *end, *cp, *found;
-	char *bp, *bend;
-	int error, off, uch;
-
-	uch = pos->unget;
-	if (uch == '\n')
-		return (ENOENT);
-	if (uch == term_ch) {
-		pos->unget = -1;
-		if (end_out != NULL)
-			*end_out = buffer;
-		return (0);
-	}
-
-	bp = buffer;
-	bend = bp + size;
-	if (uch != -1) {
-		if (bp == bend) {
-			if (end_out != NULL)
-				*end_out = bp;
-			return (ENOMEM);
-		}
-		pos->unget = -1;
-		*bp++ = uch;
-	}
-
-	ptr = pos->ptr;
-	off = pos->off;
-
-	error = 0;
-
-	while (ptr != NULL) {
-		begin = mtod(ptr, char *);
-		end = begin + ptr->m_len;
-		cp = begin + off;
-		found = khttpd_find_2ch_in(cp, end, term_ch, '\n');
-		if (found != NULL) {
-			off = found + 1 - begin;
-
-			if (*found == '\n')
-				break;
-
-			if (bend - bp < found - cp)
-				goto enomem;
-
-			bcopy(cp, bp, found - cp);
-			bp += found - cp;
-			goto end;
-		}
-
-		if (bend - bp < end - cp) {
-			off = end - begin;
-			goto enomem;
-		}
-
-		bcopy(cp, bp, end - cp);
-		bp += end - cp;
-
-		off = 0;
-		ptr = ptr->m_next;
-	}
-
-	error = ENOENT;
-	goto end;
-
-enomem:
-	error = ENOMEM;
-	bcopy(cp, bp, bend - bp);
-	bp = bend;
-
-end:
-	pos->ptr = ptr;
-	pos->off = off;
-
-	if (end_out != NULL)
-		*end_out = bp;
-	
-	return (error);
-}
-
-void
-khttpd_mbuf_copy_to_sbuf(struct khttpd_mbuf_pos *begin,
-    struct khttpd_mbuf_pos *end, struct sbuf *dst)
-{
-	struct mbuf *ptr;
-
-	if (begin->unget)
-		sbuf_putc(dst, begin->unget);
-
-	ptr = begin->ptr;
-	if (ptr == end->ptr) {
-		KASSERT(begin->off <= end->off,
-		    ("ptr %p, begin off %d, end off %d",
-			ptr, begin->off, end->off));
-		sbuf_bcat(dst, mtod(ptr, char *) + begin->off,
-		    end->off - begin->off);
-
-	} else {
-		if (0 < begin->off) {
-			sbuf_bcat(dst, mtod(ptr, char *) + begin->off,
-			    ptr->m_len - begin->off);
-			ptr = ptr->m_next;
-		}
-
-		for (; ptr != end->ptr; ptr = ptr->m_next)
-			sbuf_bcat(dst, mtod(ptr, char *), ptr->m_len);
-	}
-
-	if (end->unget != -1) {
-		KASSERT(0 < sbuf_len(dst),
-		    ("sbuf_len(dst) %zd", sbuf_len(dst)));
-		sbuf_setpos(dst, sbuf_len(dst) - 1);
-	}
-}
-
-int
-khttpd_mbuf_parse_digits(struct khttpd_mbuf_pos *pos, uintmax_t *value_out)
-{
-	uintmax_t value, digit;
-	int ch;
-
-	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
-		;		/* nothing */
-	khttpd_mbuf_ungetc(pos, ch);
-
-	value = 0;
-	for (;;) {
-		ch = khttpd_mbuf_getc(pos);
-		if (!isdigit(ch)) {
-			khttpd_mbuf_ungetc(pos, ch);
-			break;
-		}
-
-		digit = ch - '0';
-		if (value * 10 + digit < value)
-			return (ERANGE);
-		value = value * 10 + digit;
-	}
-
-	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
-		;		/* nothing */
-	if (ch == '\r')
-		ch = khttpd_mbuf_getc(pos);
-	if (ch != '\n')
-		return (EINVAL);
-
-	*value_out = value;
-
-	return (0);
-}
-
-void
-khttpd_mbuf_base64_encode(struct mbuf *output, const char *buf, size_t size)
-{
-	struct mbuf *tail;
-	char *encbuf;
-	size_t i, j, n;
-	unsigned q, v;
-	int space;
-
-	m_length(output, &tail);
-	encbuf = mtod(tail, char *) + tail->m_len;
-
-	n = size / 3 * 3;
-	for (i = 0; i < n; i += 3) {
-		space = M_TRAILINGSPACE(tail);
-		if (space < 4) {
-			tail = tail->m_next = m_get(M_WAITOK, MT_DATA);
-			encbuf = mtod(tail, char *);
-		}
-
-		q = ((int)buf[i] << 16) | ((int)buf[i + 1] << 8) |
-		    (int)buf[i + 2];
-		for (j = 0; j < 4; ++j) {
-			v = (q >> 18) & 0x3f;
-			if (v < 26)
-				encbuf[j] = 'A' + v;
-			else if (v < 52)
-				encbuf[j] = 'a' + (v - 26);
-			else if (v < 62)
-				encbuf[j] = '0' + (v - 52);
-			else if (v == 62)
-				encbuf[j] = '+';
-			else
-				encbuf[j] = '/';
-			q <<= 6;
-		}
-
-		encbuf += 4;
-		tail->m_len += 4;
-	}
-
-	q = 0;
-	switch (size - n) {
-	case 0:
-		break;
-
-	case 2:
-		q = ((int)buf[i + 1] << 8);
-		/* FALLTHROUGH */
-
-	case 1:
-		q |= ((int)buf[i] << 16);
-
-		space = M_TRAILINGSPACE(tail);
-		if (space < 4) {
-			tail = tail->m_next = m_get(M_WAITOK, MT_DATA);
-			encbuf = mtod(tail, char *);
-		}
-
-		for (j = 0; j < 1 + (size - n); ++j) {
-			v = (q >> 18) & 0x3f;
-			if (v < 26)
-				encbuf[j] = 'A' + v;
-			else if (v < 52)
-				encbuf[j] = 'a' + (v - 26);
-			else if (v < 62)
-				encbuf[j] = '0' + (v - 52);
-			else if (v == 62)
-				encbuf[j] = '+';
-			else
-				encbuf[j] = '/';
-			q <<= 6;
-		}
-		for (; j < 4; ++j)
-			encbuf[j] = '=';
-
-		tail->m_len += 4;
-	}
-}
-
-int
-khttpd_mbuf_base64_decode(struct khttpd_mbuf_pos *iter, void **buf_out,
-    size_t *size_out)
-{
-	unsigned char *buf;
-	size_t bufsize, size;
-	int ch, code, equals, i;
-
-	size = 0;
-	bufsize = 128;
-	buf = khttpd_malloc(bufsize);
-
-	while ((ch = khttpd_mbuf_getc(iter)) != -1) {
-		code = 0;
-		equals = 0;
-		for (i = 0; i < 4; ++i) {
-			code <<= 6;
-			if ('A' <= ch && ch <= 'Z')
-				code |= ch - 'A';
-			else if ('a' <= ch && ch <= 'z')
-				code |= ch - 'a' + 26;
-			else if ('0' <= ch && ch <= '9')
-				code |= ch - '0' + 52;
-			else if (ch == '+')
-				code |= 62;
-			else if (ch == '/')
-				code |= 63;
-			else if (ch == '=')
-				++equals;
-			else {
-				khttpd_free(buf);
-				return (EINVAL);
-			}
-			ch = khttpd_mbuf_getc(iter);
-		}
-		khttpd_mbuf_ungetc(iter, ch);
-
-		if (bufsize < size + 3 - equals) {
-			bufsize = bufsize < 65536 ? bufsize << 1
-			    : bufsize + 65536;
-			buf = khttpd_realloc(buf, bufsize);
-		}
-
-		for (i = 2; equals <= i; --i)
-			buf[size++] = (code >> (i * 8)) & 0xff;
-
-		if (0 < equals)
-			break;
-	}
-
-	*buf_out = buf;
-	*size_out = size;
-
-	return (0);
-}
-
-int
-khttpd_mbuf_next_list_element(struct khttpd_mbuf_pos *pos, struct sbuf *output)
-{
-	int consecutive_ws_count;
-	char ch;
-
-	while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
-		;		/* nothing */
-
-	khttpd_mbuf_ungetc(pos, ch);
-
-	consecutive_ws_count = 0;
-	for (;;) {
-		ch = khttpd_mbuf_getc(pos);
-
-		switch (ch) {
-
-		case '\n':
-			khttpd_mbuf_ungetc(pos, ch);
-			/* FALLTHROUGH */
-
-		case -1:
-			if (sbuf_len(output) == consecutive_ws_count)
-				return (ENOMSG);
-			/* FALLTHROUGH */
-
-		case ',':
-			goto out;
-
-		case ' ': case '\t':
-			++consecutive_ws_count;
-			continue;
-
-		case '\r':
-			ch = khttpd_mbuf_getc(pos);
-			khttpd_mbuf_ungetc(pos, ch);
-			if (ch == '\n') {
-				if (sbuf_len(output) == consecutive_ws_count)
-					return (ENOMSG);
-				goto out;
-			}
-			/* FALLTHROUGH */
-
-		default:
-			consecutive_ws_count = 0;
-			sbuf_putc(output, ch);
-			break;
-		}
-	}
-out:
-	sbuf_setpos(output, sbuf_len(output) - consecutive_ws_count);
-
-	return (sbuf_finish(output));
-}
-
-boolean_t
-khttpd_mbuf_list_contains_token(struct khttpd_mbuf_pos *pos, char *token,
-    boolean_t ignore_case)
-{
-	const char *cptr, *token_end;
-	size_t token_len;
-	int ch;
-	boolean_t found_no_ws;
-
-	token_len = strlen(token);
-	token_end = token + token_len;
-
-	for (;;) {
-		while ((ch = khttpd_mbuf_getc(pos)) == ' ' || ch == '\t')
-			;		/* nothing */
-		khttpd_mbuf_ungetc(pos, ch);
-
-		for (cptr = token; cptr < token_end; ++cptr) {
-			ch = khttpd_mbuf_getc(pos);
-			if (ignore_case ? tolower(ch) != tolower(*cptr) :
-			    ch != *cptr) {
-				khttpd_mbuf_ungetc(pos, ch);
-				break;
-			}
-		}
-
-		found_no_ws = FALSE;
-		for (;;) {
-			ch = khttpd_mbuf_getc(pos);
-
-			switch (ch) {
-
-			case ',': case '\n':
-				goto out;
-
-			case ' ': case '\t':
-				continue;
-
-			case '\r':
-				ch = khttpd_mbuf_getc(pos);
-				if (ch == '\n')
-					goto out;
-				khttpd_mbuf_ungetc(pos, ch);
-
-			default:
-				break;
-			}
-
-			found_no_ws = TRUE;
-		}
- out:
-		if (cptr == token_end && !found_no_ws)
-			return (TRUE);
-
-		if (ch == '\n')
-			break;
-	}
-
-	return (FALSE);
-}
-
 static struct mbuf *
-khttpd_mbuf_escape(struct mbuf *output, const char *begin, const char *end)
+khttpd_mbuf_escape(struct mbuf *dst, const char *begin, const char *end)
 {
 	struct mbuf *tail;
 	const char *srcp;
@@ -862,7 +167,7 @@ khttpd_mbuf_escape(struct mbuf *output, const char *begin, const char *end)
 	unsigned char ch;
 
 	srcp = begin;
-	tail = output;
+	tail = dst;
 	dstp = mtod(tail, char *) + tail->m_len;
 	dend = M_START(tail) + M_SIZE(tail);
 
@@ -997,13 +302,13 @@ expand:
 }
 
 static struct mbuf *
-khttpd_mbuf_escape_mbuf(struct mbuf *output, struct mbuf *source)
+khttpd_mbuf_escape_mbuf(struct mbuf *dst, struct mbuf *source)
 {
 	struct mbuf *tail;
 	struct mbuf *srcp;
 	const char *begin, *end;
 	
-	tail = output;
+	tail = dst;
 	for (srcp = source; srcp != NULL; srcp = srcp->m_next) {
 		begin = mtod(srcp, char *);
 		end = begin + srcp->m_len;
@@ -1012,188 +317,144 @@ khttpd_mbuf_escape_mbuf(struct mbuf *output, struct mbuf *source)
 	return (tail);
 }
 
-void
-khttpd_mbuf_json_new(struct khttpd_mbuf_json *v)
+static void
+khttpd_mbuf_json_begin_element(struct khttpd_mbuf_json *dst)
 {
-
-	v->mbuf = m_get(M_WAITOK, MT_DATA);
-	v->is_first = TRUE;
-	v->is_property_value = FALSE;
+	if (dst->is_first)
+		dst->is_first = false;
+	else if (dst->is_property_value)
+		dst->is_property_value = false;
+	else
+		khttpd_mbuf_append(dst->mbuf, khttpd_mbuf_comma,
+		    khttpd_mbuf_comma + sizeof(khttpd_mbuf_comma) - 1);
 }
 
 void
-khttpd_mbuf_json_swap(struct khttpd_mbuf_json *x, struct khttpd_mbuf_json *y)
+khttpd_mbuf_json_new(struct khttpd_mbuf_json *dst)
 {
-	struct mbuf *m;
-	boolean_t v;
 
-	m = x->mbuf;
-	x->mbuf = y->mbuf;
-	y->mbuf = m;
-
-	v = x->is_first;
-	x->is_first = y->is_first;
-	y->is_first = v;
-
-	v = x->is_property_value;
-	x->is_property_value = y->is_property_value;
-	y->is_property_value = v;
+	dst->mbuf = m_get(M_WAITOK, MT_DATA);
+	dst->is_first = true;
+	dst->is_property_value = false;
 }
 
 struct mbuf *
-khttpd_mbuf_json_data(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_data(struct khttpd_mbuf_json *dst)
 {
 
-	return (v->mbuf);
+	return (dst->mbuf);
 }
 
 struct mbuf *
-khttpd_mbuf_json_move(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_move(struct khttpd_mbuf_json *dst)
 {
 	struct mbuf *m;
 
-	m = v->mbuf;
-	v->mbuf = NULL;
-	v->is_first = TRUE;
-	v->is_property_value = FALSE;
+	m = dst->mbuf;
+	dst->mbuf = NULL;
+	dst->is_first = true;
+	dst->is_property_value = false;
 
 	return (m);
 }
 
 void
-khttpd_mbuf_json_delete(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_delete(struct khttpd_mbuf_json *dst)
 {
 
-	m_freem(v->mbuf);
-	v->mbuf = NULL;
-}
-
-static void
-khttpd_mbuf_json_begin_element(struct khttpd_mbuf_json *v)
-{
-	if (v->is_first)
-		v->is_first = FALSE;
-	else if (v->is_property_value)
-		v->is_property_value = FALSE;
-	else
-		khttpd_mbuf_append(v->mbuf, khttpd_mbuf_comma,
-		    khttpd_mbuf_comma + sizeof(khttpd_mbuf_comma) - 1);
+	m_freem(dst->mbuf);
+	dst->mbuf = NULL;
 }
 
 void
-khttpd_mbuf_json_null(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_null(struct khttpd_mbuf_json *dst)
 {
 
-	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_null_literal,
+	khttpd_mbuf_json_begin_element(dst);
+	khttpd_mbuf_append(dst->mbuf, khttpd_mbuf_null_literal,
 	    khttpd_mbuf_null_literal + sizeof(khttpd_mbuf_null_literal) - 1);
 }
 
 void
-khttpd_mbuf_json_boolean(struct khttpd_mbuf_json *v, boolean_t value)
+khttpd_mbuf_json_boolean(struct khttpd_mbuf_json *dst, bool value)
 {
 
-	khttpd_mbuf_json_begin_element(v);
+	khttpd_mbuf_json_begin_element(dst);
 	if (value)
-		khttpd_mbuf_append(v->mbuf, khttpd_mbuf_true_literal,
+		khttpd_mbuf_append(dst->mbuf, khttpd_mbuf_true_literal,
 		    khttpd_mbuf_true_literal +
 		    sizeof(khttpd_mbuf_true_literal) - 1);
 	else
-		khttpd_mbuf_append(v->mbuf, khttpd_mbuf_false_literal,
+		khttpd_mbuf_append(dst->mbuf, khttpd_mbuf_false_literal,
 		    khttpd_mbuf_false_literal +
 		    sizeof(khttpd_mbuf_false_literal) - 1);
 }
 
 void
-khttpd_mbuf_json_cstr(struct khttpd_mbuf_json *v, boolean_t is_string,
+khttpd_mbuf_json_cstr(struct khttpd_mbuf_json *dst, bool is_string,
     const char *value)
 {
 	struct mbuf *tail;
 
-	khttpd_mbuf_json_begin_element(v);
+	khttpd_mbuf_json_begin_element(dst);
 
 	if (value == NULL) {
 		value = "null";
-		is_string = FALSE;
+		is_string = false;
 	}
 
 	if (is_string) {
-		tail = khttpd_mbuf_append_ch(v->mbuf, '"');
+		tail = khttpd_mbuf_append_ch(dst->mbuf, '"');
 		tail = khttpd_mbuf_escape(tail, value, value + strlen(value));
 		khttpd_mbuf_append_ch(tail, '"');
 	} else
-		khttpd_mbuf_append(v->mbuf, value, value + strlen(value));
+		khttpd_mbuf_append(dst->mbuf, value, value + strlen(value));
 }
 
 void
-khttpd_mbuf_json_bytes(struct khttpd_mbuf_json *v, boolean_t is_string,
+khttpd_mbuf_json_bytes(struct khttpd_mbuf_json *dst, bool is_string,
     const char *begin, const char *end)
 {
 	struct mbuf *tail;
 
-	khttpd_mbuf_json_begin_element(v);
+	khttpd_mbuf_json_begin_element(dst);
 
 	if (is_string) {
-		tail = khttpd_mbuf_append_ch(v->mbuf, '"');
+		tail = khttpd_mbuf_append_ch(dst->mbuf, '"');
 		tail = khttpd_mbuf_escape(tail, begin, end);
 		khttpd_mbuf_append_ch(tail, '"');
 	} else
-		khttpd_mbuf_append(v->mbuf, begin, end);
+		khttpd_mbuf_append(dst->mbuf, begin, end);
 }
 
 void
-khttpd_mbuf_json_mbuf(struct khttpd_mbuf_json *v, boolean_t is_string,
+khttpd_mbuf_json_mbuf(struct khttpd_mbuf_json *dst, bool is_string,
     struct mbuf *m)
 {
 	struct mbuf *tail;
 
-	khttpd_mbuf_json_begin_element(v);
+	khttpd_mbuf_json_begin_element(dst);
 	if (is_string) {
-		tail = khttpd_mbuf_append_ch(v->mbuf, '\"');
+		tail = khttpd_mbuf_append_ch(dst->mbuf, '\"');
 		tail = khttpd_mbuf_escape_mbuf(tail, m);
 		khttpd_mbuf_append_ch(tail, '\"');
 	} else
-		m_cat(v->mbuf, m_copym(m, 0, M_COPYALL, M_WAITOK));
+		m_cat(dst->mbuf, m_copym(m, 0, M_COPYALL, M_WAITOK));
 }
 
 void
-khttpd_mbuf_json_mbuf_1st_line(struct khttpd_mbuf_json *v, struct mbuf *m)
-{
-	struct mbuf *tail;
-	char *begin, *end, *cp;
-	
-	khttpd_mbuf_json_begin_element(v);
-
-	tail = khttpd_mbuf_append_ch(v->mbuf, '\"');
-
-	for (; m != NULL; m = m->m_next) {
-		begin = mtod(m, char *);
-		end = begin + m->m_len;
-		cp = memchr(begin, '\n', end - begin);
-		if (cp == NULL) {
-			tail = khttpd_mbuf_escape(tail, begin, end);
-		} else {
-			tail = khttpd_mbuf_escape(tail, begin, cp + 1);
-			break;
-		}
-	}
-
-	khttpd_mbuf_append_ch(tail, '\"');
-}
-
-void
-khttpd_mbuf_json_format(struct khttpd_mbuf_json *v, boolean_t is_string,
+khttpd_mbuf_json_format(struct khttpd_mbuf_json *dst, bool is_string,
     const char *fmt, ...)
 {
 	va_list args;
 
 	va_start(args, fmt);
-	khttpd_mbuf_json_vformat(v, is_string, fmt, args);
+	khttpd_mbuf_json_vformat(dst, is_string, fmt, args);
 	va_end(args);
 }
 
 void
-khttpd_mbuf_json_vformat(struct khttpd_mbuf_json *v, boolean_t is_string,
+khttpd_mbuf_json_vformat(struct khttpd_mbuf_json *dst, bool is_string,
     const char *fmt, va_list args)
 {
 	struct sbuf sbuf;
@@ -1201,54 +462,54 @@ khttpd_mbuf_json_vformat(struct khttpd_mbuf_json *v, boolean_t is_string,
 	sbuf_new(&sbuf, NULL, 256, SBUF_AUTOEXTEND);
 	sbuf_vprintf(&sbuf, fmt, args);
 	sbuf_finish(&sbuf);
-	khttpd_mbuf_json_cstr(v, is_string, sbuf_data(&sbuf));
+	khttpd_mbuf_json_cstr(dst, is_string, sbuf_data(&sbuf));
 	sbuf_delete(&sbuf);
 }
 
 void
-khttpd_mbuf_json_object_begin(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_object_begin(struct khttpd_mbuf_json *dst)
 {
 
-	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_append_ch(v->mbuf, '{');
-	v->is_first = TRUE;
+	khttpd_mbuf_json_begin_element(dst);
+	khttpd_mbuf_append_ch(dst->mbuf, '{');
+	dst->is_first = true;
 }
 
 void
-khttpd_mbuf_json_object_end(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_object_end(struct khttpd_mbuf_json *dst)
 {
 
-	khttpd_mbuf_append_ch(v->mbuf, '}');
-	v->is_first = FALSE;
+	khttpd_mbuf_append_ch(dst->mbuf, '}');
+	dst->is_first = false;
 }
 
 void
-khttpd_mbuf_json_array_begin(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_array_begin(struct khttpd_mbuf_json *dst)
 {
 
-	khttpd_mbuf_json_begin_element(v);
-	khttpd_mbuf_append_ch(v->mbuf, '[');
-	v->is_first = TRUE;
+	khttpd_mbuf_json_begin_element(dst);
+	khttpd_mbuf_append_ch(dst->mbuf, '[');
+	dst->is_first = true;
 }
 
 void
-khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *v)
+khttpd_mbuf_json_array_end(struct khttpd_mbuf_json *dst)
 {
-	khttpd_mbuf_append_ch(v->mbuf, ']');
-	v->is_first = FALSE;
+	khttpd_mbuf_append_ch(dst->mbuf, ']');
+	dst->is_first = false;
 }
 
 void
-khttpd_mbuf_json_property(struct khttpd_mbuf_json *v, const char *name)
+khttpd_mbuf_json_property(struct khttpd_mbuf_json *dst, const char *name)
 {
 
-	KASSERT(!v->is_property_value,
+	KASSERT(!dst->is_property_value,
 	    ("the previous property name isn't followed by a value"));
 
-	khttpd_mbuf_json_cstr(v, TRUE, name);
-	khttpd_mbuf_append(v->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
+	khttpd_mbuf_json_cstr(dst, true, name);
+	khttpd_mbuf_append(dst->mbuf, khttpd_mbuf_colon, khttpd_mbuf_colon +
 	    sizeof(khttpd_mbuf_colon) - 1);
-	v->is_property_value = TRUE;
+	dst->is_property_value = true;
 }
 
 void
@@ -1257,12 +518,12 @@ khttpd_mbuf_json_now(struct khttpd_mbuf_json *entry)
 	struct timeval tv;
 
 	microtime(&tv);
-	khttpd_mbuf_json_format(entry, FALSE, "%ld.%06ld",
+	khttpd_mbuf_json_format(entry, false, "%ld.%06ld",
 	    tv.tv_sec, tv.tv_usec);
 }
 
 void 
-khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
+khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *dst,
     const struct sockaddr *sockaddr)
 {
 	char buf[64];
@@ -1274,38 +535,36 @@ khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
 	in_addr_t ip_addr;
 	in_port_t port;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, v, sockaddr);
-
 	if (sockaddr->sa_family == AF_UNSPEC) {
 		KHTTPD_BRANCH("%s AF_UNSPEC", __func__);
-		khttpd_mbuf_json_null(v);
+		khttpd_mbuf_json_null(dst);
 		return;
 	}
 
-	khttpd_mbuf_json_object_begin(v);
+	khttpd_mbuf_json_object_begin(dst);
 
 	switch (sockaddr->sa_family) {
 
 	case AF_INET:
 		addr_in = (struct sockaddr_in *)sockaddr;
-		khttpd_mbuf_json_property(v, "family");
-		khttpd_mbuf_json_cstr(v, TRUE, "inet");
+		khttpd_mbuf_json_property(dst, "family");
+		khttpd_mbuf_json_cstr(dst, true, "inet");
 		ip_addr = ntohl(addr_in->sin_addr.s_addr);
 		port = ntohs(addr_in->sin_port);
 		if (ip_addr != 0) {
-			khttpd_mbuf_json_property(v, "address");
-			khttpd_mbuf_json_format(v, TRUE, "%d.%d.%d.%d",
+			khttpd_mbuf_json_property(dst, "address");
+			khttpd_mbuf_json_format(dst, true, "%d.%d.%d.%d",
 			    (ip_addr >> 24) & 0xff, (ip_addr >> 16) & 0xff,
 			    (ip_addr >> 8) & 0xff, ip_addr & 0xff);
 		}
-		khttpd_mbuf_json_property(v, "port");
-		khttpd_mbuf_json_format(v, FALSE, "%u", port);
+		khttpd_mbuf_json_property(dst, "port");
+		khttpd_mbuf_json_format(dst, false, "%u", port);
 		break;
 
 	case AF_INET6:
 		addr_in6 = (struct sockaddr_in6 *)sockaddr;
-		khttpd_mbuf_json_property(v, "family");
-		khttpd_mbuf_json_cstr(v, TRUE, "inet6");
+		khttpd_mbuf_json_property(dst, "family");
+		khttpd_mbuf_json_cstr(dst, true, "inet6");
 		if (addr_in6->sin6_addr.s6_addr32[3] != 0 ||
 		    addr_in6->sin6_addr.s6_addr32[2] != 0 ||
 		    addr_in6->sin6_addr.s6_addr32[1] != 0 ||
@@ -1314,24 +573,24 @@ khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
 			khttpd_print_ipv6_addr(&sbuf,
 			    addr_in6->sin6_addr.s6_addr8);
 			sbuf_finish(&sbuf);
-			khttpd_mbuf_json_property(v, "address");
-			khttpd_mbuf_json_cstr(v, TRUE, sbuf_data(&sbuf));
+			khttpd_mbuf_json_property(dst, "address");
+			khttpd_mbuf_json_cstr(dst, true, sbuf_data(&sbuf));
 			sbuf_delete(&sbuf);
 		}
 		port = ntohs(addr_in6->sin6_port);
-		khttpd_mbuf_json_property(v, "port");
-		khttpd_mbuf_json_format(v, FALSE, "%u", port);
+		khttpd_mbuf_json_property(dst, "port");
+		khttpd_mbuf_json_format(dst, false, "%u", port);
 		break;
 
 	case AF_UNIX:
 		addr_un = (struct sockaddr_un *)sockaddr;
-		khttpd_mbuf_json_property(v, "family");
-		khttpd_mbuf_json_cstr(v, TRUE, "unix");
+		khttpd_mbuf_json_property(dst, "family");
+		khttpd_mbuf_json_cstr(dst, true, "unix");
 		len = MIN(sizeof(struct sockaddr_un), addr_un->sun_len);
 		if (offsetof(struct sockaddr_un, sun_path) < len
 		    && addr_un->sun_path[0] != '\0')
-			khttpd_mbuf_json_property(v, "address");
-			khttpd_mbuf_json_format(v, TRUE, "%.*s", 
+			khttpd_mbuf_json_property(dst, "address");
+			khttpd_mbuf_json_format(dst, true, "%.*s", 
 			    len - offsetof(struct sockaddr_un, sun_path),
 			    addr_un->sun_path);
 		break;
@@ -1340,5 +599,5 @@ khttpd_mbuf_json_sockaddr(struct khttpd_mbuf_json *v,
 		panic("unsupported address family: %d", sockaddr->sa_family);
 	}
 
-	khttpd_mbuf_json_object_end(v);
+	khttpd_mbuf_json_object_end(dst);
 }

@@ -41,6 +41,12 @@
 #include "khttpd_mbuf.h"
 #include "khttpd_string.h"
 
+struct khttpd_mbuf_pos {
+	struct mbuf    *ptr;
+	u_int		off;
+	int		unget;
+};
+
 struct khttpd_json {
 	union {
 		int64_t		ivalue;
@@ -58,6 +64,135 @@ struct khttpd_json {
 
 static int khttpd_json_parse_value(struct khttpd_json **,
     struct khttpd_json_problem *, struct khttpd_mbuf_pos *, int);
+
+static void
+khttpd_mbuf_pos_init(struct khttpd_mbuf_pos *pos, struct mbuf *ptr,
+    int off)
+{
+
+	pos->unget = -1;
+	pos->ptr = ptr;
+	pos->off = off;
+}
+
+static int
+khttpd_mbuf_getc(struct khttpd_mbuf_pos *pos)
+{
+	int result;
+
+	if (0 <= pos->unget) {
+		result = pos->unget;
+		pos->unget = -1;
+		return (result);
+	}
+
+	while (pos->ptr != NULL && pos->ptr->m_len <= pos->off) {
+		pos->off = 0;
+		pos->ptr = pos->ptr->m_next;
+	}
+
+	if (pos->ptr == NULL) {
+		return (-1);
+	}
+
+	return (mtod(pos->ptr, unsigned char *)[pos->off++]);
+}
+
+static void
+khttpd_mbuf_ungetc(struct khttpd_mbuf_pos *pos, int ch)
+{
+
+	KASSERT(pos->unget == -1, ("unget=%#02x", pos->unget));
+	pos->unget = ch;
+}
+
+static void
+khttpd_mbuf_get_line_and_column(struct khttpd_mbuf_pos *origin,
+    struct khttpd_mbuf_pos *pos, unsigned *line_out, unsigned *column_out)
+{
+	enum {
+		tab_width = 8
+	};
+	struct mbuf *ptr, *eptr;
+	const char *begin, *cp, *end;
+	int off, eoff;
+	unsigned line, column;
+
+	KASSERT(origin->unget == -1 || 0 < origin->off,
+	    ("origin->unget=%#x, origin->off=%d", origin->unget, origin->off));
+
+	eptr = pos->ptr;
+	eoff = pos->off;
+
+	if (pos->unget != -1) {
+		if (0 < eoff) {
+			--eoff;
+		} else {
+			KASSERT(eptr != origin->ptr,
+			    ("origin->ptr=%p, eptr=%p, eoff=0",
+				origin->ptr, eptr));
+
+			eptr = NULL;
+			eoff = 0;
+			
+			for (ptr = origin->ptr; ; ptr = ptr->m_next) {
+				if (0 < ptr->m_len) {
+					eptr = ptr;
+					eoff = ptr->m_len - 1;
+				}
+
+				if (ptr->m_next == pos->ptr)
+					break;
+			}
+
+			KASSERT(eptr != NULL, ("chain of empty mbufs"));
+		}
+	}
+
+	ptr = origin->ptr;
+	off = origin->off;
+
+	KASSERT(ptr != eptr || (origin->unget == -1 ? off : off - 1) < eoff,
+	    ("ptr=%p, off=%#x, eptr=%p, eoff=%#x", ptr, off, eptr, eoff));
+
+	line = 1;
+	column = 1;
+
+	if (origin->unget == '\n')
+		++line;
+	else if (origin->unget == '\t')
+		column = 9;
+	else if (origin->unget != -1)
+		++column;
+
+	while (ptr != NULL) {
+		begin = mtod(ptr, char *) + off;
+		end = mtod(ptr, char *) + (ptr == eptr ? eoff : ptr->m_len);
+		cp = memchr(begin, '\n', end - begin);
+		if (cp != NULL) {
+			++line;
+			column = 1;
+			off = cp + 1 - mtod(ptr, char *);
+			continue;
+		}
+
+		for (cp = begin; cp < end; ++cp)
+			if (*cp == '\t')
+				column = roundup2(column - 1 + tab_width,
+				    tab_width) + 1;
+			else
+				++column;
+
+		if (ptr == eptr && eoff <= off)
+			break;
+
+		off = 0;
+		ptr = ptr->m_next;
+	}
+
+	*line_out = line;
+	*column_out = column;
+}
 
 struct khttpd_json *
 khttpd_json_null_new(void)
