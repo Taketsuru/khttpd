@@ -472,9 +472,14 @@ khttpd_exchange_reject(struct khttpd_exchange *exchange)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	if (exchange->status != 0) {
-		khttpd_session_abort(khttpd_exchange_get_session(exchange));
+	if (exchange->response_header_closed) {
+		khttpd_stream_reset
+		    (&khttpd_exchange_get_session(exchange)->stream);
 		return;
+	}
+
+	if (exchange->status != 0) {
+		khttpd_exchange_clear_response_header(exchange);		
 	}
 
 	status = KHTTPD_STATUS_BAD_REQUEST;
@@ -1296,7 +1301,7 @@ khttpd_session_receive_finish(struct khttpd_session *session)
 		exchange->ops->put(exchange, exchange->arg, NULL, &pause);
 
 	if (exchange->response_pending)
-		khttpd_exchange_respond(exchange, exchange->status);
+		khttpd_exchange_send_response(exchange);
 }
 
 /*
@@ -1528,8 +1533,11 @@ khttpd_session_receive_trailer(struct khttpd_session *session)
 {
 	int error;
 
+	KHTTPD_ENTRY("%s(%p)", __func__, session);
+
 	error = khttpd_session_receive_header(session);
-	if (error == EWOULDBLOCK) {
+	if (error != 0 && error != ENOMSG && error != ENOBUFS) {
+		KHTTPD_NOTE("error %d", error);
 		return (error);
 	}
 	if (error != 0) {
@@ -1672,7 +1680,8 @@ khttpd_session_receive_body(struct khttpd_session *session)
 			}
 
 			if (nread == SSIZE_MAX) {
-				KHTTPD_NOTE("enomsg");
+				KHTTPD_NOTE("reject %u", __LINE__);
+				khttpd_exchange_reject(exchange);
 				return (ENOMSG);
 			}
 		}
@@ -2010,7 +2019,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		KHTTPD_NOTE("reject %u", __LINE__);
 		khttpd_exchange_reject(exchange);
 		KASSERT(error == ENOMSG, ("error %d", error));
-		return (0);
+		return (ENOMSG);
 	}
 	
 	/* Parse each header fields */

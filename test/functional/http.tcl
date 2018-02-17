@@ -339,7 +339,7 @@ test::define nonchunked_request_body test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-proc test_single_chunked_request_body {sock obj chunk_size chunk_ext trailer} {
+proc test_request_chunk {obj chunk_size chunk_ext trailer partial} {
     set khttpd [$obj khttpd]
     set req "OPTIONS * HTTP/1.1\r\n"
     append req "Host: [$khttpd host]\r\n"
@@ -366,40 +366,93 @@ proc test_single_chunked_request_body {sock obj chunk_size chunk_ext trailer} {
 	    lappend split_points $i
 	}
     } else {
-	for {set i $last_chunk_pos} {$i < $reqlen} {incr i} {
+	for {set i $last_chunk_pos} {$i <= $reqlen} {incr i} {
 	    lappend split_points $i
 	}
     }
 
     foreach split_pos $split_points {
-	set first_half [string range $req 0 $split_pos-1]
-	set second_half [string range $req $split_pos end]
-	puts -nonewline $sock $first_half
-	after 100
-	update
-	puts -nonewline $sock $second_half
+	$obj with_connection {sock} {
+	    set first_half [string range $req 0 $split_pos-1]
+	    set second_half [string range $req $split_pos end]
+	    puts -nonewline $sock $first_half
 
-	set response [$obj receive_response $sock $req]
+	    if {$partial && $split_pos < $reqlen} {
+		close $sock write
 
-	# The server ignores the request body and sends a OPTIONS response.
-	test::assert {[$response rest] == ""}
-	test::assert_it_is_options_asterisc_response $response
+	    } elseif {$second_half ne ""} {
+		after 100
+		update
+		puts -nonewline $sock $second_half
+	    }
 
-	# The client sends an OPTIONS request and the server sends a reply as
-	# usual.
-	puts -nonewline $sock $optreq
-	set response [$obj receive_response $sock $optreq]
-	test::assert {[$response rest] == ""}
-	test::assert_it_is_options_asterisc_response $response
+	    set response [$obj receive_response $sock $req]
+
+	    if {$partial && $split_pos < $reqlen} {
+		# The server ignores the request body and sends a OPTIONS
+		# response.
+		test::assert {[$response rest] == ""}
+		test::assert {[$response status] == 400}
+		test::assert_it_is_default_error_response $response
+		test::assert_it_is_the_last_response $sock $response
+
+	    } else {
+		# The server ignores the request body and sends a OPTIONS
+		# response.
+		test::assert {[$response rest] == ""}
+		test::assert_it_is_options_asterisc_response $response
+
+		# The client sends an OPTIONS request and the server sends a
+		# reply as usual.
+		puts -nonewline $sock $optreq
+		set response [$obj receive_response $sock $optreq]
+		test::assert {[$response rest] == ""}
+		test::assert_it_is_options_asterisc_response $response
+	    }
+	}
     }
 }
 
-test::define single_chunked_request_body test::khttpd_1conn_testcase {
-    set sock [my socket]
+test::define request_chunk test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
-	test_single_chunked_request_body $sock [self] $chunk_size "" ""
+	test_request_chunk [self] $chunk_size "" "" 0
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define partial_request_chunk test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    foreach chunk_size {0 1 2 20 16384} {
+	test_request_chunk [self] $chunk_size "" "" 1
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define request_chunk_and_trailer test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    foreach chunk_size {0 1 2 20 16384} {
+	test_request_chunk [self] $chunk_size \
+	    "" "X-Trailer: hoge\r\n" 0
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define partial_request_chunk_and_trailer test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    foreach chunk_size {0 1 2 20 16384} {
+	test_request_chunk [self] $chunk_size \
+	    "" "X-Trailer: hoge\r\n" 1
     }
 
     my check_access_log

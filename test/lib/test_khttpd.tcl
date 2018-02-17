@@ -76,7 +76,9 @@ namespace eval test {
 
 	set result [http_response new $req $arrival_time]
 	try {
-	    $result append $rest
+	    if {$rest ne ""} {
+		$result append $rest
+	    }
 
 	    test_chan -props [list response $result] $sock {
 		variable response
@@ -101,9 +103,11 @@ namespace eval test {
     proc check_access_log {khttpd reqs} {
 	set time_fudge 1.0
 	set logname [local_file [dict get [$khttpd logs] access-log]]
+	set last_nents 0
+	set retry 0
 
-	for {set retry 0} {$retry < 4} {incr retry} {
-	    after 1000
+	while {$retry < 3} {
+	    after 1200
 	    update
 
 	    try {
@@ -111,6 +115,11 @@ namespace eval test {
 		set ents [json::many-json2dict [read $file]]
 		if {[llength $reqs] <= [llength $ents]} {
 		    break
+		}
+		if {[llength $ents] == $last_nents} {
+		    incr retry
+		} else {
+		    set last_nents [llength $ents]
 		}
 
 	    } on error {msg opts} {
@@ -137,7 +146,7 @@ namespace eval test {
 	    set expected_arrival_time [$req arrival_time]
 	    set expected_completion_time [$req completion_time]
 
-	    assert {$arrival_time < $completion_time}
+	    assert {$arrival_time <= $completion_time}
 	    assert {abs($expected_arrival_time - $arrival_time) <
 		$time_fudge}
 	    assert {abs($expected_completion_time - $completion_time) < 
