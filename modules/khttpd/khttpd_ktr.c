@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -70,6 +70,7 @@ static char khttpd_ktr_strbuf
 static struct mtx khttpd_ktr_mtx;
 static struct sbuf khttpd_ktr_sbuf;
 static struct thread *khttpd_ktr_thread;
+static uint64_t khttpd_ktr_load_ts;
 static int khttpd_ktr_head;
 static int khttpd_ktr_tail;
 static int khttpd_ktr_idx;
@@ -145,6 +146,7 @@ khttpd_ktr_flush(void)
 {
 	struct uio auio;
 	struct iovec aiov;
+	uint64_t load_ts;
 	struct ktr_entry *ep;
 	struct thread *td;
 	int error, i, n, end, last;
@@ -162,11 +164,11 @@ khttpd_ktr_flush(void)
 		sbuf_printf(&khttpd_ktr_sbuf,
 		    "# index: %d, entries: %d\n", khttpd_ktr_idx, n);
 
+	load_ts = khttpd_ktr_load_ts;
 	n = ktr_entries;
 	for (i = khttpd_ktr_idx; i != end; i = i == n - 1 ? 0 : i + 1) {
 		ep = &ktr_buf[i];
-		if (ep->ktr_desc == NULL) {
-			sbuf_printf(&khttpd_ktr_sbuf, "# null entry @ %d\n", i);
+		if (ep->ktr_desc == NULL || ep->ktr_timestamp <= load_ts) {
 			continue;
 		}
 
@@ -239,6 +241,7 @@ khttpd_ktr_local_init(void)
 	}
 	khttpd_ktr_fd = td->td_retval[0];
 
+	khttpd_ktr_load_ts = get_cyclecount();
 	khttpd_ktr_idx = ktr_idx;
 	khttpd_ktr_head = khttpd_ktr_tail = 0;
 
