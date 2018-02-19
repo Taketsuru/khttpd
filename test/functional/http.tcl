@@ -34,7 +34,7 @@ package require test_khttpd
 # The server closes the connection with no reply if the client closes a
 # connection without sending any data.
 
-test::define immediate_eof test::khttpd_1conn_testcase {
+test::define http_immediate_eof test::khttpd_1conn_testcase {
     set sock [my socket]
     close $sock write
     test::assert_eof $sock
@@ -43,7 +43,7 @@ test::define immediate_eof test::khttpd_1conn_testcase {
 # The server closes the connection with no reply if the client sends only
 # CRLF sequences and closes the connection.
 
-test::define crlf_only test::khttpd_1conn_testcase {
+test::define http_crlf_only test::khttpd_1conn_testcase {
     set sock [my socket]
     puts -nonewline $sock [string repeat "\r\n" 4]
     close $sock write
@@ -53,7 +53,7 @@ test::define crlf_only test::khttpd_1conn_testcase {
 # The server sends a successful OPTIONS response if the client sends
 # 'OPTIONS * HTTP/1.1 request'.
 
-test::define options_asterisc test::khttpd_1conn_testcase {
+test::define http_options_asterisc test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
 
@@ -76,7 +76,7 @@ test::define options_asterisc test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define crlfs_followed_by_request test::khttpd_1conn_testcase {
+test::define http_crlfs_followed_by_request test::khttpd_1conn_testcase {
     variable ::test::message_size_max
 
     set sock [my socket]
@@ -103,7 +103,7 @@ test::define crlfs_followed_by_request test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define request_to_close_connection test::khttpd_1conn_testcase {
+test::define http_request_to_close_connection test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
 
@@ -129,7 +129,7 @@ test::define request_to_close_connection test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define invalid_protocol_version test::khttpd_testcase {
+test::define http_invalid_protocol_version test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach version {HTTP/0.0 http/1.1
@@ -158,7 +158,7 @@ test::define invalid_protocol_version test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define fragmented_request test::khttpd_1conn_testcase {
+test::define http_fragmented_request test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
     set req [test::create_options_asterisc_request $khttpd]
@@ -192,7 +192,7 @@ test::define fragmented_request test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define size_limit_in_the_midst_of_request test::khttpd_testcase {
+test::define http_request_too_long test::khttpd_testcase {
     variable ::test::message_size_max
 
     set khttpd [my khttpd]
@@ -281,7 +281,7 @@ test::define size_limit_in_the_midst_of_request test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define partial_request test::khttpd_testcase {
+test::define http_partial_request test::khttpd_testcase {
     set khttpd [my khttpd]
     set req [test::create_options_asterisc_request $khttpd]
     set len [string length $req]
@@ -307,7 +307,7 @@ test::define partial_request test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define nonchunked_request_body test::khttpd_1conn_testcase {
+test::define http_nonchunked_request_body test::khttpd_1conn_testcase {
     set sock [my socket]
     set khttpd [my khttpd]
     set hdr "OPTIONS * HTTP/1.1\r\n"
@@ -413,7 +413,7 @@ proc test_request_chunk {obj chunk_size chunk_ext trailer partial} {
     }
 }
 
-test::define request_chunk test::khttpd_testcase {
+test::define http_request_chunk test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
@@ -424,7 +424,7 @@ test::define request_chunk test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define partial_request_chunk test::khttpd_testcase {
+test::define http_partial_request_chunk test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
@@ -435,7 +435,7 @@ test::define partial_request_chunk test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define request_chunk_and_trailer test::khttpd_testcase {
+test::define http_request_chunk_and_trailer test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
@@ -447,7 +447,7 @@ test::define request_chunk_and_trailer test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-test::define partial_request_chunk_and_trailer test::khttpd_testcase {
+test::define http_partial_request_chunk_and_trailer test::khttpd_testcase {
     set khttpd [my khttpd]
 
     foreach chunk_size {0 1 2 20 16384} {
