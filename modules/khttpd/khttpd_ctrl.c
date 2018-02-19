@@ -2334,13 +2334,16 @@ static int
 khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
+	char buf[512];
+	struct sbuf sbuf;
+	struct khttpd_problem_property prop_spec;
 	struct khttpd_location_type *type;
 	struct khttpd_location *location;
 	struct khttpd_ctrl_location_data *location_data;
 	struct khttpd_server *server;
-	const char *path;
+	const char *path, *cp;
 	void *obj;
-	int status;
+	int status, query_off;
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
@@ -2354,15 +2357,34 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
+	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
+	KHTTPD_NOTE("path=%p, path end=%p", 
+	    path, path + strlen(path));
+	cp = khttpd_string_normalize_request_target(&sbuf, path,
+	    path + strlen(path), &query_off);
+	KHTTPD_NOTE("cp=%p, query_off=%d", cp, query_off);
+	if (query_off != -1 || *cp != '\0' || sbuf_finish(&sbuf) != 0) {
+		khttpd_problem_invalid_value_response_begin(output);
+		prop_spec.link = input_prop_spec;
+		prop_spec.name = "path";
+		khttpd_problem_set_property(output, &prop_spec);
+		sbuf_delete(&sbuf);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+
 	status = khttpd_obj_type_get_obj_from_property(&khttpd_ctrl_servers,
 	    &obj, "server", output, input_prop_spec, input, false);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		sbuf_delete(&sbuf);
 		return (status);
+	}
 	server = obj;
 
-	status = type->create(&location, server, path, output, input_prop_spec,
-	    input);
+	status = type->create(&location, server, sbuf_data(&sbuf),
+	    output, input_prop_spec, input);
 
+	sbuf_delete(&sbuf);
+	
 	if (KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		location_data = khttpd_costruct_get(location,
 		    khttpd_ctrl_location_data_key);

@@ -465,8 +465,8 @@ khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
 	struct khttpd_location *loc, *lastloc;
 	const char *cp, *end;
 
-	KHTTPD_ENTRY("%s(%p,%s,%p)", __func__, server,
-	    khttpd_ktr_printf("\"%*.s\"",
+	KHTTPD_ENTRY("%s(%p,\"%s\",%p)", __func__, server,
+	    khttpd_ktr_printf("%*.s", 
 		(int)sbuf_len(target), sbuf_data(target)),
 	    exchange);
 	cp = sbuf_data(target);

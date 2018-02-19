@@ -92,6 +92,71 @@ namespace eval test {
 	return [regexp -- "^$token_regexp\$" $str]
     }
 
+    proc remove_dot_segments {path} {
+	set result ""
+
+	while {$path ne ""} {
+	    switch -glob -- $path {
+		../* {
+		    # case A
+		    set path [string range $path 3 end]
+		}
+		./* {
+		    # case A
+		    set path [string range $path 2 end]
+		}
+		/./* {
+		    # case B
+		    set path [string range $path 2 end]
+		}
+		/. {
+		    # case B
+		    set path /
+		}
+		/../* {
+		    # case C
+		    set path [string range $path 3 end]
+		    set pos [string last / $result]
+		    set result [string replace $result $pos end ""]
+		}
+		/.. {
+		    # case C
+		    set path /
+		    set pos [string last / $result]
+		    set result [string replace $result $pos end ""]
+		}
+		. -
+		.. {
+		    # case D
+		    set path ""
+		}
+		/* {
+		    # case E
+		    set pos [string first / $path 1]
+		    if {$pos == -1} {
+			append result $path
+			set path ""
+		    } else {
+			append result [string range $path 0 $pos-1]
+			set path [string range $path $pos end]
+		    }
+		}
+		default {
+		    # case E
+		    set pos [string first / $path]
+		    if {$pos == -1} {
+			append result $path
+			set path ""
+		    } else {
+			append result [string range $path 0 $pos-1]
+			set path [string range $path $pos end]
+		    }
+		}
+	    }
+	}
+	return $result
+    }
+
     proc tokenize_field {list} {
 	set value [join $list ,]
 	regsub -all {[ \t]} $value "" value

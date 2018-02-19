@@ -229,7 +229,7 @@ test::define http_request_too_long test::khttpd_testcase {
 	puts [[test::test_driver instance] log_chan] "target_len: $tgtlen"
 
 	my with_connection sock {
-	    set target [string repeat x $tgtlen]
+	    set target "/[string repeat x [expr {$tgtlen - 1}]]"
 	    set req $reqline_head$target$reqline_tail$fields
 	    set reqlen [string length $req]
 	    puts [[test::test_driver instance] log_chan] \
@@ -463,3 +463,11 @@ test::define http_partial_request_chunk_and_trailer test::khttpd_testcase {
 # Content-Type field.
 
 # testcase: Multiple 'Bad Request' cases.
+
+# Test URI escape/unescape is done correctly.
+
+# Query string part of target URI is also normalized.  Test this.
+# - Is the query string is escaped/unescaped correctly?
+# - The dot segment removal must not be applied to query parts.  Test this.
+
+# Is the dot segment just before the query string normalized correctly?

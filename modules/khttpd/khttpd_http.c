@@ -929,82 +929,6 @@ khttpd_exchange_set_error_response_body(struct khttpd_exchange *exchange,
 		    status, response);
 }
 
-static const char *
-khttpd_exchange_parse_target_uri(struct khttpd_exchange *exchange,
-    const char *pos)
-{
-	const char *reqend;
-	ssize_t query_off;
-	int code, error, digit;
-	char ch;
-
-	error = 0;
-	query_off = -1;
-	reqend = exchange->request_header_end;
-	while (pos < reqend && (ch = *pos++) != ' ') {
-		switch (ch) {
-
-		case '\n':
-			sbuf_finish(&exchange->target);
-			exchange->query = NULL;
-			return (NULL);
-
-		case '?':
-			sbuf_putc(&exchange->target, '\0');
-			query_off = sbuf_len(&exchange->target);
-			continue;
-
-		case '%':
-			if (reqend < pos + 2) {
-				return (NULL);
-			}
-
-			digit = khttpd_decode_hexdigit(*pos++);
-			if (digit == -1) {
-				return (NULL);
-			}
-			code = digit << 4;
-
-			digit = khttpd_decode_hexdigit(*pos++);
-			if (digit == -1) {
-				return (NULL);
-			}
-			code = digit | (code << 4);
-
-			if (isalpha(code) || isdigit(code) || code == '-' ||
-			    code == '.' || code == '_' || code == '~') {
-				sbuf_putc(&exchange->target, code);
-			} else {
-				sbuf_printf(&exchange->target, "%02X", code);
-			}
-			continue;
-
-		default:
-			if (!isalpha(ch) && !isdigit(ch)) {
-				return (NULL);
-			}
-			/* FALLTHROUGH */
-
-		case ':': case '@': case '/':
-		case '!': case '$': case '&': case '\'':
-		case '(': case ')': case '*': case '+':
-		case ',': case ';': case '=':
-		case '-': case '.': case '_': case '~':
-			sbuf_putc(&exchange->target, ch);
-		}
-	}
-
-	if (sbuf_finish(&exchange->target) != 0) {
-		exchange->query = NULL;
-		return (NULL);
-	}
-
-	exchange->query = query_off < 0 ? NULL :
-	    sbuf_data(&exchange->target) + query_off;
-
-	return (pos);
-}
-
 static void
 khttpd_exchange_set_allow_field(struct khttpd_exchange *exchange)
 {
@@ -1923,10 +1847,10 @@ khttpd_session_receive_request(struct khttpd_session *session)
 	struct khttpd_location *location;
 	struct khttpd_location_ops *ops;
 	struct mbuf *m;
-	int field, method;
+	int field, method, query_off;
 	int ch, error, status;
 
-	KHTTPD_ENTRY("%s(%p), size=%#x", __func__, session, session->exchange.request_header_size);
+	KHTTPD_ENTRY("%s(%p)", __func__, session);
 
 	error = khttpd_session_receive_header(session);
 	if (error != 0 && error != ENOMSG && error != ENOBUFS) {
@@ -1959,12 +1883,21 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 	/* Find the target URI of this request message. */
 
-	cp = khttpd_exchange_parse_target_uri(exchange, cp + 1);
-	if (cp == NULL) {
+	cp = khttpd_string_normalize_request_target(&exchange->target, cp + 1,
+	    reqend, &query_off);
+	if (cp < reqend && (ch = *cp) == ' ') {
+		++cp;
+	} else if (cp <= reqend - 2 && ch == '*' && cp[1] == ' ') {
+		sbuf_putc(&exchange->target, '*');
+		cp += 2;
+	} else {
 		KHTTPD_NOTE("reject %u", __LINE__);
 		khttpd_exchange_reject(exchange);
 		return (0);
 	}
+	sbuf_finish(&exchange->target); /* always succeeds */
+	exchange->query = query_off == -1 ? NULL :
+	    sbuf_data(&exchange->target) + query_off;
 
 	/* Find the protocol version. */
 
@@ -2021,7 +1954,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		KASSERT(error == ENOMSG, ("error %d", error));
 		return (ENOMSG);
 	}
-	
+
 	/* Parse each header fields */
 
 	for (bolp = cp + sizeof(version_prefix) - 1 + 4;

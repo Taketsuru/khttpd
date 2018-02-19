@@ -267,6 +267,172 @@ khttpd_unescape_uri(struct sbuf *out, const char *in)
 	return (0);
 }
 
+/*
+ * XXX This function accesses member s_buf of struct sbuf.  I should use my own
+ * string buffer implementation instead of struct sbuf.
+ */
+static void
+khttpd_string_normalize_request_at_segend(struct sbuf *dst)
+{
+	char *buf;
+	int ch, len;
+
+	buf = dst->s_buf;
+	len = sbuf_len(dst);
+	KASSERT(0 < len && dst->s_buf[0] == '/', ("non-absolute path"));
+
+	if (buf[len - 1] != '.') {
+		return;
+	}
+
+	/*
+	 * This assumption is valid because the first character is not '.' as
+	 * asserted above.
+	 */
+	KASSERT(2 <= len, ("len %d", len));
+
+	ch = buf[len - 2];
+	if (ch == '/') {
+		/*
+		 * The last component is '.'. Remove the dot if it's the first
+		 * component of the output path.  Otherwise, Remove both the
+		 * dot and the preceding slash.
+		 */
+		sbuf_setpos(dst, len - 1);
+		return;
+	}
+
+	KASSERT(ch != '.' || 3 <= len, ("ch=%#x, len=%d", ch, len));
+
+	if (ch != '.' || buf[len - 3] != '/') {
+		/* The last component is not '..'. */
+		return;
+	}
+
+	if (len == 3) {
+		/* Path whose first component is '..'. */
+		sbuf_setpos(dst, 1);
+		return;
+	}
+
+	/* Remove the last component. */
+	len -= 3;
+	while (buf[len - 1] != '/') {
+		/* This loop terminates because buf[0] == '/'. */
+		--len;
+	}
+	sbuf_setpos(dst, len);
+}
+
+/*
+ * DESCRIPTION
+ *
+ * 	This function puts the normalized origin-form request target into *dst.
+ * 	The input request target is given by [begin, end).  The absolute-path
+ * 	part and the query part of the normalized target are terminated by NUL
+ * 	characters.  If there is a query part, the function stores the position
+ * 	of the head of the query string to '*query_off_out'.  Otherwise, -1 is
+ * 	stored to '*query_off_out'.
+ * 
+ * RETURN VALUES
+ * 
+ *	This function returns a pointer to the first character that is not a
+ *	valid part of the given URI or 'end' if there is no such a character.
+ */
+const char *
+khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
+    const char *end, int *query_off_out)
+{
+	const char *cp;
+	int ch, code, error, digit, query_off;
+
+	/* The request target must start with '/'. */
+	if (end <= begin || *begin != '/') {
+		*query_off_out = -1;
+		return (begin);
+	}
+	sbuf_putc(dst, '/');
+
+	query_off = -1;
+	error = 0;
+	for (cp = begin + 1; cp < end;) {
+		ch = *cp;
+		switch (ch) {
+
+		case '?':
+			if (query_off == -1) {
+				khttpd_string_normalize_request_at_segend(dst);
+				query_off = sbuf_len(dst) + 1;
+				ch = '\0';
+			}
+			sbuf_putc(dst, ch);
+			++cp;
+			break;
+
+		case '%':
+			if (end < cp + 2) {
+				return (cp);
+			}
+
+			digit = khttpd_decode_hexdigit(cp[1]);
+			if (digit == -1) {
+				return (cp);
+			}
+			code = digit << 4;
+
+			digit = khttpd_decode_hexdigit(cp[2]);
+			if (digit == -1) {
+				return (cp);
+			}
+			code = digit | (code << 4);
+
+			if (isalpha(code) || isdigit(code) || code == '-' ||
+			    code == '.' || code == '_' || code == '~') {
+				sbuf_putc(dst, code);
+			} else {
+				sbuf_printf(dst, "%02X", code);
+			}
+
+			cp += 3;
+			continue;
+
+		case '/':
+			if (query_off == -1) {
+				khttpd_string_normalize_request_at_segend(dst);
+				if (dst->s_buf[sbuf_len(dst) - 1] == '/') {
+					++cp;
+					break;
+				}
+			}
+
+			sbuf_putc(dst, ch);
+			++cp;
+			break;
+
+		default:
+			if (!isalpha(ch) && !isdigit(ch)) {
+				goto quit;
+			}
+			/* FALLTHROUGH */
+
+		case ':': case '@':
+		case '!': case '$': case '&': case '\'':
+		case '(': case ')': case '*': case '+':
+		case ',': case ';': case '=':
+		case '-': case '.': case '_': case '~':
+			sbuf_putc(dst, ch);
+			++cp;
+		}
+	}
+ quit:
+	if (query_off == -1) {
+		khttpd_string_normalize_request_at_segend(dst);
+	}
+	*query_off_out = query_off;
+
+	return (cp);
+}
+
 void
 khttpd_string_trim(const char **begin_io, const char **end_io)
 {
