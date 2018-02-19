@@ -36,6 +36,7 @@ package require test
 test::test_driver new
 
 source functional/http.tcl
+source functional/file.tcl
 #source functional/fcgi.itcl
 
 [test::test_driver instance] select {{testcase} {match_test $testcase}}

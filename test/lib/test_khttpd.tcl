@@ -100,7 +100,7 @@ namespace eval test {
 	return $result
     }
 
-    proc check_access_log {khttpd reqs} {
+    proc check_access_log {khttpd responces} {
 	set time_fudge 1.0
 	set logname [local_file [dict get [$khttpd logs] access-log]]
 	set last_nents 0
@@ -113,7 +113,7 @@ namespace eval test {
 	    try {
 		set file [open $logname r]
 		set ents [json::many-json2dict [read $file]]
-		if {[llength $reqs] <= [llength $ents]} {
+		if {[llength $responces] <= [llength $ents]} {
 		    break
 		}
 		if {[llength $ents] == $last_nents} {
@@ -130,9 +130,9 @@ namespace eval test {
 	    }
 	}
 
-	assert {[llength $ents] == [llength $reqs]}
+	assert {[llength $ents] == [llength $responces]}
 
-	foreach entry $ents req $reqs {
+	foreach entry $ents resp $responces {
 	    set arrival_time [dict get $entry arrivalTime]
 	    set completion_time [dict get $entry completionTime]
 	    set actual_status [dict get $entry status]
@@ -141,10 +141,10 @@ namespace eval test {
 	    set actual_peer_port [dict get $entry peer port]
 	    set actual_request [dict get $entry request]
 
-	    set expected_request [$req request_line]
-	    set expected_status [$req status]
-	    set expected_arrival_time [$req arrival_time]
-	    set expected_completion_time [$req completion_time]
+	    set expected_request [$resp request_line]
+	    set expected_status [$resp status]
+	    set expected_arrival_time [$resp arrival_time]
+	    set expected_completion_time [$resp completion_time]
 
 	    assert {$arrival_time <= $completion_time}
 	    assert {abs($expected_arrival_time - $arrival_time) <
@@ -161,7 +161,52 @@ namespace eval test {
 	    assert {$actual_peer_family == "inet"}
 	    #test::assert {$actual_peer_address == ""}
 	    #test::assert {$actual_peer_port == ""}
+
+	    if {[dict exists $entry responsePayloadSize]} {
+		set actual [dict get $entry responsePayloadSize]
+		set expect [string length [$resp body]]
+		test::assert {$actual == $expect}
+	    }
 	}
+    }
+
+    proc create_port_conf {id protocol family addr port} {
+	set addr_list [list family [json::write string $family]]
+	if {$addr != ""} {
+	    lappend addr_list address [json::write string $addr]
+	}
+	if {$port != ""} {
+	    lappend addr_list port $port
+	}
+	set addr_json [json::write object {*}$addr_list]
+	set id_json [json::write string $id]
+	set protocol_json [json::write string "http"]
+	return [json::write object id $id_json protocol $protocol_json \
+		    address $addr_json]
+    }
+
+    proc create_server_conf {id name ports} {
+	set id_json [json::write string $id]
+	set name_json [json::write string $name]
+	set ports_json [json::write array \
+			    {*}[lmap {port_id} $ports {
+				json::write string $port_id
+			    }]]
+	return [json::write object id $id_json name $name_json \
+		    ports $ports_json]
+    }
+
+    proc create_location_conf {id type server path args} {
+	set config [list id [json::write string $id] \
+			   type [json::write string $type] \
+			   server [json::write string $server] \
+			   path [json::write string $path]]
+
+	foreach {key value} $args {
+	    lappend config $key [json::write string $value]
+	}
+
+	return [json::write object {*}$config]
     }
 
     proc create_options_asterisc_request {khttpd} {
@@ -243,7 +288,7 @@ namespace eval test {
 	    set ports_conf [json::write array {*}$ports]
 	    set servers_conf [json::write array {*}$servers]
 	    set locations_conf [json::write array {*}$locations]
-	    return [list accessLog $access_log_conf \
+	    return [json::write object accessLog $access_log_conf \
 			errorLog $error_log_conf \
 			rewriters $rewriters_conf \
 			ports $ports_conf \
@@ -254,21 +299,6 @@ namespace eval test {
 	method create_log_file_conf {path} {
 	    return [json::write object type [json::write string "file"] \
 		    path [json::write string [my remote_path $path]]]
-	}
-
-	method create_port_conf {id protocol family addr port} {
-	    set addr_list [list family [json::write string $family]]
-	    if {$addr != ""} {
-		lappend addr_list address [json::write string $addr]
-	    }
-	    if {$port != ""} {
-		lappend addr_list port $port
-	    }
-	    set addr_json [json::write object {*}$addr_list]
-	    set id_json [json::write string $id]
-	    set protocol_json [json::write string "http"]
-	    return [json::write object id $id_json protocol $protocol_json \
-			address $addr_json]
 	}
 
 	method connect {} {
@@ -288,17 +318,6 @@ namespace eval test {
 	    }
 
 	    return $sock
-	}
-
-	method create_server_conf {id name ports} {
-	    set id_json [json::write string $id]
-	    set name_json [json::write string $name]
-	    set ports_json [json::write array \
-				{*}[lmap {port_id} $ports {
-				    json::write string $port_id
-				}]]
-	    return [json::write object id $id_json name $name_json \
-			ports $ports_json]
 	}
 
 	method host {} {
@@ -337,9 +356,7 @@ namespace eval test {
 	}
 
 	method start {config} {
-	    set cfg_json [json::write object {*}$config]
-	    my run_remotely "sudo usr.sbin/khttpdctl/khttpdctl load -" \
-		$cfg_json
+	    my run_remotely "sudo usr.sbin/khttpdctl/khttpdctl load -" $config
 	}
 
 	method stop {} {
@@ -379,16 +396,6 @@ namespace eval test {
 	    test::check_access_log $_khttpd $_responses
 	}
 
-	method create_config {rewriters_json_list locations_json_list} {
-	    set port_json [$_khttpd create_port_conf $_port_id http \
-			       inet "" [$_khttpd port]]
-	    set server_json [$_khttpd create_server_conf $_server_id \
-				 [$_khttpd host] [list $_port_id]]
-	    return [$_khttpd create_config $rewriters_json_list \
-			[list $port_json] [list $server_json] \
-			$locations_json_list]
-	}
-
 	method khttpd {} {
 	    return $_khttpd
 	}
@@ -410,6 +417,14 @@ namespace eval test {
 	    return $_responses
 	}
 
+	method port_id {} {
+	    return $_port_id
+	}
+
+	method server_id {} {
+	    return $_server_id
+	}
+
 	method with_connection {var body} {
 	    set sock [$_khttpd connect]
 	    try {
@@ -420,8 +435,28 @@ namespace eval test {
 	    }
 	}
 
+	method _create_ports_config {} {
+	    return [list [test::create_port_conf $_port_id http \
+			      inet "" [$_khttpd port]]]
+	}
+
+	method _create_servers_config {} {
+	    return [list [test::create_server_conf $_server_id \
+			      [$_khttpd host] [list $_port_id]]]
+	}
+
+	method _create_rewriters_config {} {
+	    return {}
+	}
+
+	method _create_locations_config {} {
+	    return {}
+	}
+
 	method _config {} {
-	    return [my create_config {} {}]
+	    return  [$_khttpd create_config [my _create_rewriters_config] \
+			[my _create_ports_config] [my _create_servers_config] \
+			[my _create_locations_config]]
 	}
 
 	method _setup {} {
@@ -479,6 +514,47 @@ namespace eval test {
 		set _sock ""
 	    }
 	    next
+	}
+    }
+
+    oo::class create khttpd_file_testcase {
+	superclass test::khttpd_testcase
+	variable _random
+
+	method fs_path {} {
+	    return test/tmp
+	}
+
+	method random {size} {
+	    return [read $_random $size]
+	}
+
+	method _setup {} {
+	    set _random [tcl::chan::random [list 0 1 2 3 4 5]]
+	    chan configure $_random -translation binary -encoding binary
+
+	    set dir ""
+	    foreach component [file split [test::local_file [my fs_path]]] {
+		set dir [file join $dir $component]
+		if {![file exists $dir]} {
+		    file mkdir $dir
+		}
+	    }
+
+	    next
+	}
+
+	method _teardown {} {
+	    close $_random
+	    file delete -force [test::local_file [my fs_path]]
+	    next
+	}
+
+	method _create_locations_config {} {
+	    set khttpd [my khttpd]
+	    return [list [test::create_location_conf \
+			      [test::uuid_new] khttpd_file [my server_id] / \
+			      fsPath [$khttpd remote_path [my fs_path]]]]
 	}
     }
 }

@@ -377,6 +377,14 @@ namespace eval test {
 	    return $finish_time
 	}
 
+	method log {args} {
+	    puts $chan {*}$args
+	}
+
+	method name {} {
+	    return [string range [info object class $testcase] 2 end]
+	}
+
 	method run {} {
 	    set start_time [clock microseconds]
 
@@ -592,7 +600,7 @@ namespace eval test {
 	    foreach class [dict keys $test_classes] {
 		set obj [$class new]
 		try {
-		    if {[apply $filter $obj]} {
+		    if {[apply $filter [string range $obj 2 end]]} {
 			lappend test_objs $obj
 			set obj ""
 		    }

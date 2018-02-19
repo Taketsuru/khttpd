@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -630,7 +630,8 @@ retry:
 		mb->m_ext.ext_count = 1;
 		mb->m_data = mb->m_ext.ext_buf + (i == 0 ? pageoff : 0);
 		mb->m_len = i == 0 ? MIN(PAGE_SIZE - pageoff, io_size) :
-		    i < n - 1 ? PAGE_SIZE : (pageoff + io_size) & PAGE_MASK;
+		    i < n - 1 ? PAGE_SIZE :
+		    ((pageoff + io_size - 1) & PAGE_MASK) + 1;
 		if (lmb != NULL)
 			lmb->m_next = mb;
 		else
@@ -826,12 +827,12 @@ khttpd_file_location_data_new
 		goto quit;
 
 	status = khttpd_webapi_get_string_property(&docroot_str,
-	    "documentRoot", input_prop_spec, input, output, FALSE);
+	    "fsPath", input_prop_spec, input, output, FALSE);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		goto quit;
 
 	prop_spec.link = input_prop_spec;
-	prop_spec.name = "documentRoot";
+	prop_spec.name = "fsPath";
 
 	if (docroot_str != NULL && docroot_str[0] != '/') {
 		khttpd_problem_invalid_value_response_begin(output);
@@ -947,7 +948,7 @@ khttpd_file_location_get(struct khttpd_location *location,
 		khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
 	}
 
-	khttpd_mbuf_json_property(output, "documentRoot");
+	khttpd_mbuf_json_property(output, "fsPath");
 	khttpd_mbuf_json_cstr(output, TRUE, location_data->docroot);
 
 	khttpd_mbuf_json_object_end(output);
