@@ -204,9 +204,10 @@ namespace eval test {
 	method clear_logs {} {
 	    foreach {name path} [my logs] {
 		set logdir ""
+		set path [test::local_file $path]
 		foreach component [file split [file dirname $path]] {
-		    set dir [file join $logdir $component]
-		    file mkdir $dir
+		    set logdir [file join $logdir $component]
+		    file mkdir $logdir
 		}
 	    }
 	    file delete -force \
