@@ -94,6 +94,7 @@ struct khttpd_file_location_data {
 struct khttpd_file_get_exchange_data {
 	struct mtx	lock;
 	LIST_ENTRY(khttpd_file_get_exchange_data) orphan_link; /* (b) */
+	struct sbuf	path;				       /* (o) */
 	off_t		xmit_residual;		     /* (e) */
 	off_t		end_offset;		     /* (o) */
 	off_t		io_offset;		     /* (p) */
@@ -112,7 +113,7 @@ struct khttpd_file_get_exchange_data {
 
 #define khttpd_file_get_exchange_data_zctor_end error
 	int		error;		/* (l) */
-	char		path[PATH_MAX]; /* (o) */
+	char		path_buf[128];	/* (o) */
 };
 
 static void khttpd_file_get_exchange_dtor(struct khttpd_exchange *, void *);
@@ -139,69 +140,6 @@ static LIST_HEAD(, khttpd_file_get_exchange_data) khttpd_file_orphan_get_list =
 
 MTX_SYSINIT(khttpd_file_lock, &khttpd_file_lock, "file", MTX_DEF);
 
-/* 
- * Note:
- *   This function removes leading '/'s.
- */
-static int
-khttpd_file_normalize_path(char *buf, const char *path)
-{
-	struct sbuf sbuf;
-	const char *src, *segend;
-	char *dst;
-	int error;
-	char ch;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, buf, path);
-
-	sbuf_new(&sbuf, buf, PATH_MAX, SBUF_FIXEDLEN);
-	error = khttpd_unescape_uri(&sbuf, path);
-	if (error == 0)
-		error = sbuf_finish(&sbuf);
-	sbuf_delete(&sbuf);
-	if (error != 0)
-		return (error);
-
-	src = dst = buf;
-	for (;; src = segend) {
-		while ((ch = *src) == '/')
-			++src;
-		if (ch == '\0')
-			break;
-
-		segend = strchr(src + 1, '/');
-		if (segend == NULL)
-			segend = src + 1 + strlen(src + 1); 
-
-		if (ch == '.') {
-			if (src + 1 == segend)
-				continue;
-
-			if (src + 2 == segend && src[1] == '.') {
-				if (dst == buf)
-					return (EINVAL);
-				while (buf < --dst && dst[-1] != '/')
-					; /* nothing */
-				continue;
-			}
-		}
-
-		if (src != dst)
-			bcopy(src, dst, segend - src + 1);
-		dst += segend - src + 1;
-	}
-
-	if (dst == buf) {
-		buf[0] = '.';
-		buf[1] = '\0';
-	} else if (dst[-1] == '/')
-		dst[-1] = '\0';
-	else
-		*dst = '\0';
-
-	return (0);
-}
-
 static int
 khttpd_file_get_exchange_data_init(void *mem, int size, int flags)
 {
@@ -211,6 +149,8 @@ khttpd_file_get_exchange_data_init(void *mem, int size, int flags)
 
 	data = mem;
 	mtx_init(&data->lock, "getxchg", NULL, MTX_DEF);
+	sbuf_new(&data->path, data->path_buf, sizeof(data->path_buf),
+	    SBUF_AUTOEXTEND);
 	data->io_job = khttpd_job_new(khttpd_file_read_file, data, NULL);
 	return (0);
 }
@@ -224,6 +164,7 @@ khttpd_file_get_exchange_data_fini(void *mem, int size)
 
 	data = mem;
 	mtx_destroy(&data->lock);
+	sbuf_delete(&data->path);
 	khttpd_job_delete(data->io_job);
 }
 
@@ -257,6 +198,7 @@ khttpd_file_get_exchange_data_dtor(void *mem, int size, void *arg)
 	vm_object_deallocate(data->object);
 	if (data->fp != NULL)
 		fdrop(data->fp, td);
+	sbuf_clear(&data->path);
 }
 
 static void
@@ -297,11 +239,21 @@ khttpd_file_open_for_read(int dirfd,
 	int error, fd;
 
 	KHTTPD_ENTRY("%s(%d,%p), data={path: \"%s\"}", __func__, dirfd, data,
-		khttpd_ktr_printf("%s", data->path));
+	    khttpd_ktr_printf("%s", sbuf_data(&data->path)));
+
+	KASSERT(0 < sbuf_len(&data->path) &&
+	    sbuf_data(&data->path)[0] == '/', ("path is not absolute"));
 
 	td = curthread;
 
-	error = kern_openat(td, dirfd, data->path, UIO_SYSSPACE, O_RDONLY, 0);
+	if (sbuf_len(&data->path) == 1) {
+		KHTTPD_NOTE("eisdir");
+		error = EISDIR;
+		return (error);
+	}
+
+	error = kern_openat(td, dirfd, sbuf_data(&data->path) + 1,
+	    UIO_SYSSPACE, O_RDONLY, 0);
 	if (error != 0) {
 		KHTTPD_BRANCH("kern_openat error=%d", error);
 		return (error);
@@ -590,7 +542,7 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		khttpd_problem_set_errno(&logent, error);
 
 		khttpd_mbuf_json_property(&logent, "path");
-		khttpd_mbuf_json_cstr(&logent, TRUE, data->path);
+		khttpd_mbuf_json_cstr(&logent, TRUE, sbuf_data(&data->path));
 
 		khttpd_mbuf_json_property(&logent, "offset");
 		khttpd_mbuf_json_format(&logent, FALSE, "%jd",
@@ -669,6 +621,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	struct khttpd_location *location;
 	struct khttpd_stream *stream;
 	struct thread *td;
+	const char *target, *end;
 	size_t space;
 	int error, status;
 	boolean_t mime_type_specified, charset_specified;
@@ -693,10 +646,17 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
 
-	error = khttpd_file_normalize_path(data->path, 
-	    khttpd_exchange_suffix(exchange));
-	if (error != 0)
+	target = khttpd_exchange_suffix(exchange);
+	KASSERT(khttpd_exchange_get_target(exchange) < target &&
+	    target[-1] == '/', ("target[-1]=%#x", target[-1]));
+	--target;
+
+	end = khttpd_string_normalize_request_target(&data->path,
+	    target, target + strlen(target), NULL,
+	    KHTTPD_STRING_NORMALIZE_FLAG_UNESCAPE);
+	if (*end != '\0')
 		goto not_found;
+	sbuf_finish(&data->path);
 
 	error = khttpd_file_open_for_read(location_data->docroot_fd, data);
 	if (error != 0)
@@ -714,12 +674,12 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	if (location_data->mime_type_rewriter != NULL)
 		mime_type_specified = khttpd_rewriter_rewrite
 		    (location_data->mime_type_rewriter, &type_sbuf,
-			data->path);
+			sbuf_data(&data->path));
 
 	if (mime_type_specified && location_data->charset_rewriter != NULL)
 		charset_specified = khttpd_rewriter_rewrite
 		    (location_data->charset_rewriter, &charset_sbuf,
-			data->path);
+			sbuf_data(&data->path));
 
 	sbuf_finish(&type_sbuf);
 	sbuf_finish(&charset_sbuf);

@@ -2343,7 +2343,7 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	struct khttpd_server *server;
 	const char *path, *cp;
 	void *obj;
-	int status, query_off;
+	int status;
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 
@@ -2361,9 +2361,9 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	KHTTPD_NOTE("path=%p, path end=%p", 
 	    path, path + strlen(path));
 	cp = khttpd_string_normalize_request_target(&sbuf, path,
-	    path + strlen(path), &query_off);
-	KHTTPD_NOTE("cp=%p, query_off=%d", cp, query_off);
-	if (query_off != -1 || *cp != '\0' || sbuf_finish(&sbuf) != 0) {
+	    path + strlen(path), NULL, 0);
+	KHTTPD_NOTE("cp=%p", cp);
+	if (*cp != '\0' || sbuf_finish(&sbuf) != 0) {
 		khttpd_problem_invalid_value_response_begin(output);
 		prop_spec.link = input_prop_spec;
 		prop_spec.name = "path";

@@ -504,6 +504,13 @@ test::define http_partial_request_chunk_and_trailer test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+# Request line only
+
+# No Host:
+
+# Invalid request targets
+#   starts with escaped '/'
+#   target that matches RE "\*.+"
 # testcase: Bad Request response is sent while the server is parsing
 # Content-Type field.
 

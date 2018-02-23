@@ -341,14 +341,16 @@ khttpd_string_normalize_request_at_segend(struct sbuf *dst)
  */
 const char *
 khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
-    const char *end, int *query_off_out)
+    const char *end, int *query_off_out, int flags)
 {
 	const char *cp;
 	int ch, code, error, digit, query_off;
 
 	/* The request target must start with '/'. */
 	if (end <= begin || *begin != '/') {
-		*query_off_out = -1;
+		if (query_off_out != NULL) {
+			*query_off_out = -1;
+		}
 		return (begin);
 	}
 	sbuf_putc(dst, '/');
@@ -360,7 +362,10 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 		switch (ch) {
 
 		case '?':
-			if (query_off == -1) {
+			if ((flags & KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY)
+			    != 0) {
+				flags &=
+				    ~KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY;
 				khttpd_string_normalize_request_at_segend(dst);
 				query_off = sbuf_len(dst) + 1;
 				ch = '\0';
@@ -386,8 +391,10 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 			}
 			code = digit | (code << 4);
 
-			if (isalpha(code) || isdigit(code) || code == '-' ||
-			    code == '.' || code == '_' || code == '~') {
+			if ((flags & KHTTPD_STRING_NORMALIZE_FLAG_UNESCAPE) !=
+			    0 || isalpha(code) || isdigit(code) ||
+			    code == '-' || code == '.' || code == '_' ||
+			    code == '~') {
 				sbuf_putc(dst, code);
 			} else {
 				sbuf_printf(dst, "%02X", code);
@@ -428,7 +435,10 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 	if (query_off == -1) {
 		khttpd_string_normalize_request_at_segend(dst);
 	}
-	*query_off_out = query_off;
+
+	if (query_off_out != NULL) {
+		*query_off_out = query_off;
+	}
 
 	return (cp);
 }

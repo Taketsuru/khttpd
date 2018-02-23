@@ -9,7 +9,7 @@ proc match_test {testcase} {
 	return 1
     }
 
-    set class [info object class $testcase]
+    set class [string range [info object class $testcase] 2 end]
     set result [string match !* [lindex $argv 0]]
 
     foreach pattern $argv {

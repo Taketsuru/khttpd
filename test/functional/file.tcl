@@ -158,17 +158,22 @@ test::define file_dot_segments test::khttpd_file_testcase {
 	    set req "GET /$uri HTTP/1.1\r\nHost: [$khttpd host]\r\n\r\n"
 	    puts -nonewline $sock $req
 
-	    # The server sends a successful response to the GET method.
+	    # The server sends a successful response to the GET method if the
+	    # normalized target doesn't end with '/'.
 	    set response [my receive_response $sock $req]
-	    test::assert {[$response status] == 200}
+	    if {[string match */ $norm]} {
+		test::assert {[$response status] == 404}
+	    } else {
+		test::assert {[$response status] == 200}
 
-	    # The server sends 'Content-Length' field.
-	    test::assert {[$response field Content-Length] ==
-		[string length $contents]}
+		# The server sends 'Content-Length' field.
+		test::assert {[$response field Content-Length] ==
+		    [string length $contents]}
 
-	    # The server sends the contents of the file
-	    test::assert {[$response body] eq $contents}
-	    test::assert {[$response rest] == ""}
+		# The server sends the contents of the file
+		test::assert {[$response body] eq $contents}
+		test::assert {[$response rest] == ""}
+	    }
 	}
     }
 

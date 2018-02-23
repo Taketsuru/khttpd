@@ -1847,7 +1847,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 	struct khttpd_location *location;
 	struct khttpd_location_ops *ops;
 	struct mbuf *m;
-	int field, method, query_off;
+	int field, method, query_off, minlen;
 	int ch, error, status;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
@@ -1873,8 +1873,10 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 	/* Find the method of this request message. */
 
-	cp = memchr(bolp, ' ', reqend - bolp);
-	if (cp == NULL) {
+	minlen = 1 /* request target */ + 1 /* SP */ +
+	    sizeof(version_prefix) - 1 + 3 /* version */ + 1 /* LF */;
+	if (reqend - bolp <= minlen ||
+	    (cp = memchr(bolp, ' ', reqend - minlen - bolp)) == NULL) {
 		KHTTPD_NOTE("reject %u error %d", __LINE__, error);
 		khttpd_exchange_reject(exchange);
 		return (0);
@@ -1883,17 +1885,28 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 	/* Find the target URI of this request message. */
 
-	cp = khttpd_string_normalize_request_target(&exchange->target, cp + 1,
-	    reqend, &query_off);
-	if (cp < reqend && (ch = *cp) == ' ') {
-		++cp;
-	} else if (cp <= reqend - 2 && ch == '*' && cp[1] == ' ') {
-		sbuf_putc(&exchange->target, '*');
-		cp += 2;
+	KASSERT(cp + minlen < reqend,
+	    ("bolp %p, cp %p, reqend %p, minlen %d",
+		bolp, cp, reqend, minlen));
+	if ((ch = cp[1]) != '/') {
+		if (ch != '*' || cp[2] != ' ') {
+			KHTTPD_NOTE("reject %u", __LINE__);
+			khttpd_exchange_reject(exchange);
+			return (0);
+		}
+		sbuf_cpy(&exchange->target, "*");
+		query_off = -1;
+		cp += 3;
 	} else {
-		KHTTPD_NOTE("reject %u", __LINE__);
-		khttpd_exchange_reject(exchange);
-		return (0);
+		cp = khttpd_string_normalize_request_target(&exchange->target,
+		    cp + 1, reqend, &query_off, 
+		    KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY);
+		if (reqend <= cp || *cp != ' ') {
+			KHTTPD_NOTE("reject %u", __LINE__);
+			khttpd_exchange_reject(exchange);
+			return (0);
+		}
+		++cp;
 	}
 	sbuf_finish(&exchange->target); /* always succeeds */
 	exchange->query = query_off == -1 ? NULL :
@@ -1901,7 +1914,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 	/* Find the protocol version. */
 
-	if (reqend < cp + sizeof(version_prefix) - 1 + 4 ||
+	if (reqend < cp + sizeof(version_prefix) - 1 + 3 + 1 ||
 	    memcmp(cp, version_prefix, sizeof(version_prefix) - 1) != 0 ||
 	    !isdigit(cp[sizeof(version_prefix) - 1]) ||
 	    cp[sizeof(version_prefix) - 1 + 1] != '.' ||

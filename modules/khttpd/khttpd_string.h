@@ -33,6 +33,9 @@
 
 #include <sys/types.h>
 
+#define KHTTPD_STRING_NORMALIZE_FLAG_UNESCAPE	1
+#define KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY	2
+
 struct sbuf;
 
 int	khttpd_parse_digits(uintmax_t *_value,
@@ -44,7 +47,8 @@ int	khttpd_decode_hexdigit(int _ch);
 int	khttpd_unescape_uri(struct sbuf *_dst, const char *_src);
 const char *
 	khttpd_string_normalize_request_target(struct sbuf *_dst,
-	    const char *_begin, const char *_end, int *_query_off_out);
+	    const char *_begin, const char *_end, int *_query_off_out,
+	    int _flags);
 void	khttpd_string_trim(const char **_begin, const char **_end);
 void	khttpd_string_for_each_token(const char *_begin, const char *_end,
 	    bool (*_fn)(void *_arg, const char *_begin, const char *_end),
