@@ -339,6 +339,51 @@ test::define http_nonchunked_request_body test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+test::define http_huge_content_length test::khttpd_testcase {
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach content_length {9223372036854775807} {
+	with_connection {sock} {
+	    set req "${hdr}Content-Length: $content_length\r\n\r\n"
+
+	    puts -nonewline $sock $req
+	    close $sock write
+
+	    set response [my receive_response $sock $req]
+
+	    # The server ignores the request body and sends a OPTIONS response.
+	    test::assert {[$response rest] == ""}
+	    test::assert {[$response status] == 400}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+	}
+    }
+
+    foreach content_length {9223372036854775808 18446744073709551616
+	999999999999999999999999} {
+	with_connection {sock} {
+	    set req "${hdr}Content-Length: $content_length\r\n\r\n"
+
+	    puts -nonewline $sock $req
+
+	    set response [my receive_response $sock $req]
+
+	    # The server ignores the request body and sends a OPTIONS response.
+	    test::assert {[$response rest] == ""}
+	    test::assert {[$response status] == 413}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
 proc test_request_chunk {obj chunk_size chunk_ext trailer partial} {
     set khttpd [$obj khttpd]
     set req "OPTIONS * HTTP/1.1\r\n"
