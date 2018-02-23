@@ -76,6 +76,49 @@ test::define http_options_asterisc test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+test::define http_no_host_field test::khttpd_1conn_testcase {
+    set sock [my socket]
+    set khttpd [my khttpd]
+
+    # The client sends a OPTIONS request without Host field.
+    set req [test::create_options_asterisc_request $khttpd]
+    test::assume {[regsub -- {\nHost:[^\n]+\n} $req "\n" req]}
+    puts -nonewline $sock $req
+
+    # The server sends a 'Bad Request' response.
+    set response [my receive_response $sock $req]
+    test::assert {[$response status] == 400}
+    test::assert_it_is_default_error_response $response
+    test::assert_it_is_the_last_response $sock $response
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_invalid_target test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    set req [test::create_options_asterisc_request $khttpd]
+    set targets {%2fdoes_not_exists *does_not_exists @does_not_exists}
+
+    foreach target $targets {
+	my with_connection {sock} {
+	    test::assume {[regsub -- {^([^ ]+) (?:[^ ]+)} \
+			   $req "\1 $target" req]}
+	    puts -nonewline $sock $req
+
+	    # The server sends a 'Bad Request' response.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response status] == 400}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
 test::define http_crlfs_followed_by_request test::khttpd_1conn_testcase {
     variable ::test::message_size_max
 
@@ -339,6 +382,32 @@ test::define http_nonchunked_request_body test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+test::define http_invalid_content_length test::khttpd_testcase {
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach content_length {hoge 123x 1,2,3} {
+	my with_connection {sock} {
+	    set req "${hdr}Content-Length: $content_length\r\n\r\n"
+
+	    puts -nonewline $sock $req
+
+	    # The server sends a 'Bad Request' response.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response rest] == ""}
+	    test::assert {[$response status] == 400}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
 test::define http_huge_content_length test::khttpd_testcase {
     set khttpd [my khttpd]
     set hdr "OPTIONS * HTTP/1.1\r\n"
@@ -347,10 +416,14 @@ test::define http_huge_content_length test::khttpd_testcase {
     set optreq [test::create_options_asterisc_request $khttpd]
 
     foreach content_length {9223372036854775807} {
-	with_connection {sock} {
+	my with_connection {sock} {
 	    set req "${hdr}Content-Length: $content_length\r\n\r\n"
 
 	    puts -nonewline $sock $req
+
+	    after 100
+	    update
+
 	    close $sock write
 
 	    set response [my receive_response $sock $req]
@@ -365,7 +438,7 @@ test::define http_huge_content_length test::khttpd_testcase {
 
     foreach content_length {9223372036854775808 18446744073709551616
 	999999999999999999999999} {
-	with_connection {sock} {
+	my with_connection {sock} {
 	    set req "${hdr}Content-Length: $content_length\r\n\r\n"
 
 	    puts -nonewline $sock $req
@@ -377,6 +450,69 @@ test::define http_huge_content_length test::khttpd_testcase {
 	    test::assert {[$response status] == 413}
 	    test::assert_it_is_default_error_response $response
 	    test::assert_it_is_the_last_response $sock $response
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_unimplemented_transfer_encoding test::khttpd_testcase {
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach te [list what-is-this "chunked, gzip"] {
+	my with_connection {sock} {
+	    set req "${hdr}Transfer-Encoding: $te\r\n\r\n"
+
+	    puts -nonewline $sock $req
+
+	    # The server sends a 'Not Implemented' response.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response rest] == ""}
+	    test::assert {[$response status] == 501}
+	    test::assert_it_is_default_error_response $response
+	    test::assert_it_is_the_last_response $sock $response
+
+	    # property 'detail' matches "unsupported transfer encoding is
+	    # specified"
+	    set value [json::json2dict [$response body]]
+	    test::assert {[dict get $value detail] eq \
+			"unsupported transfer encoding is specified"}
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_valid_transfer_encoding test::khttpd_testcase {
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach te [list \
+		"Transfer-Encoding: , , , chunked\r\n" \
+		"Transfer-Encoding: ,chunked\r\n" \
+		"Transfer-Encoding: chunked, \r\n" \
+		"Transfer-Encoding:chunked\r\n" \
+		"Transfer-Encoding: chunked\r\nTransfer-Encoding: \r\n" \
+		"Transfer-Encoding: \r\nTransfer-Encoding: chunked\r\n"] {
+	my with_connection {sock} {
+	    my log "te=$te"
+	    set req "${hdr}$te\r\n0\r\n\r\n"
+
+	    puts -nonewline $sock $req
+
+	    # The server sends a 'Not Implemented' response.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response rest] == ""}
+	    test::assert_it_is_options_asterisc_response $response
 	}
     }
 
@@ -505,16 +641,6 @@ test::define http_partial_request_chunk_and_trailer test::khttpd_testcase {
 }
 
 # Request line only
-
-# No Host:
-
-# Invalid request targets
-#   starts with escaped '/'
-#   target that matches RE "\*.+"
-# testcase: Bad Request response is sent while the server is parsing
-# Content-Type field.
-
-# testcase: Multiple 'Bad Request' cases.
 
 # Test URI escape/unescape is done correctly.
 

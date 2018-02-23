@@ -33,6 +33,8 @@
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
+#include "khttpd_ktr.h"
+
 int
 khttpd_parse_digits(uintmax_t *value_out, const char *begin, const char *end)
 {
@@ -470,18 +472,16 @@ khttpd_string_for_each_token(const char *begin, const char *end,
 	const char *cp, *ep, *sp;
 	int ch;
 
+	KHTTPD_ENTRY("%s(\"%s\",%p)", __func__,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin), fn);
+
 	cp = begin;
 	for (;;) {
 		sp = memchr(cp, ',', end - cp);
 
-		if (sp == NULL) {
-			ep = end;
-		} else {
-			for (ep = sp;
-			     cp < ep - 1 &&
-			     ((ch = ep[-1]) == ' ' || ch == '\t');
-			     --ep) {
-			}
+		for (ep = sp == NULL ? end : sp;
+		     cp < ep - 1 && ((ch = ep[-1]) == ' ' || ch == '\t');
+		     --ep) {
 		}
 
 		if (cp < ep && !fn(arg, cp, ep)) {
@@ -492,7 +492,8 @@ khttpd_string_for_each_token(const char *begin, const char *end,
 			break;
 		}
 
-		for (cp = sp + 1; (ch = *cp) == ' ' || ch == '\t'; ++cp) {
+		for (cp = sp + 1;
+		     cp < end && ((ch = *cp) == ' ' || ch == '\t'); ++cp) {
 		}
 	}
 }

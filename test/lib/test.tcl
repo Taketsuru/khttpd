@@ -522,7 +522,8 @@ namespace eval test {
 		    continue
 		}
 
-		puts -nonewline $file "<testcase name=\"$class\""
+		puts -nonewline $file \
+		    "<testcase name=\"[string range $class 2 end]\""
 		puts -nonewline $file " file=\"$class_file\""
 		puts -nonewline $file " line=\"$class_line\""
 		puts $file " elapsed-time=\"$time\" status=\"$status\">"

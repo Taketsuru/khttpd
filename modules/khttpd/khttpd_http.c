@@ -1705,7 +1705,7 @@ khttpd_session_receive_content_length_field(struct khttpd_session *session,
 	exchange = &session->exchange;
 
 	error = khttpd_parse_digits(&value, begin, end);
-	if (error == ERANGE || OFF_MAX < value) {
+	if (error == ERANGE || (error == 0 && OFF_MAX < value)) {
 		KHTTPD_NOTE("reject %u error %d value %jx",
 		    __LINE__, error, value);
 		status = KHTTPD_STATUS_REQUEST_ENTITY_TOO_LARGE;
@@ -1746,6 +1746,9 @@ khttpd_session_found_transfer_encoding_token(void *arg, const char *begin,
 	struct khttpd_exchange *exchange;
 	struct khttpd_session *session;
 	int status;
+
+	KHTTPD_ENTRY("%s(%p,\"%s\")", __func__, arg,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
 
 	session = arg;
 	exchange = &session->exchange;
@@ -2003,6 +2006,9 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		end = eolp;
 		khttpd_string_trim(&begin, &end);
 
+		KHTTPD_TR("value \"%s\"", khttpd_ktr_printf("%.*s",
+			(int)(end - begin), begin));
+		
 		/* Apply a field handler. */
 
 		switch (field) {
@@ -2038,6 +2044,11 @@ khttpd_session_receive_request(struct khttpd_session *session)
 
 		default:
 			break;
+		}
+
+		if (session->receive != khttpd_session_receive_request) {
+			KHTTPD_NOTE("bailout");
+			return (0);
 		}
 	}
 
