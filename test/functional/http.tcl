@@ -561,6 +561,111 @@ test::define http_valid_connection_field test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+test::define http_expect_continue test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    my with_connection {sock} {
+	set body_size 16
+	set req "OPTIONS * HTTP/1.1\r\nHost: [$khttpd host]\r\n"
+	append req "Expect: 100-continue\r\n"
+	append req "Content-Length: $body_size\r\n\r\n"
+
+	# The client sends a OPTIONS * request
+	puts -nonewline $sock $req
+
+	# The server sends a continue response.
+	test::test_chan $sock {
+	    variable _data
+
+	    method on_readable {chan} {
+		append _data [read $chan]
+		if {[string match "*\r\n" $_data]} {
+		    test::assert {[regexp -- {^HTTP/1\.1 100 .*$} $_data]}
+		    my done
+		} else {
+		    test::assert {![eof $chan]}
+		}
+	    }
+	}
+
+	# The client sends the request body
+	puts -nonewline $sock [string repeat x $body_size]
+
+	# The server sends a response
+	set response [my receive_response $sock $req]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+
+	# The client closes the connection
+	close $sock write
+
+	# The server close the connection
+	test::assert_eof $sock
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_expect_continue_ignore test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    my with_connection {sock} {
+	# The client whose version is HTTP/1.0 sends a OPTIONS * request with
+	# Expect: 100-continue field.
+	set body_size 16
+	set req "OPTIONS * HTTP/1.0\r\nHost: [$khttpd host]\r\n"
+	append req "Expect: 100-continue\r\n"
+	append req "Content-Length: $body_size\r\n\r\n"
+	puts -nonewline $sock $req
+
+	# The server doesn't send a continue response.
+	after 100
+	update
+	set data [read $sock]
+	test::assert {$data eq "" && [chan blocked $sock]}
+
+	# The client sends the request body
+	puts -nonewline $sock [string repeat x $body_size]
+
+	# The server sends a response
+	set response [my receive_response $sock $req]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+
+	# The client closes the connection
+	close $sock write
+
+	# The server close the connection
+	test::assert_eof $sock
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_expect_unexpected test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    my with_connection {sock} {
+	# The client sends Expect field with a value not defined by RFC7231.
+	set body_size 16
+	set req "OPTIONS * HTTP/1.1\r\nHost: [$khttpd host]\r\n"
+	append req "Expect: 100-continue-what\r\n\r\n"
+	puts -nonewline $sock $req
+
+	# The server sends 'Expectation Failed' response
+	set response [my receive_response $sock $req]
+	test::assert {[$response rest] == ""}
+	test::assert {[$response status] == 417}
+	test::assert_it_is_default_error_response $response
+	test::assert_it_is_the_last_response $sock $response
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
 proc test_request_chunk {obj chunk_size chunk_ext trailer partial} {
     set khttpd [$obj khttpd]
     set req "OPTIONS * HTTP/1.1\r\n"

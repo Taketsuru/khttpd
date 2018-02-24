@@ -1823,18 +1823,19 @@ khttpd_session_receive_expect_field(struct khttpd_session *session,
 
 	exchange = &session->exchange;
 
-	if (exchange->version_minor < 1 || exchange->continue_requested ||
-	    begin == end) {
+	if (exchange->version_minor < 1 || begin == end) {
 		return;
 	}
 
-	if (strncasecmp(begin, "100-continue", end - begin) == 0) {
+	if (end - begin == sizeof("100-continue") - 1 &&
+	    strncasecmp(begin, "100-continue", end - begin) == 0) {
 		exchange->continue_requested = true;
 		return;
 	}
 
 	status = KHTTPD_STATUS_EXPECTATION_FAILED;
 	khttpd_exchange_set_error_response_body(exchange, status, NULL);
+	khttpd_session_abort(khttpd_exchange_get_session(exchange));
 	khttpd_exchange_respond(exchange, status);
 }
 
