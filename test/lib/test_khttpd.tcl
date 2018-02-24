@@ -43,6 +43,19 @@ namespace eval test {
 	}
     }
 
+    proc assert_connection_alive {sock testcase} {
+	test::assume {[info object class $testcase ::test::khttpd_testcase]}
+
+	# The client sends a request 'OPTIONS * HTTP/1.1'.
+	set req [test::create_options_asterisc_request [$testcase khttpd]]
+	puts -nonewline $sock $req
+
+	# The server sends a successful response to the OPTIONS method.
+	set response [$testcase receive_response $sock $req]
+	test::assert {[$response rest] == ""}
+	test::assert_it_is_options_asterisc_response $response
+    }
+    
     proc assert_error_log_is_empty {khttpd} {
 	set logname [local_file [dict get [$khttpd logs] error-log]]
 	assert {[file size $logname] == 0}

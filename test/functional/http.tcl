@@ -520,6 +520,47 @@ test::define http_valid_transfer_encoding test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+test::define http_valid_connection_field test::khttpd_testcase {
+    set khttpd [my khttpd]
+    set hdr "OPTIONS * HTTP/1.1\r\n"
+    append hdr "Host: [$khttpd host]\r\n"
+
+    set optreq [test::create_options_asterisc_request $khttpd]
+
+    foreach fields [list \
+		"Connection: , , , close0\r\n" \
+		"Connection: \r\n" \
+		"Connection: ,\r\n" \
+		"Connection: \r\nConnection: , , close\r\n" \
+		"Connection: close\r\nConnection: , , close\r\n"] {
+	my with_connection {sock} {
+	    my log "fields=$fields"
+	    set req "${hdr}$fields\r\n"
+
+	    # The client sends a OPTIONS * request
+	    puts -nonewline $sock $req
+
+	    # The server sends a successful response.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response rest] == ""}
+	    test::assert_it_is_options_asterisc_response $response
+
+	    set tokens [test::get_list_field $fields Connection]
+
+	    # The server closes the connection iff Connection field has token
+	    # "close".
+	    if {"close" in $tokens} {
+		test::assert_it_is_the_last_response $sock $response
+	    } else {
+		test::assert_connection_alive $sock [self]
+	    }
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
 proc test_request_chunk {obj chunk_size chunk_ext trailer partial} {
     set khttpd [$obj khttpd]
     set req "OPTIONS * HTTP/1.1\r\n"

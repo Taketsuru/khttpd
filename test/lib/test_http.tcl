@@ -87,6 +87,28 @@ namespace eval test {
 	test::assert_eof $sock
     }
 
+    proc get_list_field {fields key} {
+	set result {}
+	foreach line [split $fields "\n"] {
+	    if {![regexp -- {^([^:]+):([^\n]*)$} $line match name value]} {
+		continue
+	    }
+
+	    if {$name ne $key} {
+		continue
+	    }
+
+	    foreach value [split $value ,] {
+		set value [string trim $value]
+		if {$value ne ""} {
+		    lappend result $value
+		}
+	    }
+	}
+	return $result
+    }
+
+
     proc is_token {str} {
 	variable ::test::token_regexp
 	return [regexp -- "^$token_regexp\$" $str]
