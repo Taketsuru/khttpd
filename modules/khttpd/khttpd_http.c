@@ -465,12 +465,11 @@ khttpd_session_abort(struct khttpd_session *session)
 	khttpd_exchange_close(&session->exchange);
 }
 
-void
-khttpd_exchange_reject(struct khttpd_exchange *exchange)
+static void
+khttpd_exchange_bailout(struct khttpd_exchange *exchange, int status)
 {
-	int status;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, exchange, status);
 
 	if (exchange->response_header_closed) {
 		khttpd_stream_reset
@@ -479,20 +478,26 @@ khttpd_exchange_reject(struct khttpd_exchange *exchange)
 	}
 
 	if (exchange->status != 0) {
-		khttpd_exchange_clear_response_header(exchange);		
+		khttpd_exchange_clear_response_header(exchange);
 	}
 
-	status = KHTTPD_STATUS_BAD_REQUEST;
 	khttpd_exchange_set_error_response_body(exchange, status, NULL);
 	khttpd_session_abort(khttpd_exchange_get_session(exchange));
 	khttpd_exchange_respond(exchange, status);
 }
 
 void
+khttpd_exchange_reject(struct khttpd_exchange *exchange)
+{
+
+	khttpd_exchange_bailout(exchange, KHTTPD_STATUS_BAD_REQUEST);
+}
+
+void
 khttpd_exchange_reset(struct khttpd_exchange *exchange)
 {
 
-	panic("not implemented yet");
+	khttpd_exchange_bailout(exchange, KHTTPD_STATUS_INTERNAL_SERVER_ERROR);
 }
 
 struct khttpd_location *
@@ -847,6 +852,13 @@ khttpd_exchange_set_response_content_length(struct khttpd_exchange *exchange,
 	    (uintmax_t)length);
 	exchange->response_has_content_length = true;
 	exchange->response_content_length = length;
+}
+
+bool
+khttpd_exchange_has_response_content_length(struct khttpd_exchange *exchange)
+{
+
+	return (exchange->response_has_content_length);
 }
 
 void

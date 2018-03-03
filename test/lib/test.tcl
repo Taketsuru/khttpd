@@ -29,8 +29,7 @@ package provide test 0.0
 
 namespace eval test {
 
-    namespace export assert assume define continue_if local_file logger \
-	testcase test_driver uuid_new
+    namespace export {[a-z]*}
 
     proc assert {cond {msg ""}} {
 	if {![uplevel 1 expr [list $cond]]} {

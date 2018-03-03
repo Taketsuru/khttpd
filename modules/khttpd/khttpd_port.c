@@ -124,6 +124,10 @@ struct khttpd_socket {
 
 LIST_HEAD(khttpd_socket_list, khttpd_socket);
 
+/* 
+ * (a) khttpd_port_lock
+ */
+
 struct khttpd_port {
 	LIST_ENTRY(khttpd_port)	liste;
 	struct mtx		lock;
@@ -137,6 +141,8 @@ struct khttpd_port {
 	struct socket		*so;
 	unsigned		is_tcp:1;
 	unsigned		costructs_ready:1;
+	u_int			hold; /* (a) */
+	bool			waiting_unhold; /* (a) */
 
 #define khttpd_port_zctor_end	refcount
 	KHTTPD_REFCOUNT1_MEMBERS;
@@ -306,6 +312,10 @@ khttpd_port_dtor(struct khttpd_port *port)
 		khttpd_costruct_call_dtors(khttpd_port_costruct_info, port);
 
 		mtx_lock(&khttpd_port_lock);
+		while (port->hold != 0) {
+			port->waiting_unhold = true;
+			mtx_sleep(port, &khttpd_port_lock, 0, "porthold", 0);
+		}
 		LIST_REMOVE(port, liste);
 		if (LIST_EMPTY(&khttpd_port_ports))
 			wakeup(&khttpd_port_ports);
@@ -1031,28 +1041,30 @@ khttpd_socket_dtor(void *mem, int size, void *arg)
 		if (LIST_EMPTY(&port->sockets))
 			wakeup(&port->sockets);
 		mtx_unlock(&port->lock);
+
+		khttpd_port_release(port);
 	}
 }
 
 static void
 khttpd_port_reset_all(void *arg)
 {
-	struct khttpd_port *prev, *ptr;
+	struct khttpd_port *ptr;
 
 	mtx_lock(&khttpd_port_lock);
-	prev = NULL;
 	LIST_FOREACH(ptr, &khttpd_port_ports, liste) {
-		khttpd_port_acquire(ptr);
+		++ptr->hold;
 		mtx_unlock(&khttpd_port_lock);
 
-		khttpd_port_release(prev);
 		khttpd_port_reset(ptr);
 
 		mtx_lock(&khttpd_port_lock);
-		prev = ptr;
+		if (--ptr->hold == 0 && ptr->waiting_unhold) {
+			ptr->waiting_unhold = false;
+			wakeup(ptr);
+		}
 	}
 	mtx_unlock(&khttpd_port_lock);
-	khttpd_port_release(prev);
 
 	mtx_lock(&khttpd_port_lock);
 	while (!LIST_EMPTY(&khttpd_port_ports))
@@ -1564,6 +1576,7 @@ khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket)
 	socket->port = port;
 	socket->worker = khttpd_socket_worker_find();
 	LIST_INSERT_HEAD(&port->sockets, socket, link);
+	khttpd_port_acquire(port);
 	mtx_unlock(&port->lock);
 
 	khttpd_socket_schedule_event(socket, SO_RCV, true);
@@ -1657,9 +1670,9 @@ khttpd_port_reset(struct khttpd_port *port)
 
 	for (socket = LIST_FIRST(&port->sockets);
 	     socket != NULL; socket = next)
-		if (socket->marker)
+		if (socket->marker) {
 			next = LIST_NEXT(socket, link);
-		else {
+		} else {
 			LIST_INSERT_AFTER(socket, &marker, link);
 			mtx_unlock(&port->lock);
 
@@ -1671,8 +1684,9 @@ khttpd_port_reset(struct khttpd_port *port)
 			mtx_lock(&port->lock);
 			next = LIST_NEXT(&marker, link);
 			LIST_REMOVE(&marker, link);
-			if (next == NULL && LIST_EMPTY(&port->sockets))
+			if (next == NULL && LIST_EMPTY(&port->sockets)) {
 				wakeup(&port->sockets);
+			}
 		}
 
 	while (!LIST_EMPTY(&port->sockets)) {

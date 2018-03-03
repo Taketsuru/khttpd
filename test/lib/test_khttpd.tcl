@@ -32,6 +32,10 @@ namespace eval test {
     namespace export {[a-z]*}
 
     variable message_size_max 16384
+    variable host_addr 192.168.56.2
+    variable target_addr 192.168.56.3
+    variable http_port 80
+    variable server_software khttpd/0.0
 
     proc assert_eof {sock} {
 	test_chan $sock {
@@ -389,8 +393,10 @@ namespace eval test {
 	variable _khttpd _port_id _server_id _responses
 
 	constructor {} {
+	    variable ::test::target_addr
+	    variable ::test::http_port
 	    next
-	    set _khttpd [test::khttpd new 192.168.56.3 80]
+	    set _khttpd [test::khttpd new $target_addr $http_port]
 	    set _port_id [test::uuid_new]
 	    set _server_id [test::uuid_new]
 	    set _responses ""

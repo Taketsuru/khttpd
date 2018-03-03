@@ -121,10 +121,13 @@ static int khttpd_file_get_exchange_get(struct khttpd_exchange *, void *,
     ssize_t, struct mbuf **);
 static void khttpd_file_get(struct khttpd_exchange *);
 static void khttpd_file_location_dtor(struct khttpd_location *);
+static bool khttpd_file_filter(struct khttpd_location *, 
+    struct khttpd_exchange *, const char *, struct sbuf *);
 static void khttpd_file_read_file(void *);
 
 static struct khttpd_location_ops khttpd_file_ops = {
 	.dtor = khttpd_file_location_dtor,
+	.filter = khttpd_file_filter,
 	.method[KHTTPD_METHOD_GET] = khttpd_file_get,
 };
 
@@ -870,6 +873,32 @@ khttpd_file_location_dtor(struct khttpd_location *location)
 
 	KHTTPD_ENTRY("khttpd_file_location_dtor(%p)", location);
 	khttpd_file_location_data_destroy(khttpd_location_data(location));
+}
+
+static bool
+khttpd_file_filter(struct khttpd_location *location,
+    struct khttpd_exchange *exchange, const char *suffix,
+    struct sbuf *translated_path)
+{
+	struct khttpd_file_location_data *loc_data;
+	const char *fs_path;
+
+	KHTTPD_ENTRY("%s(%p,%p,%s)", __func__, location, exchange,
+	    khttpd_ktr_printf("%s", suffix));
+
+	loc_data = khttpd_location_data(location);
+	if (translated_path != NULL) {
+		fs_path = loc_data->docroot;
+		sbuf_cpy(translated_path, fs_path);
+		if (fs_path[strlen(fs_path) - 1] != '/') {
+			sbuf_putc(translated_path, '/');
+		}
+		sbuf_cat(translated_path,
+		    suffix[0] != '/' ? suffix : suffix + 1);
+	}
+
+	/* No translucent file location yet. */
+	return (true);
 }
 
 static void

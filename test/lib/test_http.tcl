@@ -357,7 +357,7 @@ namespace eval test {
 
 	    set end [expr {$pos + 2}]
 	    set line [string range $_response $_chunk_pos $pos-1]
-	    test::assert {regexp -- "^\r\n(\[0-9a-fA-f]+)(?:;${token_regexp}(?:=(?:$token_regexp|\"\[^\"]*\"))?)*$" $line match chunk_size}
+	    test::assert {[regexp -- "^\r\n(\[0-9a-fA-f]+)(?:;${token_regexp}(?:=(?:$token_regexp|\"\[^\"]*\"))?)*$" $line match chunk_size]}
 	    scan $chunk_size {%llx} chunk_size
 
 	    if {$chunk_size == 0} {

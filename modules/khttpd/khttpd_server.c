@@ -466,9 +466,10 @@ khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
 	const char *cp, *end;
 
 	KHTTPD_ENTRY("%s(%p,\"%s\",%p)", __func__, server,
-	    khttpd_ktr_printf("%*.s", 
+	    khttpd_ktr_printf("%.*s",
 		(int)sbuf_len(target), sbuf_data(target)),
 	    exchange);
+
 	cp = sbuf_data(target);
 	end = cp + sbuf_len(target);
 
@@ -492,6 +493,7 @@ khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
 			/* ... or matches except the trailing '/' */
 			(end - cp == ptr->key_len - 1 &&
 			    memcmp(ptr->key, cp, end - cp) == 0))) {
+			KHTTPD_NOTE("'ptr' matches the key");
 			parent = ptr;
 			cp = MIN(end, cp + ptr->key_len);
 			break;
@@ -500,6 +502,11 @@ khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
 		prev = ptr == NULL ?
 		    TAILQ_LAST(&parent->children_tailq, khttpd_prefix_tailq) :
 		    TAILQ_PREV(ptr, khttpd_prefix_tailq, children_link);
+		KHTTPD_NOTE("prev %p, path \"%s\", key \"%s\"",
+		    prev, prev == NULL ? "<null>" :
+		    khttpd_ktr_printf("%s", prev->path),
+		    prev == NULL ? "<null>" : 
+		    khttpd_ktr_printf("%.*s", (int)prev->key_len, prev->key));
 
 		/*
 		 * If the path of 'prev' is not a prefix of the target
@@ -507,8 +514,10 @@ khttpd_server_route(struct khttpd_server *server, struct sbuf *target,
 		 */
 
 		if (prev == NULL || end - cp < prev->key_len ||
-		    memcmp(prev->key, cp, prev->key_len) != 0)
+		    memcmp(prev->key, cp, prev->key_len) != 0) {
+			KHTTPD_NOTE("prev NULL, prev is not a prefix");
 			break;
+		}
 
 		/*
 		 * We found a location whose path is a prefix of the target

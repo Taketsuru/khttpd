@@ -563,7 +563,7 @@ khttpd_fcgi_process_content_length_field(struct khttpd_fcgi_conn *conn,
 
 	khttpd_exchange_set_response_content_length(exchange, value);
 
-	return (true);
+	return (false);
 }
 
 static bool
@@ -717,8 +717,11 @@ khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
 		if (bolp < eolp && eolp[-1] == '\r')
 			--eolp;
 		if (bolp == eolp) {
-			khttpd_exchange_enable_chunked_transfer
-			    (conn->xchg_data->exchange);
+			if (!khttpd_exchange_has_response_content_length
+			    (conn->xchg_data->exchange)) {
+				khttpd_exchange_enable_chunked_transfer
+				    (conn->xchg_data->exchange);
+			}
 
 			conn->header_finished = true;
 
@@ -728,6 +731,7 @@ khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
 			status = conn->status;
 			if (status == 0)
 				status = KHTTPD_STATUS_OK;
+			conn->responded = true;
 			khttpd_exchange_respond_with_reason
 			    (conn->xchg_data->exchange, status, conn->reason);
 
@@ -791,6 +795,7 @@ khttpd_fcgi_send_stdin(struct khttpd_fcgi_conn *conn, long space)
 
 		if (stdin == NULL) {
 			stdin_len = 0;
+			space -= sizeof(struct khttpd_fcgi_hdr);
 
 		} else {
 			stdin_len = m_length(stdin, NULL);
@@ -805,10 +810,10 @@ khttpd_fcgi_send_stdin(struct khttpd_fcgi_conn *conn, long space)
 				conn->stdin = m_split(stdin, stdin_len,
 				    M_WAITOK);
 			}
-		}
 
-		space -= sizeof(struct khttpd_fcgi_hdr) + stdin_len +
-		    khttpd_fcgi_add_padding(stdin, stdin_len);
+			space -= sizeof(struct khttpd_fcgi_hdr) + stdin_len +
+			    khttpd_fcgi_add_padding(stdin, stdin_len);
+		}
 
 		head = m_gethdr(M_WAITOK, MT_DATA);
 		head->m_len = sizeof(struct khttpd_fcgi_hdr);
@@ -866,8 +871,8 @@ khttpd_fcgi_append_param(struct mbuf **head, struct mbuf *tail,
 	char *bp;
 	size_t namelen, oldlen, newlen, len;
 
-	KHTTPD_ENTRY("%s(%s,%s), *len_inout=%#x", __func__, name,
-	    khttpd_ktr_printf("%s", value), *len_inout);
+	KHTTPD_ENTRY("%s(%p,%p,%s,%s), *len_inout=%#x", __func__, *head, tail,
+	    name, khttpd_ktr_printf("%.*s", (int)vallen, value), *len_inout);
 
 	bp = buf;
 
@@ -1021,8 +1026,8 @@ khttpd_fcgi_convert_request_header_field(struct khttpd_exchange *exchange,
 			}
 			sbuf_finish(sbuf);
 
-			tail = khttpd_fcgi_append_param(head,
-			    tail, len, sbuf_data(sbuf), begin, end - begin);
+			tail = khttpd_fcgi_append_param(head, tail, len,
+			    sbuf_data(sbuf), begin, end - begin);
 
 			sbuf_clear(sbuf);
 		}
@@ -1066,8 +1071,13 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	    "SCRIPT_FILENAME", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
-	tail = khttpd_fcgi_append_param(&head, tail, &len, 
-	    "QUERY_STRING", query == NULL ? "" : query, strlen(query));
+	if (query == NULL) {
+		tail = khttpd_fcgi_append_param(&head, tail, &len,
+		    "QUERY_STRING", "", 0);
+	} else {
+		tail = khttpd_fcgi_append_param(&head, tail, &len,
+		    "QUERY_STRING", query, strlen(query));
+	}
 
 	method = khttpd_exchange_method(exchange);
 	method_name = khttpd_method_name(method);
@@ -1267,11 +1277,15 @@ khttpd_fcgi_conn_release_locked
 	struct khttpd_socket *socket;
 	struct khttpd_fcgi_xchg_data *xchg_data;
 
-	KHTTPD_ENTRY("%s(%p,%p,%#lx)", __func__, loc_data, conn);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, conn);
 	mtx_assert(&loc_data->lock, MA_OWNED);
 	KASSERT(conn->attaching == NULL, ("attaching %p", conn->attaching));
-	KASSERT(!conn->idle, ("idle"));
 	KASSERT(!conn->connecting, ("connecting"));
+
+	if (conn->idle) {
+		mtx_unlock(&loc_data->lock);
+		return;
+	}
 
 	if ((xchg_data = STAILQ_FIRST(&loc_data->queue)) == NULL) {
 		conn->xchg_data = NULL;
@@ -1492,14 +1506,17 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 	long space;
 	int status;
 
-	KHTTPD_ENTRY("%s(%p,%#x,%d)",
-	    __func__, conn, app_status, protocol_status_names);
+	KHTTPD_ENTRY("%s(%p,%#x,%d)", __func__, conn, app_status, 
+	    protocol_status);
 
-	if (!conn->active)
+	if (!conn->active) {
+		KHTTPD_NOTE("%s inactive", __func__);
 		return;
+	}
 	conn->active = false;
 
 	if ((xchg_data = conn->xchg_data) == NULL) {
+		KHTTPD_NOTE("%s null xchg_data", __func__);
 		khttpd_stream_send_bufstat(&conn->stream, NULL, NULL, &space);
 		khttpd_fcgi_conn_release(conn);
 		return;
@@ -1517,9 +1534,13 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 		}
 	}
 
-	if (app_status == 0 && protocol_status == 0)
+	if (app_status == 0 && protocol_status == 0) {
+		KHTTPD_NOTE("%s success", __func__);
 		return;
+	}
 
+	KHTTPD_NOTE("app_status %#x, protocol_status %d",
+	    app_status, protocol_status);
 	khttpd_fcgi_protocol_error_new(&logent);
 
 	if (app_status != 0) {
@@ -1539,7 +1560,15 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 	}
 
 	khttpd_fcgi_report_error(conn->upstream, &logent);
-	//khttpd_fcgi_abort_exchange(conn);
+
+	/*
+	 * XXX Because we have already sent the stdout data to the client, it's
+	 * too late to send an unsuccessful http status code to the client.
+	 *
+	 * We should buffer all the stdout data until we receives end_request
+	 * record, and then send them if both the app_status and
+	 * protocol_status is 0.
+	 */
 }
 
 static void
@@ -1707,9 +1736,15 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 
 	for (; sizeof(struct khttpd_fcgi_hdr) <= mlen;
 	     m = conn->recv_buf) {
+		KHTTPD_NOTE("m_length(%p)=%d", m, m_length(m, NULL));
+		
 		m_copydata(m, 0, sizeof(hdr), (char *)&hdr);
 
 		if (hdr.version != 1) {
+			KHTTPD_NOTE("%s invalid version %d %d %d %d %d %d",
+			    __func__, hdr.version, hdr.type,
+			    ntohs(hdr.request_id),
+			    ntohs(hdr.content_length));
 			khttpd_fcgi_protocol_error_new(&logent);
 			khttpd_problem_set_detail(&logent,
 			    "unknown protocol version \"%d\"", hdr.version);
@@ -1787,6 +1822,8 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 			    "invalid record type \"%d\"", hdr.type);
 			khttpd_fcgi_report_error(conn->upstream, &logent);
 		}
+
+		KHTTPD_NOTE("%s continue mlen %d", __func__, mlen);
 	}
 
 	if (!suspend_recv)
@@ -2162,9 +2199,7 @@ khttpd_fcgi_filter(struct khttpd_location *location,
 	int error, fd;
 
 	KHTTPD_ENTRY("%s(%p,%p,%s)", __func__, location, exchange,
-	    khttpd_ktr_printf("%s,%s", suffix, 
-		translated_path != NULL ? sbuf_data(translated_path) :
-		"<null>"));
+	    khttpd_ktr_printf("%s", suffix));
 
 	td = curthread;
 	loc_data = khttpd_location_data(location);
@@ -2869,8 +2904,8 @@ khttpd_fcgi_location_put(struct khttpd_location *location,
 
 	KHTTPD_ENTRY("%s(%p)", __func__, location);
 
-	status = khttpd_fcgi_location_data_new(&location_data, location, output,
-	    input_prop_spec, input);
+	status = khttpd_fcgi_location_data_new(&location_data, location,
+	    output, input_prop_spec, input);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 

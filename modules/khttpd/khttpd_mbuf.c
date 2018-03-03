@@ -87,11 +87,17 @@ khttpd_mbuf_append(struct mbuf *dst, const char *begin, const char *end)
 	}
 
 	for (ptr = ptr->m_next = m_getm2(NULL, end - cp, M_WAITOK, MT_DATA, 0);
-	     ptr != NULL; ptr = ptr->m_next) {
+	     ; ptr = ptr->m_next) {
 		len = MIN(end - cp, M_TRAILINGSPACE(ptr));
 		bcopy(cp, mtod(ptr, void *), len);
 		ptr->m_len = len;
 		cp += len;
+		if (ptr->m_next == NULL) {
+			KASSERT(cp == end,
+			    ("cp %p, end %p, ptr %p", cp, end, ptr));
+			break;
+		}
+		ptr = ptr->m_next;
 	}
 
 	return (ptr);

@@ -105,6 +105,7 @@ void khttpd_exchange_vadd_response_field(struct khttpd_exchange *exchange,
     const char *field, const char *value_fmt, va_list va);
 void khttpd_exchange_set_response_content_length
     (struct khttpd_exchange *exchange, off_t length);
+bool khttpd_exchange_has_response_content_length(struct khttpd_exchange *);
 void khttpd_exchange_close(struct khttpd_exchange *exchange);
 void khttpd_exchange_set_response_body(struct khttpd_exchange *exchange,
     struct mbuf *data);

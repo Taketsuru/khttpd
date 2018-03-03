@@ -186,5 +186,11 @@ test::define file_dot_segments test::khttpd_file_testcase {
 # If the target ends with /, the resource should be a directory.
 # Otherwise, the server should reply with 'Not Found' response.
 
+# property 'charsetRules'
+
+# property 'mimeTypeRules'
+
+# property 'fsPath'
+
 # Property 'fsPath' of a file location configuration is normalized. Test
 # the normalization is done correctly.

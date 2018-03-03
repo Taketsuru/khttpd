@@ -1,4 +1,9 @@
 - More functional tests
+    - Write tests for chunked response body
+
+- Local redirect
+
+- Feature to redirect an access to a directory to a URI.
 
 - Last-Modified: and ETag:
 
@@ -30,3 +35,5 @@
 - make khttpd_test multi-module aware
 
 - Atomic server reconfiguration.
+
+- Add configuration parameter 'translucent' to khttpd_file location handler.
