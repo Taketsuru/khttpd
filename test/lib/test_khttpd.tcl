@@ -319,7 +319,20 @@ namespace eval test {
 	}
 
 	method connect {} {
-	    set sock [socket -async [my host] [my port]]
+	    while {1} {
+		try {
+		    # This sometimes fails with EADDRINUSE error.
+		    set sock [socket -async [my host] [my port]]
+		    break
+
+		} trap {POSIX EADDRINUSE} {} {
+		    after 100
+		    continue
+
+		} on error {msg opts} {
+		    return -options $opts $msg
+		}
+	    }
 
 	    try {
 		chan configure $sock -blocking 0 -buffering none -eofchar "" \
