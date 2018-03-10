@@ -167,7 +167,6 @@ struct khttpd_fcgi_conn {
 #define khttpd_fcgi_conn_xchg_state_end line_buf
 
 	char		line_buf[256];
-	char		reason[32];
 };
 
 LIST_HEAD(khttpd_fcgi_conn_list, khttpd_fcgi_conn);
@@ -428,8 +427,10 @@ khttpd_fcgi_report_connection_error(struct khttpd_fcgi_upstream *upstream,
 
 	KHTTPD_ENTRY("%s(%p,%d)", __func__, upstream, error);
 
-	khttpd_problem_log_new(&logent, LOG_ERR,
-	    "fcgi-connect-fail", "FCGI connection failure");
+	khttpd_mbuf_json_new(&logent);
+	khttpd_mbuf_json_object_begin(&logent);
+	khttpd_problem_set(&logent, LOG_ERR, "fcgi-connect-fail",
+	    "FCGI connection failure");
 	khttpd_problem_set_detail(&logent, 
 	    "failed to connect to a FastCGI application");
 	khttpd_problem_set_errno(&logent, error);
@@ -441,6 +442,8 @@ khttpd_fcgi_protocol_error_new(struct khttpd_mbuf_json *entry)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, entry);
+	khttpd_mbuf_json_new(entry);
+	khttpd_mbuf_json_object_begin(entry);
 	khttpd_problem_log_new(entry, LOG_ERR, "fcgi_protocol_error",
 	    "FastCGI protocol error");
 }
@@ -544,7 +547,7 @@ khttpd_fcgi_process_content_length_field(struct khttpd_fcgi_conn *conn,
 
 	exchange = conn->xchg_data->exchange;
 
-	if (khttpd_exchange_is_response_body_chunked(exchange))
+	if (khttpd_exchange_response_is_chunked(exchange))
 		return (false);
 
 	if (begin == end) {
@@ -598,8 +601,6 @@ khttpd_fcgi_process_status_field(struct khttpd_fcgi_conn *conn,
 	} else {
 		sscanf(begin, "%d", &status);
 		conn->status = status;
-		strlcpy(conn->reason, begin,
-		    MIN(end - begin, sizeof(conn->reason)));
 	}
 
 	return (false);
@@ -719,7 +720,7 @@ khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
 		if (bolp == eolp) {
 			if (!khttpd_exchange_has_response_content_length
 			    (conn->xchg_data->exchange)) {
-				khttpd_exchange_enable_chunked_transfer
+				khttpd_exchange_enable_chunked_response
 				    (conn->xchg_data->exchange);
 			}
 
@@ -732,8 +733,8 @@ khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
 			if (status == 0)
 				status = KHTTPD_STATUS_OK;
 			conn->responded = true;
-			khttpd_exchange_respond_with_reason
-			    (conn->xchg_data->exchange, status, conn->reason);
+			khttpd_exchange_respond(conn->xchg_data->exchange,
+			    status);
 
 			return (result);
 		}
@@ -1084,7 +1085,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
 	    "REQUEST_METHOD", method_name, strlen(method_name));
 
-	if (khttpd_exchange_get_request_content_type(exchange, &sbuf)) {
+	if (khttpd_exchange_request_content_type(exchange, &sbuf)) {
 		KHTTPD_NOTE("%s content-type", __func__);
 		sbuf_finish(&sbuf);
 		tail = khttpd_fcgi_append_param(&head, tail, &len, 
@@ -1095,7 +1096,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	if (khttpd_exchange_has_request_content_length(exchange)) {
 		KHTTPD_NOTE("%s content-length", __func__);
 		sbuf_printf(&sbuf, "%jd", (intmax_t)
-		    khttpd_exchange_get_request_content_length(exchange));
+		    khttpd_exchange_request_content_length(exchange));
 		sbuf_finish(&sbuf);
 		tail = khttpd_fcgi_append_param(&head, tail, &len, 
 		    "CONTENT_LENGTH", sbuf_data(&sbuf), sbuf_len(&sbuf));
@@ -1109,7 +1110,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	    "SCRIPT_NAME", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
-	sbuf_cpy(&sbuf, khttpd_exchange_get_target(exchange));
+	sbuf_cpy(&sbuf, khttpd_exchange_target(exchange));
 	if (query != NULL) {
 		sbuf_putc(&sbuf, '?');
 		sbuf_cat(&sbuf, query);
@@ -1120,8 +1121,8 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 	sbuf_clear(&sbuf);
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
-	    "DOCUMENT_URI", khttpd_exchange_get_target(exchange),
-		khttpd_exchange_get_target_length(exchange));
+	    "DOCUMENT_URI", khttpd_exchange_target(exchange),
+		khttpd_exchange_target_length(exchange));
 
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
 	    "SERVER_PROTOCOL", "HTTP/1.1", sizeof("HTTP/1.1") - 1);
@@ -2137,7 +2138,7 @@ khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, exchange, arg);
 
-	xchg_data = khttpd_exchange_get_data(exchange);
+	xchg_data = khttpd_exchange_ops_arg(exchange);
 
 	if (xchg_data->aborted) {
 		KHTTPD_NOTE("%s aborted", __func__);
@@ -2353,15 +2354,15 @@ khttpd_fcgi_do_method(struct khttpd_exchange *exchange)
 
 	KHTTPD_ENTRY("%s(%p=%s)", __func__, exchange,
 	    khttpd_ktr_printf("{target: \"%s\", method: \"%s\"}",
-		khttpd_exchange_get_target(exchange),
+		khttpd_exchange_target(exchange),
 		khttpd_method_name(khttpd_exchange_method(exchange))));
 
 	td = curthread;
 	location = khttpd_exchange_location(exchange);
 	loc_data = khttpd_location_data(location);
-	xchg_data = khttpd_exchange_get_data(exchange);
+	xchg_data = khttpd_exchange_ops_arg(exchange);
 
-	if (khttpd_exchange_is_request_body_chunked(exchange)) {
+	if (khttpd_exchange_request_is_chunked(exchange)) {
 		status = KHTTPD_STATUS_LENGTH_REQUIRED;
 		khttpd_exchange_set_error_response_body(exchange, status,
 		    NULL);

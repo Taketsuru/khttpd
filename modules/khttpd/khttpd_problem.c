@@ -405,12 +405,12 @@ khttpd_problem_response_begin(struct khttpd_mbuf_json *output, int status,
 }
 
 void
-khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
+khttpd_problem_set(struct khttpd_mbuf_json *dst, int severity,
     const char *type, const char *title)
 {
 	const char *label;
 
-	KHTTPD_ENTRY("%s(%p,%d,%s,%s)", __func__, output, severity,
+	KHTTPD_ENTRY("%s(%p,%d,%s,%s)", __func__, dst, severity,
 	    type == NULL ? "<null>" : type, title == NULL ? "<null>" : title);
 #ifdef KHTTPD_TRACE_BRANCH
 	struct stack st;
@@ -419,17 +419,34 @@ khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
 #endif
 
 	label = khttpd_problem_get_severity_label(severity);
+	khttpd_mbuf_json_property(dst, "type");
+	khttpd_mbuf_json_format(dst, TRUE, "%s/%s", KHTTPD_PROBLEM_URL,
+	    type != NULL ? type : label);
+	khttpd_mbuf_json_property(dst, "title");
+	khttpd_mbuf_json_cstr(dst, TRUE, title != NULL ? title :
+	    type != NULL ? type : label);
+	khttpd_mbuf_json_property(dst, "severity");
+	khttpd_mbuf_json_cstr(dst, TRUE, label);
+}
+
+void
+khttpd_problem_set_internal_error(struct khttpd_mbuf_json *dst)
+{
+
+	khttpd_problem_set(dst, LOG_ERR, "internal_error", "internal error");
+}
+
+void
+khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
+    const char *type, const char *title)
+{
+
+	KHTTPD_ENTRY("%s(%p,%d,%s,%s)", __func__, output, severity,
+	    type == NULL ? "<null>" : type, title == NULL ? "<null>" : title);
 
 	khttpd_mbuf_json_new(output);
 	khttpd_mbuf_json_object_begin(output);
-	khttpd_mbuf_json_property(output, "type");
-	khttpd_mbuf_json_format(output, TRUE, "%s/%s", KHTTPD_PROBLEM_URL,
-	    type != NULL ? type : label);
-	khttpd_mbuf_json_property(output, "title");
-	khttpd_mbuf_json_cstr(output, TRUE, title != NULL ? title :
-	    type != NULL ? type : label);
-	khttpd_mbuf_json_property(output, "severity");
-	khttpd_mbuf_json_cstr(output, TRUE, label);
+	khttpd_problem_set(output, severity, type, title);
 }
 
 void
@@ -513,12 +530,4 @@ khttpd_problem_get_severity_label(int severity)
 	    ("unknown severity: %d", severity));
 
 	return (khttpd_problem_severities[severity]);
-}
-
-void
-khttpd_problem_internal_error_log_new(struct khttpd_mbuf_json *output)
-{
-
-	khttpd_problem_log_new(output, LOG_ERR, "internal_error",
-	    "internal error");
 }

@@ -56,6 +56,9 @@ void khttpd_problem_response_begin(struct khttpd_mbuf_json *output, int status,
     const char *type, const char *title);
 void khttpd_problem_log_new(struct khttpd_mbuf_json *output, int severity,
     const char *type, const char *title);
+void	khttpd_problem_set(struct khttpd_mbuf_json *_dst, int _severity,
+	    const char *_type, const char *_title);
+void	khttpd_problem_set_internal_error(struct khttpd_mbuf_json *_dst);
 void khttpd_problem_set_property(struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *property);
 void khttpd_problem_set_detail(struct khttpd_mbuf_json *output,
@@ -67,5 +70,5 @@ void khttpd_problem_set_errno(struct khttpd_mbuf_json *output,
 void khttpd_problem_no_value_response_begin(struct khttpd_mbuf_json *);
 void khttpd_problem_wrong_type_response_begin(struct khttpd_mbuf_json *);
 void khttpd_problem_invalid_value_response_begin(struct khttpd_mbuf_json *);
+
 const char *khttpd_problem_get_severity_label(int severity);
-void khttpd_problem_internal_error_log_new(struct khttpd_mbuf_json *output);

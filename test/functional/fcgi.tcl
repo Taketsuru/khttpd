@@ -634,6 +634,8 @@ test::define fcgi_get_basic test::fastcgi::testcase {
 
 # TODO
 
+# HEAD method
+
 # property 'scriptSuffix'
 
 # property 'fsPath'

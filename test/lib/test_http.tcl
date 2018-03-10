@@ -250,7 +250,7 @@ namespace eval test {
 	    if {$pos == -1} {
 		return $_request
 	    } else {
-		return [string range $_request 0 $pos+1]
+		return [string range $_request 0 $pos-1]
 	    }
 	}
 

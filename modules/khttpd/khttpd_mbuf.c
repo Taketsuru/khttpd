@@ -344,6 +344,16 @@ khttpd_mbuf_json_new(struct khttpd_mbuf_json *dst)
 	dst->is_property_value = false;
 }
 
+void
+khttpd_mbuf_json_copy(struct khttpd_mbuf_json *dst,
+    struct khttpd_mbuf_json *src)
+{
+
+	dst->mbuf = m_copym(src->mbuf, 0, M_COPYALL, M_WAITOK);
+	dst->is_first = src->is_first;
+	dst->is_property_value = src->is_property_value;
+}
+
 struct mbuf *
 khttpd_mbuf_json_data(struct khttpd_mbuf_json *dst)
 {

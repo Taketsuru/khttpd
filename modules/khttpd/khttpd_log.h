@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,10 +36,12 @@
 struct mbuf;
 struct khttpd_log;
 
-struct khttpd_log *khttpd_log_new(void);
-void khttpd_log_delete(struct khttpd_log *log);
-void khttpd_log_set_fd(struct khttpd_log *log, int fd);
-void khttpd_log_close(struct khttpd_log *log);
-void khttpd_log_put(struct khttpd_log *log, struct mbuf *m);
-void khttpd_log_set_name(struct khttpd_log *log, const char *name);
-const char*khttpd_log_get_name(struct khttpd_log *log);
+struct khttpd_log *
+	khttpd_log_new(void);
+void	khttpd_log_delete(struct khttpd_log *_log);
+void	khttpd_log_set_fd(struct khttpd_log *_log, int _fd);
+void	khttpd_log_close(struct khttpd_log *_log);
+void	khttpd_log_put(struct khttpd_log *_log, struct mbuf *_m);
+void	khttpd_log_set_name(struct khttpd_log *_log, const char *_name);
+const char *
+	khttpd_log_get_name(struct khttpd_log *_log);

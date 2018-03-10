@@ -27,7 +27,9 @@
 
 #pragma once
 
-#ifdef _KERNEL
+#ifndef _KERNEL
+#error This file is not for userland code.
+#endif
 
 #include <sys/types.h>
 #include <machine/stdarg.h>
@@ -39,7 +41,6 @@ struct khttpd_exchange;
 struct khttpd_log;
 struct khttpd_location;
 struct khttpd_mbuf_json;
-struct khttpd_mbuf_pos;
 struct khttpd_port;
 enum khttpd_server_log_id;
 struct khttpd_stream;
@@ -59,83 +60,69 @@ struct khttpd_exchange_ops {
 
 void khttpd_http_set_log(enum khttpd_http_log_id, struct khttpd_log *);
 struct khttpd_log *khttpd_http_get_log(enum khttpd_http_log_id);
+void	khttpd_http_error(struct khttpd_mbuf_json *);
 
-struct khttpd_location *khttpd_exchange_location(struct khttpd_exchange *);
-const char *khttpd_exchange_query(struct khttpd_exchange *);
-const char *khttpd_exchange_suffix(struct khttpd_exchange *);
-const struct sockaddr *khttpd_exchange_client_address
-    (struct khttpd_exchange *);
-const struct sockaddr *khttpd_exchange_server_address
-    (struct khttpd_exchange *);
-const char *khttpd_exchange_host(struct khttpd_exchange *);
-size_t khttpd_exchange_host_length(struct khttpd_exchange *);
-struct khttpd_port *khttpd_exchange_get_port(struct khttpd_exchange *exchange);
-void khttpd_exchange_set_ops(struct khttpd_exchange *, 
-    struct khttpd_exchange_ops *, void *);
-void *khttpd_exchange_get_data(struct khttpd_exchange *);
-void khttpd_exchange_error(struct khttpd_exchange *, 
-    struct khttpd_mbuf_json *);
-const char *khttpd_exchange_get_target(struct khttpd_exchange *exchange);
-size_t khttpd_exchange_get_target_length(struct khttpd_exchange *exchange);
-bool khttpd_exchange_is_request_body_chunked(struct khttpd_exchange *);
-bool khttpd_exchange_is_response_body_chunked(struct khttpd_exchange *);
-size_t khttpd_exchange_get_request_content_length
-    (struct khttpd_exchange *exchange);
-bool khttpd_exchange_has_request_content_length
-    (struct khttpd_exchange *exchange);
-int khttpd_exchange_method(struct khttpd_exchange *exchange);
-bool	khttpd_exchange_get_request_header_field(struct khttpd_exchange *,
-	    const char *, struct sbuf *);
-bool	khttpd_exchange_get_request_content_type(struct khttpd_exchange *_xchg,
+struct khttpd_mbuf_json *
+	khttpd_exchange_log_entry(struct khttpd_exchange *);
+struct khttpd_socket *
+	khttpd_exchange_socket(struct khttpd_exchange *);
+const struct sockaddr *
+	khttpd_exchange_client_address(struct khttpd_exchange *);
+const struct sockaddr *
+	khttpd_exchange_server_address(struct khttpd_exchange *);
+int	khttpd_exchange_method(struct khttpd_exchange *);
+struct khttpd_location *
+	khttpd_exchange_location(struct khttpd_exchange *);
+const char *
+	khttpd_exchange_query(struct khttpd_exchange *);
+const char *
+	khttpd_exchange_suffix(struct khttpd_exchange *);
+const char *
+	khttpd_exchange_host(struct khttpd_exchange *);
+size_t	khttpd_exchange_host_length(struct khttpd_exchange *);
+void   *khttpd_exchange_ops_arg(struct khttpd_exchange *);
+void	khttpd_exchange_set_ops(struct khttpd_exchange *, 
+	    struct khttpd_exchange_ops *, void *);
+const char *
+	khttpd_exchange_target(struct khttpd_exchange *);
+size_t	khttpd_exchange_target_length(struct khttpd_exchange *);
+bool	khttpd_exchange_request_is_chunked(struct khttpd_exchange *);
+bool	khttpd_exchange_response_is_chunked(struct khttpd_exchange *);
+size_t	khttpd_exchange_request_content_length(struct khttpd_exchange *);
+bool	khttpd_exchange_has_request_content_length(struct khttpd_exchange *);
+bool	khttpd_exchange_has_response_content_length(struct khttpd_exchange *);
+bool	khttpd_exchange_request_content_type(struct khttpd_exchange *_xchg,
 	    struct sbuf *_dst);
+bool	khttpd_exchange_is_json_request(struct khttpd_exchange *, bool);
 const char *
 	khttpd_exchange_request_header(struct khttpd_exchange *_exchange,
 	    size_t *_size_out);
-bool khttpd_exchange_is_request_media_type_json(struct khttpd_exchange *,
-	bool);
-void khttpd_exchange_enable_chunked_transfer(struct khttpd_exchange *exchange);
-void khttpd_exchange_clear_response_header(struct khttpd_exchange *_exchange);
-void khttpd_exchange_add_response_field(struct khttpd_exchange *exchange,
-    const char *field, const char *value_fmt, ...);
-void khttpd_exchange_add_response_field_line(struct khttpd_exchange *_exchange,
-    const char *_begin, const char *_end);
-void khttpd_exchange_add_response_field_mbuf(struct khttpd_exchange *_exchange,
-    const struct khttpd_mbuf_pos *_begin, const struct khttpd_mbuf_pos *_end);
-void khttpd_exchange_vadd_response_field(struct khttpd_exchange *exchange,
-    const char *field, const char *value_fmt, va_list va);
-void khttpd_exchange_set_response_content_length
-    (struct khttpd_exchange *exchange, off_t length);
-bool khttpd_exchange_has_response_content_length(struct khttpd_exchange *);
-void khttpd_exchange_close(struct khttpd_exchange *exchange);
-void khttpd_exchange_set_response_body(struct khttpd_exchange *exchange,
-    struct mbuf *data);
-void khttpd_exchange_set_response_body_json(struct khttpd_exchange *exchange,
-    struct khttpd_mbuf_json *response);
-bool khttpd_exchange_set_response_body_problem_json
-    (struct khttpd_exchange *exchange, int status,
-     struct khttpd_mbuf_json *info);
-void khttpd_exchange_set_error_response_body(struct khttpd_exchange *, int,
-    struct khttpd_mbuf_json *);
-void khttpd_exchange_respond(struct khttpd_exchange *exchange, int status);
-void khttpd_exchange_respond_with_reason(struct khttpd_exchange *_exchange,
-    int _status, const char *_reason);
-void khttpd_exchange_reject(struct khttpd_exchange *exchange);
-void khttpd_exchange_reset(struct khttpd_exchange *exchange);
-void khttpd_exchange_options(struct khttpd_exchange *);
-void khttpd_exchange_method_not_allowed(struct khttpd_exchange *);
-
-// XXX The following functions should be safe to call always.  Khttpd_http
-// should not assume that the stream doesn't call
-// data_is_available/clear_to_send handlers for correct functioning.
-void khttpd_exchange_continue_sending(struct khttpd_exchange *);
-void khttpd_exchange_continue_receiving(struct khttpd_exchange *);
-
-struct khttpd_stream *khttpd_exchange_get_stream(struct khttpd_exchange *);
-struct khttpd_socket *
-	khttpd_exchange_socket(struct khttpd_exchange *_exchange);
+void	khttpd_exchange_enable_chunked_response(struct khttpd_exchange *);
+void	khttpd_exchange_clear_response_header(struct khttpd_exchange *_xchg);
+void	khttpd_exchange_add_response_field(struct khttpd_exchange *_xchg,
+	    const char *_field, const char *_fmt, ...);
+void	khttpd_exchange_add_response_field_line(struct khttpd_exchange *_xchg,
+	    const char *_begin, const char *_end);
+void	khttpd_exchange_vadd_response_field(struct khttpd_exchange *_xchg,
+	    const char *_field, const char *_fmt, va_list _args);
+void	khttpd_exchange_set_response_content_length
+	    (struct khttpd_exchange *_xchg, off_t _length);
+void	khttpd_exchange_close(struct khttpd_exchange *_xchg);
+void	khttpd_exchange_set_response_body(struct khttpd_exchange *_xchg,
+	    struct mbuf *_data);
+void	khttpd_exchange_set_response_body_json(struct khttpd_exchange *_xchg,
+	    struct khttpd_mbuf_json *_response);
+bool	khttpd_exchange_set_response_body_problem_json
+	    (struct khttpd_exchange *_xchg, int _status,
+	    struct khttpd_mbuf_json *_info);
+void	khttpd_exchange_set_error_response_body(struct khttpd_exchange *, int,
+	    struct khttpd_mbuf_json *);
+void	khttpd_exchange_respond(struct khttpd_exchange *_xchg, int _status);
+void	khttpd_exchange_respond_immediately(struct khttpd_exchange *_xchg,
+	    int _status);
+void	khttpd_exchange_reject(struct khttpd_exchange *_xchg);
+void	khttpd_exchange_reset(struct khttpd_exchange *_xchg);
+void	khttpd_exchange_continue_sending(struct khttpd_exchange *);
+void	khttpd_exchange_continue_receiving(struct khttpd_exchange *);
 void	khttpd_http_accept_http_client(struct khttpd_port *_port);
 void	khttpd_http_accept_https_client(struct khttpd_port *_port);
-
-void khttpd_exchange_check_invariants(struct khttpd_exchange *exchange);
-
-#endif	/* _KERNEL */

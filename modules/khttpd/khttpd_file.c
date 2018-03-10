@@ -98,7 +98,6 @@ struct khttpd_file_get_exchange_data {
 	off_t		xmit_residual;		     /* (e) */
 	off_t		end_offset;		     /* (o) */
 	off_t		io_offset;		     /* (p) */
-	off_t		io_size;		     /* (p) */
 	struct khttpd_exchange *exchange;	     /* (o) */
 	struct khttpd_job *io_job;		     /* (o) */
 
@@ -106,6 +105,7 @@ struct khttpd_file_get_exchange_data {
 	struct file	*fp;	     /* (o) */
 	struct vm_object *object;    /* (o) */
 	struct vm_page	**pages;     /* (p) */
+	unsigned	io_size;     /* (p) */
 	int		npages;	     /* (p) */
 	int		in_progress; /* (l) */
 	unsigned	paused:1;    /* (l) */
@@ -372,7 +372,7 @@ khttpd_file_read_file_done(void *arg, vm_page_t *pages, int count, int error)
 }
 
 static boolean_t
-khttpd_file_is_valid_page(struct vm_page *pg, int pageoff, off_t io_size,
+khttpd_file_is_valid_page(struct vm_page *pg, int pageoff, unsigned io_size,
     int i, int n)
 {
 
@@ -391,9 +391,9 @@ khttpd_file_read_file(void *arg)
 	struct vm_object *object;
 	struct vnode *vp;
 	struct vm_page *pg, **pages;
-	off_t io_offset, io_size;
+	off_t io_offset;
 	vm_pindex_t si;
-	unsigned pageoff;
+	unsigned io_size, pageoff;
 	int count, i, j, rahead, after, npages;
 	int rv, flags;
 	boolean_t no_io;
@@ -505,8 +505,7 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 	struct mbuf *hd, *mb, *lmb;
 	struct sf_buf *sf;
 	struct vm_page **pages;
-	off_t io_size;
-	u_int len;
+	unsigned io_size, len;
 	int error, i, n, pageoff;
 
 	KHTTPD_ENTRY("khttpd_file_get_exchange_get(%p,%p,%#x)",
@@ -520,18 +519,16 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		return (0);
 	}
 
+	if (data->io_size == 0) {
+		data->io_size = MIN(space, data->xmit_residual);
+		khttpd_file_read_file(data);
+	}
+
 	mtx_lock(&data->lock);
 
 	if (data->in_progress != 0) {
 		data->paused = TRUE;
 		mtx_unlock(&data->lock);
-
-		/*
-		 * It's safe for I/O thread to call
-		 * khttpd_http_continue_receiving before the caller of this
-		 * function completes because khttpd_event guarantees that the
-		 * execution of the handler of an event is serialized.
-		 */
 		return (EWOULDBLOCK);
 	}
 
@@ -539,8 +536,9 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 
 	error = data->error;
 	if (error != 0) {
-		khttpd_problem_log_new(&logent, LOG_ERR,
-		    "io_error", "I/O error");
+		khttpd_mbuf_json_copy(&logent,
+		    khttpd_exchange_log_entry(exchange));
+		khttpd_problem_set(&logent, LOG_ERR, "io_error", "I/O error");
 		khttpd_problem_set_detail(&logent, "file read failure");
 		khttpd_problem_set_errno(&logent, error);
 
@@ -555,7 +553,7 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		khttpd_mbuf_json_format(&logent, FALSE, "%jd",
 		    (intmax_t)data->io_size);
 
-		khttpd_exchange_error(exchange, &logent);
+		khttpd_http_error(&logent);
 		return (error);
 	}
 
@@ -595,19 +593,18 @@ retry:
 	}
 	*data_out = hd;
 
-	KASSERT(0 < space, ("space is %#zx, is not greater than 0", space));
-
-	KASSERT(m_length(hd, NULL) == data->io_size,
-	    ("m_length(mbufs[0], NULL)=%#x, data->io_size=%#zx",
-		m_length(hd, NULL), data->io_size));
-
 	len = data->io_size;
 	data->xmit_residual -= len;
 	data->io_offset += len;
 
+	KASSERT(0 < len, ("data->io_size == 0"));
+	KASSERT(0 < space, ("space is %#zx, is not greater than 0", space));
+	KASSERT(m_length(hd, NULL) == len,
+	    ("m_length(mbufs[0], NULL)=%#x, data->io_size=%#x",
+		m_length(hd, NULL), len));
+
 	if (data->io_offset < data->end_offset) {
-		data->io_size = MIN(MAXPHYS, MIN(space,
-			data->end_offset - data->io_offset));
+		data->io_size = MIN(space, data->end_offset - data->io_offset);
 		khttpd_file_read_file(data);
 	}
 
@@ -622,15 +619,13 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	struct khttpd_file_get_exchange_data *data;
 	struct khttpd_file_location_data *location_data;
 	struct khttpd_location *location;
-	struct khttpd_stream *stream;
 	struct thread *td;
 	const char *target, *end;
-	size_t space;
 	int error, status;
 	boolean_t mime_type_specified, charset_specified;
 
 	KHTTPD_ENTRY("khttpd_file_get(%p), target=\"%s\"", exchange,
-	    khttpd_ktr_printf("%s", khttpd_exchange_get_target(exchange)));
+	    khttpd_ktr_printf("%s", khttpd_exchange_target(exchange)));
 
 	td = curthread;
 
@@ -650,7 +645,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
 
 	target = khttpd_exchange_suffix(exchange);
-	KASSERT(khttpd_exchange_get_target(exchange) < target &&
+	KASSERT(khttpd_exchange_target(exchange) < target &&
 	    target[-1] == '/', ("target[-1]=%#x", target[-1]));
 	--target;
 
@@ -705,12 +700,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	    data->xmit_residual);
 	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
 
-	stream = khttpd_exchange_get_stream(exchange);
-	khttpd_stream_send_bufstat(stream, NULL, NULL, &space);
-
-	data->io_size = MIN(space, data->xmit_residual);
-	if (0 < data->io_size)
-		khttpd_file_read_file(data);
 	return;
 
  not_found:

@@ -985,7 +985,7 @@ khttpd_ctrl_json_io_method(struct khttpd_exchange *exchange,
 		goto error;
 	}
 
-	if (!khttpd_exchange_is_request_media_type_json(exchange, true)) {
+	if (!khttpd_exchange_is_json_request(exchange, true)) {
 		status = KHTTPD_STATUS_UNSUPPORTED_MEDIA_TYPE;
 		goto error;
 	}

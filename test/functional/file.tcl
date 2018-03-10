@@ -183,6 +183,8 @@ test::define file_dot_segments test::khttpd_file_testcase {
 
 # TODO
 
+# HEAD method
+
 # If the target ends with /, the resource should be a directory.
 # Otherwise, the server should reply with 'Not Found' response.
 

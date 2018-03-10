@@ -19,9 +19,6 @@
 
 - Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
 
-- Currently, khttpd_file_get_exchange_get() limits io_size to MAXPHYS.
-  See whether this is necessary or not.
-
 - bug: FastCGI reconfiguration (PUT to fastcgi location resource) crashes the kernel.
 
 - the kernel should restrict the time waiting the client to close the
