@@ -58,8 +58,6 @@ struct khttpd_exchange_ops {
 	void (*put)(struct khttpd_exchange *, void *, struct mbuf *, bool *);
 };
 
-void khttpd_http_set_log(enum khttpd_http_log_id, struct khttpd_log *);
-struct khttpd_log *khttpd_http_get_log(enum khttpd_http_log_id);
 void	khttpd_http_error(struct khttpd_mbuf_json *);
 
 struct khttpd_mbuf_json *

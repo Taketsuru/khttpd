@@ -339,7 +339,14 @@ void
 khttpd_mbuf_json_new(struct khttpd_mbuf_json *dst)
 {
 
-	dst->mbuf = m_get(M_WAITOK, MT_DATA);
+	khttpd_mbuf_json_new_with_mbuf(dst, m_get(M_WAITOK, MT_DATA));
+}
+
+void
+khttpd_mbuf_json_new_with_mbuf(struct khttpd_mbuf_json *dst, struct mbuf *m)
+{
+
+	dst->mbuf = m;
 	dst->is_first = true;
 	dst->is_property_value = false;
 }

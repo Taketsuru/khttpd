@@ -51,6 +51,8 @@ struct mbuf *
 int	khttpd_mbuf_printf(struct mbuf *_dst, const char *_fmt, ...);
 int	khttpd_mbuf_vprintf(struct mbuf *_dst, const char *_fmt, va_list _vl);
 void	khttpd_mbuf_json_new(struct khttpd_mbuf_json *_dst);
+void	khttpd_mbuf_json_new_with_mbuf(struct khttpd_mbuf_json *_dst,
+	    struct mbuf *_m);
 void	khttpd_mbuf_json_copy(struct khttpd_mbuf_json *_dst,
 	    struct khttpd_mbuf_json *_src);
 struct mbuf *

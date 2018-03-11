@@ -17,8 +17,6 @@
 
 - Access control infrastructure
 
-- Add WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, ...) to appropriate functions;
-
 - bug: FastCGI reconfiguration (PUT to fastcgi location resource) crashes the kernel.
 
 - the kernel should restrict the time waiting the client to close the
@@ -32,5 +30,6 @@
 - make khttpd_test multi-module aware
 
 - Atomic server reconfiguration.
+    - Log construction functions should be redesigned.
 
 - Add configuration parameter 'translucent' to khttpd_file location handler.

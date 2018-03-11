@@ -31,17 +31,19 @@
 #error This file is not for userland code.
 #endif
 
-#include <sys/param.h>
+#include <sys/types.h>
 
 struct mbuf;
-struct khttpd_log;
+struct sockaddr;
 
-struct khttpd_log *
-	khttpd_log_new(void);
-void	khttpd_log_delete(struct khttpd_log *_log);
-void	khttpd_log_set_fd(struct khttpd_log *_log, int _fd);
-void	khttpd_log_close(struct khttpd_log *_log);
-void	khttpd_log_put(struct khttpd_log *_log, struct mbuf *_m);
-void	khttpd_log_set_name(struct khttpd_log *_log, const char *_name);
-const char *
-	khttpd_log_get_name(struct khttpd_log *_log);
+enum {
+	khttpd_log_chan_error,
+	khttpd_log_chan_access,
+	khttpd_log_chan_count
+};
+
+void	khttpd_log_set_null(int _chan);
+int	khttpd_log_set_file(int _chan, const char *_path, int _mode);
+int	khttpd_log_set_fluentd(int _chan, struct sockaddr *_addr,
+	    const char *tag);
+void	khttpd_log_put(int _chan, struct mbuf *_m);

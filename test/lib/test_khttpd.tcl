@@ -297,10 +297,17 @@ namespace eval test {
 
 	method create_config {rewriters ports servers locations} {
 	    set logs_dict [dict create {*}[my logs]]
-	    set access_log_conf \
-		[my create_log_file_conf [dict get $logs_dict access-log]]
-	    set error_log_conf \
-		[my create_log_file_conf [dict get $logs_dict error-log]]
+	    if {1} {
+		set access_log_conf \
+		    [my create_log_file_conf [dict get $logs_dict access-log]]
+		set error_log_conf \
+		    [my create_log_file_conf [dict get $logs_dict error-log]]
+	    } else {
+		set access_log_conf \
+		    [my create_log_fluentd_conf khttpd.access]
+		set error_log_conf \
+		    [my create_log_fluentd_conf khttpd.error]
+	    }
 	    set rewriters_conf [json::write array {*}$rewriters]
 	    set ports_conf [json::write array {*}$ports]
 	    set servers_conf [json::write array {*}$servers]
@@ -313,9 +320,21 @@ namespace eval test {
 			locations $locations_conf]
 	}
 
+	method create_log_fluentd_conf {tag} {
+	    variable ::test::host_addr
+	    set addr_list [list family [json::write string inet]]
+	    lappend addr_list address [json::write string $host_addr]
+	    lappend addr_list port 24224
+	    set addr_json [json::write object {*}$addr_list]
+
+	    return [json::write object type [json::write string "fluentd"] \
+			address $addr_json \
+			tag [json::write string $tag]]
+	}
+
 	method create_log_file_conf {path} {
 	    return [json::write object type [json::write string "file"] \
-		    path [json::write string [my remote_path $path]]]
+			path [json::write string [my remote_path $path]]]
 	}
 
 	method connect {} {
@@ -486,7 +505,7 @@ namespace eval test {
 	}
 
 	method _config {} {
-	    return  [$_khttpd create_config [my _create_rewriters_config] \
+	    return [$_khttpd create_config [my _create_rewriters_config] \
 			[my _create_ports_config] [my _create_servers_config] \
 			[my _create_locations_config]]
 	}

@@ -398,16 +398,8 @@ static void
 khttpd_fcgi_report_error(struct khttpd_fcgi_upstream *upstream,
     struct khttpd_mbuf_json *entry)
 {
-	struct khttpd_log *log;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, upstream, entry);
-
-	log = khttpd_http_get_log(KHTTPD_HTTP_LOG_ERROR);
-	if (log == NULL) {
-		KHTTPD_NOTE("%s no log", __func__);
-		m_freem(khttpd_mbuf_json_move(entry));
-		return;
-	}
 
 	khttpd_mbuf_json_property(entry, "timestamp");
 	khttpd_mbuf_json_now(entry);
@@ -416,7 +408,7 @@ khttpd_fcgi_report_error(struct khttpd_fcgi_upstream *upstream,
 	khttpd_mbuf_json_sockaddr(entry,
 	    (struct sockaddr *)&upstream->sockaddr);
 
-	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
+	khttpd_http_error(entry);
 }
 
 static void

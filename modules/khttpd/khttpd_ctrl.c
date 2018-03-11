@@ -1537,15 +1537,90 @@ khttpd_location_type_get_from_property(struct khttpd_location_type **type_out,
 }
 
 static int
-khttpd_ctrl_log_new(struct khttpd_log **log_out, 
-    struct khttpd_mbuf_json *output,
+khttpd_ctrl_log_set_file(int chan, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
 	struct khttpd_problem_property prop_spec;
-	struct thread *td;
-	struct khttpd_log *log;
-	const char *type_str, *path_str;
-	int error, fd, status;
+	const char *path_str;
+	int error, status;
+
+	KHTTPD_ENTRY("%s(,%p,%s,%p)", __func__, output,
+	    khttpd_problem_ktr_print_property(input_prop_spec), input);
+
+	status = khttpd_webapi_get_string_property(&path_str, "path",
+	    input_prop_spec, input, output, false);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+
+	prop_spec.name = "path";
+
+	if (path_str[0] != '/') {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output,
+		    "absolute path name is expected.");
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+
+	error = khttpd_log_set_file(chan, path_str, 0644);
+	if (error != 0) {
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output, "file open error");
+		khttpd_problem_set_errno(output, error);
+		return (status);
+	}
+
+	return (KHTTPD_STATUS_OK);
+}
+
+static int
+khttpd_ctrl_log_set_fluentd(int chan, struct khttpd_mbuf_json *output,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
+{
+	struct khttpd_problem_property prop_spec;
+	struct sockaddr_storage addr;
+	const char *tag_str;
+	int error, status;
+
+	KHTTPD_ENTRY("%s(,%p,%s,%p)", __func__, output,
+	    khttpd_problem_ktr_print_property(input_prop_spec), input);
+
+	status = khttpd_webapi_get_string_property(&tag_str, "tag",
+	    input_prop_spec, input, output, false);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+
+	bzero(&addr, sizeof(addr));
+	status = khttpd_webapi_get_sockaddr_property((struct sockaddr *)&addr,
+	    sizeof(addr), "address", input_prop_spec, input, output, false);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+
+	error = khttpd_log_set_fluentd(chan, (struct sockaddr *)&addr, tag_str);
+	if (error != 0) {
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		khttpd_problem_response_begin(output, status, NULL, NULL);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output, "fluentd connection error");
+		khttpd_problem_set_errno(output, error);
+		return (status);
+	}
+
+	return (KHTTPD_STATUS_OK);
+}
+
+static int
+khttpd_ctrl_log_set(int chan, struct khttpd_mbuf_json *output,
+    struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
+{
+	struct khttpd_problem_property prop_spec;
+	const char *type_str;
+	int status;
 
 	KHTTPD_ENTRY("%s(,%p,%s,%p)", __func__, output,
 	    khttpd_problem_ktr_print_property(input_prop_spec), input);
@@ -1561,50 +1636,23 @@ khttpd_ctrl_log_new(struct khttpd_log **log_out,
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
 		return (status);
 
-	prop_spec.link = input_prop_spec;
+	if (strcmp(type_str, "file") == 0) {
+		status = khttpd_ctrl_log_set_file(chan, output,
+		    input_prop_spec, input);
 
-	if (strcmp(type_str, "file") != 0) {
+	} else if (strcmp(type_str, "fluentd") == 0) {
+		status = khttpd_ctrl_log_set_fluentd(chan, output,
+		    input_prop_spec, input);
+
+	} else {
+		prop_spec.link = input_prop_spec;
 		prop_spec.name = "type";
 		khttpd_problem_invalid_value_response_begin(output);
 		khttpd_problem_set_property(output, &prop_spec);
-		return (KHTTPD_STATUS_BAD_REQUEST);
-	}
-
-	status = khttpd_webapi_get_string_property(&path_str, "path",
-	    input_prop_spec, input, output, false);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-		return (status);
-
-	prop_spec.name = "path";
-
-	if (path_str[0] != '/') {
-		khttpd_problem_invalid_value_response_begin(output);
-		khttpd_problem_set_property(output, &prop_spec);
-		khttpd_problem_set_detail(output,
-		    "absolute path name is expected.");
-		return (KHTTPD_STATUS_BAD_REQUEST);
-	}
-
-	td = curthread;
-	error = kern_openat(td, AT_FDCWD, (char *)path_str, UIO_SYSSPACE, 
-	    O_WRONLY | O_APPEND | O_CREAT, 0644);
-	if (error != 0) {
 		status = KHTTPD_STATUS_BAD_REQUEST;
-		khttpd_problem_response_begin(output, status, NULL, NULL);
-		khttpd_problem_set_property(output, &prop_spec);
-		khttpd_problem_set_detail(output, "file open error");
-		khttpd_problem_set_errno(output, error);
-		return (status);
 	}
-	fd = td->td_retval[0];
 
-	log = khttpd_log_new();
-	khttpd_log_set_fd(log, fd);
-	khttpd_log_set_name(log, path_str);
-
-	*log_out = log;
-
-	return (KHTTPD_STATUS_OK);
+	return (status);
 }
 
 static int
@@ -2673,7 +2721,6 @@ khttpd_ctrl_start_helper(void *arg)
 	struct khttpd_json *args_j, *rewriters_j, *ports_j;
 	struct khttpd_json *servers_j, *locations_j;
 	struct khttpd_json *access_log_j, *error_log_j;
-	struct khttpd_log *access_log, *error_log;
 	struct mbuf *data, *mb, *tmb;
 	int status;
 
@@ -2684,7 +2731,6 @@ khttpd_ctrl_start_helper(void *arg)
 	prop_spec.link = NULL;
 	khttpd_mbuf_json_new(&output);
 	args_j = NULL;
-	access_log = error_log = NULL;
 
 	status = khttpd_ctrl_parse_json(&args_j, &output, data);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
@@ -2699,24 +2745,32 @@ khttpd_ctrl_start_helper(void *arg)
 
 	prop_spec.name = "accessLog";
 	access_log_j = khttpd_json_object_get(args_j, "accessLog");
-	if (access_log_j != NULL) {
-		status = khttpd_ctrl_log_new(&access_log, &output, &prop_spec,
-		    access_log_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
-		khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, access_log);
-		access_log = NULL;
+	if (access_log_j == NULL) {
+		khttpd_problem_no_value_response_begin(&output);
+		khttpd_problem_set_property(&output, &prop_spec);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto quit;
+	}
+
+	status = khttpd_ctrl_log_set(khttpd_log_chan_access,
+	    &output, &prop_spec, access_log_j);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		goto quit;
 	}
 
 	prop_spec.name = "errorLog";
 	error_log_j = khttpd_json_object_get(args_j, "errorLog");
-	if (error_log_j != NULL) {
-		status = khttpd_ctrl_log_new(&error_log, &output, &prop_spec,
-		    error_log_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
-			goto quit;
-		khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, error_log);
-		error_log = NULL;
+	if (error_log_j == NULL) {
+		khttpd_problem_no_value_response_begin(&output);
+		khttpd_problem_set_property(&output, &prop_spec);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto quit;
+	}
+
+	status = khttpd_ctrl_log_set(khttpd_log_chan_error, &output,
+	    &prop_spec, error_log_j);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		goto quit;
 	}
 
 	prop_spec.name = "rewriters";
@@ -2779,9 +2833,6 @@ khttpd_ctrl_start_helper(void *arg)
 	sx_xunlock(&khttpd_ctrl_lock);
 
  quit:
-	khttpd_log_delete(access_log);
-	khttpd_log_delete(error_log);
-
 	khttpd_json_delete(args_j);
 
 	if (KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
@@ -3117,8 +3168,8 @@ khttpd_ctrl_exit(void)
 
 	KHTTPD_ENTRY("%s()", __func__);
 
-	khttpd_http_set_log(KHTTPD_HTTP_LOG_ERROR, NULL);
-	khttpd_http_set_log(KHTTPD_HTTP_LOG_ACCESS, NULL);
+	khttpd_log_set_null(khttpd_log_chan_error);
+	khttpd_log_set_null(khttpd_log_chan_access);
 
 	EVENTHANDLER_DEREGISTER(khttpd_main_shutdown,
 	    khttpd_ctrl_shutdown_first_tag);

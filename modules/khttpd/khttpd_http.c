@@ -173,7 +173,6 @@ static void khttpd_session_clear_to_send(struct khttpd_stream *, ssize_t);
 static size_t khttpd_header_size_limit = 16384;
 static size_t khttpd_chunkbuf_size = 128;
 static uma_zone_t khttpd_http_client_zone;
-static struct khttpd_log * volatile khttpd_http_logs[KHTTPD_HTTP_LOG_END];
 static const char khttpd_crlf[] = { '\r', '\n' };
 
 static struct khttpd_stream_up_ops khttpd_session_ops = {
@@ -184,37 +183,12 @@ static struct khttpd_stream_up_ops khttpd_session_ops = {
 
 static struct khttpd_exchange_ops khttpd_exchange_null_ops;
 
-void
-khttpd_http_set_log(enum khttpd_http_log_id id, struct khttpd_log *log)
-{
-	struct khttpd_log *old;
-
-	KHTTPD_ENTRY("%s(%d,%p)", __func__, id, log);
-	old = (struct khttpd_log *)atomic_swap_ptr
-	    ((volatile uintptr_t *)&khttpd_http_logs[id], (uintptr_t)log);
-	khttpd_log_delete(old);
-}
-
-struct khttpd_log *
-khttpd_http_get_log(enum khttpd_http_log_id id)
-{
-
-	return (khttpd_http_logs[id]);
-}
-
 static void
-khttpd_http_log(int type, struct khttpd_mbuf_json *entry)
+khttpd_http_log(int chan, struct khttpd_mbuf_json *entry)
 {
-	struct khttpd_log *log;
-
-	log = khttpd_http_logs[type];
-	if (log == NULL) {
-		m_freem(khttpd_mbuf_json_move(entry));
-		return;
-	}
 
 	khttpd_mbuf_json_object_end(entry);
-	khttpd_log_put(log, khttpd_mbuf_json_move(entry));
+	khttpd_log_put(chan, khttpd_mbuf_json_move(entry));
 }
 
 static struct khttpd_session *
@@ -314,7 +288,7 @@ khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 	khttpd_mbuf_json_property(&exchange->log_entry, "completionTime");
 	khttpd_mbuf_json_now(&exchange->log_entry);
 
-	khttpd_http_log(KHTTPD_HTTP_LOG_ACCESS, &exchange->log_entry);
+	khttpd_http_log(khttpd_log_chan_access, &exchange->log_entry);
 
 	if (full) {
 		session->xmit_waiting_for_drain = true;
@@ -1615,7 +1589,7 @@ khttpd_session_error(struct khttpd_stream *stream,
     struct khttpd_mbuf_json *entry)
 {
 
-	khttpd_http_log(KHTTPD_HTTP_LOG_ERROR, entry);
+	khttpd_http_log(khttpd_log_chan_error, entry);
 }
 
 static void
@@ -1782,7 +1756,7 @@ void
 khttpd_http_error(struct khttpd_mbuf_json *entry)
 {
 
-	khttpd_http_log(KHTTPD_HTTP_LOG_ERROR, entry);
+	khttpd_http_log(khttpd_log_chan_error, entry);
 }
 
 struct khttpd_mbuf_json *
