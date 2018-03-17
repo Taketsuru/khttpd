@@ -189,6 +189,7 @@ struct khttpd_fcgi_upstream {
 
 #define khttpd_fcgi_upstream_zctor_end max_conns
 	int		max_conns;
+	int		max_conns_config;
 };
 
 TAILQ_HEAD(khttpd_fcgi_upstream_tailq, khttpd_fcgi_upstream);
@@ -430,14 +431,22 @@ khttpd_fcgi_report_connection_error(struct khttpd_fcgi_upstream *upstream,
 }
 
 static void
+khttpd_fcgi_set_protocol_error(struct khttpd_mbuf_json *entry)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, entry);
+	khttpd_problem_set(entry, LOG_ERR, "fcgi_protocol_error",
+	    "FastCGI protocol error");
+}
+
+static void
 khttpd_fcgi_protocol_error_new(struct khttpd_mbuf_json *entry)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, entry);
 	khttpd_mbuf_json_new(entry);
 	khttpd_mbuf_json_object_begin(entry);
-	khttpd_problem_log_new(entry, LOG_ERR, "fcgi_protocol_error",
-	    "FastCGI protocol error");
+	khttpd_fcgi_set_protocol_error(entry);
 }
 
 static void
@@ -667,13 +676,25 @@ static bool
 khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
     struct mbuf *data)
 {
+	struct khttpd_mbuf_json logent;
 	struct mbuf *ptr, *next;
 	char *begin, *cp, *bolp, *eolp;
 	u_int len, off;
 	int status;
 	bool result;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, conn);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, conn, data);
+
+	if (data == NULL) {
+		khttpd_mbuf_json_copy(&logent,
+		    khttpd_exchange_log_entry(conn->xchg_data->exchange));
+		khttpd_fcgi_set_protocol_error(&logent);
+		khttpd_problem_set_detail(&logent,
+		    "stdout is closed prematurely");
+		khttpd_fcgi_report_error(conn->upstream, &logent);
+		khttpd_fcgi_abort_exchange(conn);
+		return (false);
+	}
 
 	ptr = data;
 	off = 0;
@@ -694,8 +715,9 @@ khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
 		sbuf_bcat(&conn->line, begin, len);
 
 		if (cp == NULL) {
-			if ((next = ptr->m_next) == NULL)
+			if ((next = ptr->m_next) == NULL) {
 				break;
+			}
 
 			m_free(ptr);
 			ptr = next;
@@ -1570,8 +1592,8 @@ khttpd_fcgi_get_values_result(struct khttpd_fcgi_upstream *upstream,
 {
 	char valbuf[16];
 	char namebuf[KHTTPD_FCGI_LONGEST_VALUE_NAME + 1];
+	intmax_t val;
 	struct khttpd_fcgi_location_data *loc_data;
-	const char *cp;
 	u_int pos, end, nameoff, valoff;
 	u_int namelen, vallen;
 	int error, *valptr, max_conns, max_reqs;
@@ -1582,14 +1604,14 @@ khttpd_fcgi_get_values_result(struct khttpd_fcgi_upstream *upstream,
 	error = 0;
 	pos = 0;
 	end = m_length(data, NULL);
-	KHTTPD_NOTE("%s end %d", __func__, end);
 	max_conns = max_reqs = -1;
 	while (pos < end) {
 		error = khttpd_fcgi_parse_name_value_pair(data, pos,
 		    &nameoff, &namelen, &valoff, &vallen, &pos);
 
 		if (sizeof(namebuf) <= namelen || sizeof(valbuf) <= vallen) {
-			KHTTPD_NOTE("%s %u EINVAL", __func__, __LINE__);
+			KHTTPD_NOTE("%s %u EINVAL %zd %zd", __func__, __LINE__,
+			    namelen, vallen);
 			error = EINVAL;
 			break;
 		}
@@ -1597,34 +1619,48 @@ khttpd_fcgi_get_values_result(struct khttpd_fcgi_upstream *upstream,
 		m_copydata(data, nameoff, namelen, namebuf);
 		namebuf[namelen] = '\0';
 		m_copydata(data, valoff, vallen, valbuf);
-		valbuf[vallen] = '\0';
 
-		if (strcmp(namebuf, khttpd_fcgi_max_conns) == 0)
+		if (strcmp(namebuf, khttpd_fcgi_max_conns) == 0) {
 			valptr = &max_conns;
-		else if (strcmp(namebuf, khttpd_fcgi_max_reqs) == 0)
+		} else if (strcmp(namebuf, khttpd_fcgi_max_reqs) == 0) {
 			valptr = &max_reqs;
-		else {
+		} else {
+			KHTTPD_NOTE("%s %u EINVAL \"%s\"", __func__, __LINE__,
+			    khttpd_ktr_printf("%s", namebuf));
+			error = EINVAL;
+			break;
+		}
+
+		if (*valptr != -1) {
 			KHTTPD_NOTE("%s %u EINVAL", __func__, __LINE__);
 			error = EINVAL;
 			break;
 		}
 
-		for (cp = valbuf; *cp != '\0'; ++cp)
-			if (!isdigit(*cp)) {
-				KHTTPD_NOTE("%s %u EINVAL", __func__, __LINE__);
-				error = EINVAL;
-				goto end;
-			}
+		error = khttpd_parse_digits(&val, valbuf, valbuf + vallen);
+		if (error != 0 || val <= 0 || INT_MAX < val) {
+			KHTTPD_NOTE("%s %u EINVAL %jd", __func__, __LINE__,
+			    val);
+			error = EINVAL;
+			break;
+		}
 
-		sscanf(valbuf, "%d", valptr);
+		*valptr = val;
 	}
- end:
-	KHTTPD_NOTE("%s max_conns %d, max_reqs %d",
-	    __func__, max_conns, max_reqs);
-	max_conns = MIN(max_conns, max_reqs);
+
+	KHTTPD_NOTE("%s error %d, max_conns %d, max_reqs %d",
+	    __func__, error, max_conns, max_reqs);
+
+	if (max_conns == -1) {
+		max_conns = INT_MAX;
+	}
+
+	if (max_reqs == -1) {
+		max_reqs = INT_MAX;
+	}
+
+	max_conns = MIN(upstream->max_conns_config, MIN(max_conns, max_reqs));
 	if (error == 0 && 0 < max_conns) {
-		KHTTPD_NOTE("%s upstream %p, max_conns %d",
-		    __func__, upstream, upstream->max_conns);
 		mtx_lock(&loc_data->lock);
 		upstream->max_conns = max_conns;
 		mtx_unlock(&loc_data->lock);
@@ -1952,6 +1988,7 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 {
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_fcgi_upstream *upstream;
+	int64_t max_conns;
 	int error, status;
 
 	KHTTPD_ENTRY("%s(,%p,...)", __func__, loc_data);
@@ -1965,6 +2002,24 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 	upstream->location_data = loc_data;
 	upstream->max_conns = 1;
 	upstream->state = KHTTPD_FCGI_UPSTREAM_AVAILABLE;
+
+	status = khttpd_webapi_get_integer_property(&max_conns, "maxConns",
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		goto end;
+
+	} else if (status == KHTTPD_STATUS_NO_CONTENT) {
+		max_conns = INT_MAX;
+
+	} else if (max_conns <= 0 || INT_MAX < max_conns) {
+		prop_spec.name = "maxConns";
+		prop_spec.link = input_prop_spec;
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto end;
+	}
+	upstream->max_conns_config = max_conns;
 
 	status = khttpd_webapi_get_sockaddr_property
 	    ((struct sockaddr *)&upstream->sockaddr,
@@ -2057,7 +2112,7 @@ khttpd_fcgi_exchange_dtor(struct khttpd_exchange *exchange, void *arg)
 		}
 
 		if (!conn->header_finished) {
-			KHTTPD_NOTE("%s active", __func__);
+			KHTTPD_NOTE("%s abort_request", __func__);
 			m = m_get(M_WAITOK, MT_DATA);
 			m->m_len = sizeof(struct khttpd_fcgi_hdr);
 			hdr = mtod(m, struct khttpd_fcgi_hdr *);
@@ -2065,9 +2120,7 @@ khttpd_fcgi_exchange_dtor(struct khttpd_exchange *exchange, void *arg)
 			    KHTTPD_FCGI_TYPE_ABORT_REQUEST, 0);
 			khttpd_stream_send(&conn->stream, m,
 			    KHTTPD_STREAM_FLUSH);
-
-		} else
-			khttpd_fcgi_conn_release(conn);
+		}
 	}
 }
 
@@ -2760,6 +2813,10 @@ khttpd_fcgi_location_data_new
 		khttpd_fcgi_location_data_zctor_begin));
 	location_data->fs_path_fd = -1;
 
+	mtx_lock(&khttpd_fcgi_lock);
+	LIST_INSERT_HEAD(&khttpd_fcgi_locations, location_data, liste);
+	mtx_unlock(&khttpd_fcgi_lock);
+
 	status = khttpd_webapi_get_string_property(&str, 
 	    "fsPath", input_prop_spec, input, output, false);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
@@ -2821,18 +2878,15 @@ khttpd_fcgi_location_data_new
 		status = khttpd_fcgi_upstream_new(&upstream, location_data,
 		    &prop_specs[1], khttpd_json_array_get(upstreams_j, i),
 		    output);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 			goto end;
+		}
 
 		LIST_INSERT_HEAD(&location_data->upstreams, upstream, liste);
 
 		sbuf_clear(&sbuf);
 	}
 	sbuf_delete(&sbuf);
-
-	mtx_lock(&khttpd_fcgi_lock);
-	LIST_INSERT_HEAD(&khttpd_fcgi_locations, location_data, liste);
-	mtx_unlock(&khttpd_fcgi_lock);
 
 	*location_data_out = location_data;
 

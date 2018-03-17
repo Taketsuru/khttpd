@@ -74,7 +74,35 @@ namespace eval test {
 	[test::test_driver instance] add_data $name $value
     }
 
-    proc define {testname classname body} {
+    proc define {testname classname args} {
+	set setup ""
+	set teardown ""
+	set body ""
+
+	set nargs [llength $args]
+	for {set i 0} {$i < $nargs} {incr i} {
+	    set arg [lindex $args $i]
+	    switch -glob -- $arg {
+		-setup {
+		    incr i
+		    set setup [lindex $args $i]
+		}
+		-teardown {
+		    incr i
+		    set teardown [lindex $args $i]
+		}
+		-* {
+		    throw [list KHTTPD TEST error] "unknown option $arg"
+		}
+		default {
+		    if {$i != [expr {$nargs - 1}]} {
+			throw [list KHTTPD TEST error] "invalid value $arg"
+		    }
+		    set body $arg
+		}
+	    }
+	}
+
 	set driver [test::test_driver instance]
 	set caller_ns [uplevel 1 namespace current]
 
@@ -94,9 +122,17 @@ namespace eval test {
 	    }
 	}
 
-	set test_class [oo::class create $testname "
-		superclass $classname
-		method _test {} {$body}"]
+	set definition "\nsuperclass $classname\nmethod _test {} {$body}"
+
+	if {$setup ne ""} {
+	    append definition "\nmethod _setup {} {$setup}"
+	}
+
+	if {$teardown ne ""} {
+	    append definition "\nmethod _teardown {} {$teardown}"
+	}
+
+	set test_class [oo::class create $testname $definition]
 
 	try {
 	    set obj [$test_class new]
@@ -413,6 +449,7 @@ namespace eval test {
 		if {$need_teardown} {
 		    set bailed_out [expr {[catch {my _teardown} msg opt] != 0}]
 		    if {$bailed_out} {
+			puts "$msg $opt"
 			puts $chan [my _format_error_options $opt]
 		    }
 		}

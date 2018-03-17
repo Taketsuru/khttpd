@@ -36,6 +36,14 @@ namespace eval test {
     variable target_addr 192.168.56.3
     variable http_port 80
     variable server_software khttpd/0.0
+    variable remote_rel_project_root work/khttpd
+    variable remote_abs_project_root \
+	[file join $::env(HOME) $remote_rel_project_root]
+
+    proc remote_path {path} {
+	variable remote_abs_project_root
+	return [file join $remote_abs_project_root $path]
+    }
 
     proc assert_eof {sock} {
 	test_chan $sock {
@@ -233,8 +241,7 @@ namespace eval test {
     }
 
     oo::class create khttpd {
-	variable handler host loaded module_dirname port \
-	    remote_abs_project_root remote_rel_project_root
+	variable handler host loaded module_dirname port
 
 	constructor {host_arg port_arg} {
 	    set handler ""
@@ -244,9 +251,6 @@ namespace eval test {
 	    set port $port_arg
 	    # Assume that the local and the remote home directory are the same
 	    # with each other.
-	    set remote_rel_project_root work/khttpd
-	    set remote_abs_project_root \
-		[file join $::env(HOME) $remote_rel_project_root]
 	}
 
 	destructor {
@@ -334,7 +338,7 @@ namespace eval test {
 
 	method create_log_file_conf {path} {
 	    return [json::write object type [json::write string "file"] \
-			path [json::write string [my remote_path $path]]]
+			path [json::write string [test::remote_path $path]]]
 	}
 
 	method connect {} {
@@ -391,21 +395,19 @@ namespace eval test {
 	    return $port
 	}
 
-	method remote_path {path} {
-	    return [file join $remote_abs_project_root $path]
-	}
-
 	method run_remotely {cmd input} {
-	    set result [exec -- ssh $host "cd $remote_rel_project_root; $cmd" \
-			    << $input 2>@1]
+	    set exec_error [catch {exec -- ssh $host \
+		"cd $::test::remote_rel_project_root; $cmd" << $input 2>@1} \
+			result options]
 	    if {$result != ""} {
 		set log [[test::test_driver instance] log_chan]
 		puts $log $result
 	    }
+	    test::assume {$exec_error == 0}
 	}
 
 	method start {config} {
-	    my run_remotely "sudo usr.sbin/khttpdctl/khttpdctl load -" $config
+	    my run_remotely "sudo usr.sbin/khttpdctl/khttpdctl start -" $config
 	}
 
 	method stop {} {
@@ -478,12 +480,13 @@ namespace eval test {
 
 	method with_connection {var body} {
 	    set sock [$_khttpd connect]
-	    try {
-		return [uplevel set [list $var] [list $sock]\; $body]
-
-	    } finally {
-		close $sock
+	    set code [catch {uplevel set [list $var] [list $sock]\; $body} \
+			  result options]
+	    if {2 <= $code} {
+		dict incr options -level 1
 	    }
+	    close $sock
+	    return -options $options $result
 	}
 
 	method _create_ports_config {} {
@@ -605,7 +608,7 @@ namespace eval test {
 	    set khttpd [my khttpd]
 	    return [list [test::create_location_conf \
 			      [test::uuid_new] khttpd_file [my server_id] / \
-			      fsPath [$khttpd remote_path [my fs_path]]]]
+			      fsPath [test::remote_path [my fs_path]]]]
 	}
     }
 }

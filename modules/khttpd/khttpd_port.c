@@ -673,12 +673,10 @@ khttpd_socket_migrate(struct khttpd_socket *socket,
 	rm_assert(&socket->migration_lock, RA_WLOCKED);
 	mtx_assert(&curworker->lock, MA_OWNED);
 
-	njobs = 0;
 	jobp = jobs;
 
 	if (auxjob != NULL) {
 		*jobp++ = auxjob;
-		++njobs;
 	}
 
 	prev = STAILQ_FIRST(&curworker->queue);
@@ -687,12 +685,10 @@ khttpd_socket_migrate(struct khttpd_socket *socket,
 		if (job == &socket->rcv_job.job ||
 		    job == &socket->snd_job.job ||
 		    job == &socket->rst_job) {
-			KASSERT(jobp - jobs < njobs, ("jobs overflow"));
+			KASSERT(jobp - jobs < nitems(jobs), ("jobs overflow"));
 			STAILQ_REMOVE_AFTER(&curworker->queue, prev, stqe);
 			job->inqueue = false;
 			*jobp++ = job;
-			if (njobs <= jobp - jobs)
-				break;
 			job = prev;
 		}
 	}
@@ -701,7 +697,8 @@ khttpd_socket_migrate(struct khttpd_socket *socket,
 	socket->worker = newworker;
 
 	mtx_lock(&newworker->lock);
-	need_wakeup = 0 < njobs && STAILQ_EMPTY(&newworker->queue);
+	njobs = jobp - jobs;
+	need_wakeup = jobp != jobs && STAILQ_EMPTY(&newworker->queue);
 	for (i = 0; i < njobs; ++i) {
 		job = jobs[i];
 		STAILQ_INSERT_TAIL(&newworker->queue, job, stqe);
@@ -1861,11 +1858,14 @@ khttpd_port_stop(struct khttpd_port *port)
 	}
 
 	SOCKBUF_LOCK(&so->so_rcv);
-	soupcall_clear(so, SO_RCV);
+	if ((so->so_snd.sb_flags & SB_UPCALL) != 0) {
+		soupcall_clear(so, SO_RCV);
+	}
 	SOCKBUF_UNLOCK(&so->so_rcv);
 
-	if (!khttpd_port_drain_job(port, job))
+	if (!khttpd_port_drain_job(port, job)) {
 		goto again;
+	}
 
 	port->so = NULL;
 	mtx_unlock(&port->lock);

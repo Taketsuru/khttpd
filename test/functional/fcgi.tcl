@@ -89,15 +89,23 @@ namespace eval test {
 
 	variable content_length_max 65535
 
-	proc read_name_value_length {pos_var payload} {
+	variable next_port 32768
+
+	proc dump {data} {
+	    binary scan $data c* bytes
+	    return [join [lmap byte $bytes {
+		format %02x [expr {$byte & 0xff}]}]]
+	}
+
+	proc scan_name_value_length {pos_var contents} {
 	    upvar $pos_var pos 
-	    assert {[binary scan $payload "x$pos c" len] == 1}
+	    assert {[binary scan $contents "x$pos c" len] == 1}
 
 	    if {0 <= $len} {
 		incr pos
 
 	    } else {
-		assert {[binary scan $payload "x$pos I" len] == 1}
+		assert {[binary scan $contents "x$pos I" len] == 1}
 		incr pos 4
 		set len [expr {$len & 0x7fffffff}]
 		assert {0x80 <= $len}
@@ -106,19 +114,19 @@ namespace eval test {
 	    return $len
 	}
 
-	proc expect_name_value_pairs {payload} {
-	    set payload_len [string length $payload]
+	proc scan_name_value_pairs {contents} {
+	    set contents_len [string length $contents]
 	    set pos 0
-	    while {$pos < $payload_len} {
-		set name_len [read_name_value_length pos $payload]
-		set value_len [read_name_value_length pos $payload]
-		assert {$pos + $name_len + $value_len <= $payload_len}
+	    while {$pos < $contents_len} {
+		set name_len [scan_name_value_length pos $contents]
+		set value_len [scan_name_value_length pos $contents]
+		assert {$pos + $name_len + $value_len <= $contents_len}
 
-		set name [string range $payload $pos \
+		set name [string range $contents $pos \
 			      [expr {$pos + $name_len - 1}]]
 		incr pos $name_len
 
-		set value [string range $payload $pos \
+		set value [string range $contents $pos \
 			       [expr {$pos + $value_len - 1}]]
 		incr pos $value_len
 
@@ -128,23 +136,26 @@ namespace eval test {
 	    return $result
 	}
 
-	proc name_value_length {len} {
-	    if {$len < 0x80} {
-		return [binary format c $len]
-	    }
-	    return [binary format I [expr {$len | 0x80000000}]]
-	}
+	proc scan_get_values_record {contents} {
+	    variable type_id
 
-	proc name_value_pair {name value} {
-	    append result [name_value_length [string length $name]]
-	    append result [name_value_length [string length $value]]
-	    append result $name $value
+	    set nvlist [scan_name_value_pairs $contents]
+
+	    set result {}
+	    foreach {name value} $nvlist {
+		assert {$name in
+		    {FCGI_MAX_CONNS FCGI_MAX_REQS FCGI_MPXS_CONNS}}
+		assert {$value eq ""}
+		lappend result $name
+	    }
+
 	    return $result
 	}
 
-	proc dump {data} {
-	    binary scan $data c* bytes
-	    puts [join [lmap byte $bytes { format %02x $byte }]]
+	proc scan_begin_request {contents} {
+	    test::assert {[binary scan $contents "Scc5" role flags reserved]
+		== 3}
+	    return [list role $role flags $flags reserved $reserved]
 	}
 
 	proc construct_record {type cnt} {
@@ -164,114 +175,33 @@ namespace eval test {
 	    return $hdr$cnt$pad
 	}
 
-	proc expect_get_values_record {record} {
-	    variable type_id
-
-	    assert {[$record type] == $type_id(get_values)}
-	    set payload [$record payload]
-	    set nvlist [expect_name_value_pairs $payload]
-
-	    foreach {name value} $nvlist {
-		assert {$name in
-		    {FCGI_MAX_CONNS FCGI_MAX_REQS FCGI_MPXS_CONNS}}
-		assert {$value eq ""}
+	proc construct_name_value_length {len} {
+	    if {$len < 0x80} {
+		return [binary format c $len]
 	    }
+	    return [binary format I [expr {$len | 0x80000000}]]
 	}
 
-	proc get_values_result_record {request results} {
-	    variable type_id
-
-	    set payload ""
-	    set nvlist [expect_name_value_pairs [$request payload]]
-	    foreach {name empty} $nvlist {
-		if {[dict exists $results $name]} {
-		    set value [dict get $results $name]
-		    append payload [name_value_pair $name $value]
-		}
-	    }
-
-	    return [construct_record get_values_result $payload]
-	}
-
-	proc receive_record {client {previous ""}} {
-	    set result [record new]
-
-	    if {$previous ne "" && [$result add_data [$previous rest]]} {
-		return $result
-	    }
-
-	    try {
-		test_chan -props [list result $result] $client {
-		    method on_readable {chan} {
-			variable result
-			if {[$result add_data [read $chan]]} {
-			    my done
-			} else {
-			    assert {![chan eof $chan]}
-			}
-		    }
-		}
-
-	    } on error {msg opts} {
-		$result destroy
-		return -options $opts $msg
-	    }
-
+	proc construct_name_value_pair {name value} {
+	    append result [construct_name_value_length [string length $name]]
+	    append result [construct_name_value_length [string length $value]]
+	    append result $name $value
 	    return $result
 	}
 
-	proc exchange_config_values {client} {
-	    set result [receive_record $client]
-	    try {
-		expect_get_values_record $result
-		puts -nonewline $client \
-		    [get_values_result_record $result \
-			 [dict create FCGI_MPXS_CONNS 0]]
-	    } finally {
-		$result destroy
-	    }
-	}
-
-	proc receive_params {client {prev_record ""}} {
+	proc construct_get_values_result_record {request results} {
 	    variable type_id
 
-	    set data ""
-	    while {1} {
-		set params_record [receive_record $client $prev_record]
-		assert {[$params_record type] == $type_id(params)}
-		$prev_record destroy
-		set prev_record $params_record
-
-		if {[$params_record payload] eq ""} {
-		    break
+	    set contents ""
+	    set nvlist [scan_name_value_pairs [$request contents]]
+	    foreach {name empty} $nvlist {
+		if {[dict exists $results $name]} {
+		    set value [dict get $results $name]
+		    append contents [construct_name_value_pair $name $value]
 		}
-
-		append data [$params_record payload]
 	    }
 
-	    set params [expect_name_value_pairs $data]
-
-	    return [list $params $prev_record]
-	}
-
-	proc receive_stdin {client {prev_record ""}} {
-	    variable type_id
-
-	    set data ""
-	    while {1} {
-		set record [receive_record $client $prev_record]
-		assert {[$record type] == $type_id(stdin)}
-		$prev_record destroy
-		set prev_record $record
-
-		if {[$record payload] eq ""} {
-		    break
-		}
-
-		append data [$params_record payload]
-	    }
-
-	    return [list $data $prev_record]
+	    return [construct_record get_values_result $contents]
 	}
 
 	proc send_output {type client data} {
@@ -282,7 +212,8 @@ namespace eval test {
 	    while {$data ne ""} {
 		set chunk [string range $data 0 $content_length_max]
 		set data [string range $data $content_length_max+1 end]
-		puts -nonewline $client [construct_record $type $chunk]
+		set record [construct_record $type $chunk]
+		puts -nonewline $client $record
 	    }
 	}
 
@@ -299,9 +230,7 @@ namespace eval test {
 }
 
 oo::class create test::fastcgi::record {
-    variable _data
-    variable _type _content_length _padding_length
-    variable _payload_dict
+    variable _data _type _content_length _padding_length
 
     constructor {} {
 	set _data ""
@@ -328,19 +257,19 @@ oo::class create test::fastcgi::record {
 	return $_content_length
     }
 
-    method payload {} {
+    method contents {} {
 	test::assume {[my is_complete]}
 	set end [expr {8 + $_content_length - 1}]
 	return [string range $_data 8 $end]
     }
 
-    method payload_dict {} {
-	return $_payload_dict
-    }
-
     method rest {} {
 	set pos [expr {8 + $_content_length + $_padding_length}]
 	return [string range $_data $pos end]
+    }
+
+    method is_empty {} {
+	return [expr {$_data eq ""}]
     }
 
     method _add_header {data} {
@@ -368,11 +297,11 @@ oo::class create test::fastcgi::record {
 	test::assert {($_content_length + $_padding_length) % 8 == 0}
 
 	oo::objdefine [self] \
-	    "method add_data {data} { tailcall my _add_payload \$data }"
-	tailcall my _add_payload ""
+	    "method add_data {data} { tailcall my _add_contents \$data }"
+	tailcall my _add_contents ""
     }
 
-    method _add_payload {data} {
+    method _add_contents {data} {
 	variable ::test::fastcgi::type_name
 
 	append _data $data
@@ -380,83 +309,189 @@ oo::class create test::fastcgi::record {
 	    return 0
 	}
 
-	my _validate_$type_name($_type)_payload
+	set handler _validate_$type_name($_type)_contents
+	set handler_type [lindex [info object call [self] $handler] 0 0]
+	if {$handler_type ne "unknown"} {
+	    my $handler
+	}
+
 	return 1
     }
 
-    method _validate_begin_request_payload {} {
-	test::assert {[binary scan [my payload] "Scc5" role flags reserved]
-	    == 3}
-	test::assert {1 <= $role && $role <= 3}
-	test::assert {$flags == 0 || $flags == 1}
-	foreach byte $reserved {
-	    test::assert {$byte == 0}
+    method _validate_begin_request_contents {} {
+	set values [test::fastcgi::scan_begin_request [my contents]]
+	dict with $values role flags reserved {
+	    test::assert {1 <= $role && $role <= 3}
+	    test::assert {$flags == 0 || $flags == 1}
+	    foreach byte $reserved {
+		test::assert {$byte == 0}
+	    }
 	}
-
-	dict set _payload_dict role $role
-	dict set _payload_dict flags $flags
-    }
-
-    method _validate_end_request_payload {} {
-    }
-
-    method _validate_params_payload {} {
-    }
-
-    method _validate_stdin_payload {} {
-    }
-
-    method _validate_data_payload {} {
-    }
-
-    method _validate_get_values_payload {} {
     }
 }
 
 oo::class create test::fastcgi::client {
-    variable _chan _addr _port
+    variable _upstream _chan _addr _port
+    variable _record _records
+    variable _params_contents _params
 
-    constructor {chan addr port} {
+    constructor {upstream chan addr port} {
+	set _upstream $upstream
 	set _chan $chan
 	set _addr $addr
 	set _port $port
+	set _record [test::fastcgi::record new]
+	set _params_contents ""
+	lappend _records $_record
+	chan event $chan readable "[self] on_readable"
     }
 
     destructor {
-	chan close $_chan
+	if {$_chan ne ""} {
+	    chan close $_chan
+	}
+	$_upstream remove_client [self]
     }
 
     method chan {} {
 	return $_chan
     }
+
+    method close {} {
+	chan close $_chan
+	set _chan ""
+    }
+
+    method validate_params {} {
+    }
+
+    method handle_params {} {
+	test::assume {[$_record type] == $::test::fastcgi::type_id(params)}
+
+	set contents [$_record contents]
+	if {$contents eq ""} {
+	    set _params \
+		[test::fastcgi::scan_name_value_pairs $_params_contents]
+	    my validate_params
+	} else {
+	    append _params_contents $contents
+	}
+    }
+
+    method on_record_arrival {} {
+	set type [$_record type]
+	if {[info exists ::test::fastcgi::type_name($type)]} {
+	    set handler handle_$::test::fastcgi::type_name($type)
+	} else {
+	    set handler handle_unknown_type
+	}
+
+	if {[lindex [info object call [self] $handler] 0 0] ne "unknown"} {
+	    tailcall my $handler
+	}
+    }
+
+    method on_eof {} {
+    }
+
+    method on_readable {} {
+	set data [read $_chan]
+	while {[$_record add_data $data]} {
+	    my on_record_arrival
+	    set data [$_record rest]
+	    set prev $_record
+	    set _record [test::fastcgi::record new]
+	    lappend _records $_record
+	}
+
+	if {$_chan eq ""} {
+	    return
+	}
+
+	test::assert {[$_record is_empty] || ![chan eof $_chan]}
+
+	if {[chan eof $_chan]} {
+	    my on_eof
+	    chan event $_chan readable ""
+	}
+    }
 }
 
 oo::class create test::fastcgi::upstream {
-    variable _cmd _chan _clients _port
+    variable _addr _port
+    variable _client_factory _chan _clients
+    variable _configured
+    variable _testcase
 
-    constructor {cmd} {
-	variable ::test::host_addr
-	set _cmd $cmd
-	set _chan [socket -server "[self] accept" -myaddr $host_addr 0]
-	set _port [lindex [chan configure $_chan -sockname] 2]
+    constructor {client_factory {addr ""} {port ""}} {
+	set _client_factory $client_factory
+
+	if {$addr eq ""} {
+	    set addr $::test::host_addr
+	}
+	set _addr $addr
+
+	if {$port eq ""} {
+	    set port [incr ::test::fastcgi::next_port]
+	}
+	set _port $port
+
 	set _clients {}
-	chan configure $_chan -blocking 0 -buffering none \
-	    -encoding binary -translation binary
+	set _chan ""
+	set _configured 0
     }
 
     destructor {
 	foreach client $_clients {
 	    $client destroy
 	}
+	my close
+    }
+
+    method open {} {
+	test::assume {$_chan eq ""}
+	set _chan [socket -server "[self] accept" -myaddr $_addr $_port]
+	chan configure $_chan -blocking 0 -buffering none \
+	    -encoding binary -translation binary
+    }
+
+    method close {} {
+	test::assume {$_chan ne ""}
 	chan close $_chan
+	set _chan ""
+    }
+
+    method set_testcase {testcase} {
+	set _testcase $testcase
+    }
+
+    method testcase {} {
+	return $_testcase
+    }
+
+    method is_configured {} {
+	return $_configured
+    }
+
+    method set_configured {} {
+	set _configured 1
+    }
+
+    method set_client_factory {client_factory} {
+	set _client_factory $client_factory
     }
 
     method accept {chan addr port} {
 	chan configure $chan -blocking 0 -buffering none \
 	    -encoding binary -translation binary
-	set client [test::fastcgi::client new $chan $addr $port]
+	set client [eval $_client_factory [list [self] $chan $addr $port]]
 	lappend _clients $client
-	eval $_cmd $client
+    }
+
+    method remove_client {client} {
+	set pos [lsearch -exact $_clients $client]
+	test::assume {0 <= $pos}
+	set _clients [lreplace $_clients $pos $pos {}]
     }
 
     method clients {} {
@@ -464,10 +499,9 @@ oo::class create test::fastcgi::upstream {
     }
 
     method get_config {} {
-	set sockname [chan configure $_chan -sockname]
 	set addr [json::write object family [json::write string inet] \
-		      address [json::write string [lindex $sockname 0]] \
-		      port [lindex $sockname 2]]
+		      address [json::write string $_addr] \
+		      port $_port]
 	return [json::write object address $addr]
     }
 
@@ -478,29 +512,15 @@ oo::class create test::fastcgi::upstream {
 
 oo::class create test::fastcgi::testcase {
     superclass test::khttpd_file_testcase
-    variable _upstreams _client_count
+    variable _upstreams
 
     method upstreams {} {
 	return $_upstreams
     }
 
-    method add_client {client} {
-	incr _client_count
-    }
-
-    method client_chan {{upstream_index 0} {client_index 0}} {
-	set upstream [lindex $_upstreams $upstream_index]
-	set client [lindex [$upstream clients] $client_index]
-	return [$client chan]
-    }
-
-    method wait_client_arrival {} {
-	vwait [my varname _client_count]
-    }
-
-    method _setup {} {
-	my _setup_upstreams
-	next
+    method add_upstream {upstream} {
+	$upstream set_testcase [self]
+	lappend _upstreams $upstream
     }
 
     method _teardown {} {
@@ -510,13 +530,8 @@ oo::class create test::fastcgi::testcase {
 	}
     }
 
-    method _script_uri_dir {} {
+    method script_location_path {} {
 	return /0/1/2
-    }
-
-    method _setup_upstreams {} {
-	lappend _upstreams [test::fastcgi::upstream new \
-			    "[self] add_client"]
     }
 
     method _create_fcgi_location_config {} {
@@ -524,10 +539,10 @@ oo::class create test::fastcgi::testcase {
 	set config [list id [json::write string [test::uuid_new]] \
 			type [json::write string khttpd_fastcgi] \
 			server [json::write string [my server_id]] \
-			path [json::write string [my _script_uri_dir]] \
+			path [json::write string [my script_location_path]] \
 		        scriptSuffix [json::write string .fcgi] \
 			fsPath [json::write string \
-				    [$khttpd remote_path [my fs_path]]]]
+				    [test::remote_path [my fs_path]]]]
 
 	set upstream_confs [lmap upstream $_upstreams {
 	    $upstream get_config
@@ -542,94 +557,370 @@ oo::class create test::fastcgi::testcase {
     }
 }
 
-test::define fcgi_get_basic test::fastcgi::testcase {
-    variable ::test::fastcgi::type_id
-    variable ::test::host_addr
-    variable ::test::target_addr
-    variable ::test::http_port
-    variable ::test::server_software
-    variable ::test::fastcgi::type_id
+oo::class create ::test::fastcgi::basic_client {
+    superclass ::test::fastcgi::client
+    variable _script_name _fs_path _state _resp_hdr _resp_body
+    variable _counter _counter_script _counter_expired
+    
+    constructor {script_name fs_path resp_hdr resp_body 
+	counter counter_script upstream chan addr port} {
+	if {$counter != 0 && $counter_script eq ""} {
+	    error "counter_script is not given" -errorcode [KHTTPD TEST error]
+	}
+
+	set _script_name $script_name
+	set _fs_path $fs_path
+	set _resp_hdr $resp_hdr
+	set _resp_body $resp_body
+	set _state begin
+	set _counter $counter
+	set _counter_script $counter_script
+	set _counter_expired 0
+	next $upstream $chan $addr $port
+    }
+
+    method validate_params {} {
+	variable _params
+
+	test::assert {![dict exists $_params CONTENT_LENGTH]}
+	test::assert {![dict exists $_params CONTENT_TYPE]}
+	test::assert {[dict get $_params GATEWAY_INTERFACE] eq "CGI/1.1"}
+	test::assert {[dict get $_params PATH_INFO] eq "/x/hogehoge"}
+	test::assert {[dict get $_params PATH_TRANSLATED] eq \
+			  [test::remote_path \
+			       [file join $_fs_path "x/hogehoge"]]}
+	test::assert {[dict get $_params QUERY_STRING] eq ""}
+	test::assert {[dict get $_params REMOTE_ADDR] eq
+	    $::test::host_addr}
+	test::assert {[dict get $_params REQUEST_METHOD] eq "GET"}
+	test::assert {[dict get $_params SCRIPT_NAME] eq $_script_name}
+	test::assert {[dict get $_params SERVER_NAME] eq
+	    $::test::target_addr}
+	test::assert {[dict get $_params SERVER_PORT] eq
+	    $::test::http_port}
+	test::assert {[dict get $_params SERVER_PROTOCOL] eq "HTTP/1.1"}
+	test::assert {[dict get $_params SERVER_SOFTWARE] eq
+	    $::test::server_software}
+	test::assert {[dict exists $_params HTTP_X_TEST]}
+    }
+
+    method handle_begin_request {} {
+	variable _record
+
+	# The role is FCGI_RESPONDER
+	set contents [test::fastcgi::scan_begin_request [$_record contents]]
+	test::assert {[dict get $contents role] == 1}
+    }
+
+    method tick {} {
+	puts "[self] tick $_counter"
+	if {[incr _counter -1] != 0} {
+	    return
+	}
+
+	puts "[self] tick => expire"
+
+	set _counter_expired 1
+	if {![eval "$_counter_script [self]"]} {
+	    uplevel return
+	}
+    }
+
+    method on_record_arrival {} {
+	variable _upstream
+	variable _record
+	variable _params
+	variable ::test::fastcgi::type_id
+
+	my tick
+	if {[my chan] eq ""} {
+	    return
+	}
+
+	next
+
+	if {![$_upstream is_configured]} {
+	    test::assert {[$_record type] == $type_id(get_values)}
+	    set resp [test::fastcgi::construct_get_values_result_record \
+			  $_record [list FCGI_MPXS_CONNS 0]]
+	    puts -nonewline [my chan] $resp
+	    $_upstream set_configured
+
+	    return
+	}
+
+	switch -exact -- $_state {
+	    begin {
+		test::assert {[$_record type] == $type_id(begin_request)}
+		set _state params
+	    }
+
+	    params {
+		test::assert {[$_record type] == $type_id(params)}
+		if {[$_record contents] eq ""} {
+		    set _state stdin
+		}
+	    }
+
+	    stdin {
+		test::assert {[$_record type] == $type_id(stdin)}
+		if {[$_record contents] eq ""} {
+		    set _state begin
+
+		    set resp $_resp_hdr
+		    set xtest [dict get $_params HTTP_X_TEST]
+		    append resp "X-Test-Response: $xtest\n"
+		    append resp "\n"
+		    append resp $_resp_body
+
+		    # The fastcgi server sends the response.
+		    test::fastcgi::send_output stdout [my chan] $resp
+		    test::fastcgi::close_output stdout [my chan]
+		    test::fastcgi::send_end_request [my chan]
+		    chan flush [my chan]
+		}
+	    }
+
+	    default {
+		throw [list KHTTPD TEST error] "unknown state $_state"
+	    }
+	}
+    }
+}
+
+oo::class create test::fastcgi::get_basic_testcase {
+    superclass test::fastcgi::testcase
+    variable _script_name _resp_hdr _resp_body
+
+    method _setup {} {
+	set _script_name [my script_location_path]/test.fcgi
+
+	set _resp_body {<!DOCTYPE html><html><head><meta charset="utf-8">}
+	append _resp_body {<title>The document root</title></head>}
+	append _resp_body {<body>Hello World!</body></html>}
+
+	set _resp_hdr "Content-Type: text/html\n"
+	append _resp_hdr "Content-Length: [string length $_resp_body]\n"
+
+	set upstream [test::fastcgi::upstream new \
+			  "[list ::test::fastcgi::basic_client new \
+		       	     $_script_name [my fs_path]\
+			     $_resp_hdr $_resp_body 0 {}]" "" 10000]
+	my add_upstream $upstream
+	$upstream open
+
+	next
+    }
+}
+
+test::define fcgi_get_basic test::fastcgi::get_basic_testcase {
+    variable _script_name
+    variable _resp_body
 
     set khttpd [my khttpd]
 
-    my wait_client_arrival
-    set client [my client_chan]
-    test::fastcgi::exchange_config_values $client
+    # Create a script file
+    set script_fs_path \
+	[test::local_file [file join [my fs_path] "test.fcgi"]]
+    set script_file [open $script_fs_path w]
+    close $script_file
+
+    set req "GET $_script_name/x/hogehoge HTTP/1.1\r\n"
+    append req "Host: [$khttpd host]\r\n"
+    append req "X-Test: foobar\r\n\r\n"
 
     my with_connection {sock} {
-	# Create a script file
-	set script_fs_path \
-	    [test::local_file [file join [my fs_path] "test.fcgi"]]
-	set script_file [open $script_fs_path w]
-	close $script_file
-
 	# The client sends a GET request for the script.
-	set script_name [my _script_uri_dir]/test.fcgi
-	set req "GET $script_name/x/hogehoge HTTP/1.1\r\n"
-	append req "Host: [$khttpd host]\r\n"
-	append req "X-Test: foobar\r\n\r\n"
 	puts -nonewline $sock $req
-
-	# The server sends a begin_request record to the fastcgi server.
-	set begin_request [test::fastcgi::receive_record $client]
-	test::assert {[$begin_request type] == $type_id(begin_request)}
-	set payload [$begin_request payload_dict]
-
-	# The role is FCGI_RESPONDER
-	test::assert {[dict get $payload role] == 1}
-
-	# The server sends param records to the fastcgi server
-	lassign [test::fastcgi::receive_params $client $begin_request] \
-	    params last_record
-
-	# Check mandatory params
-	test::assert {![dict exists $params CONTENT_LENGTH]}
-	test::assert {![dict exists $params CONTENT_TYPE]}
-	test::assert {[dict get $params GATEWAY_INTERFACE] eq "CGI/1.1"}
-	test::assert {[dict get $params PATH_INFO] eq "/x/hogehoge"}
-	test::assert {[dict get $params PATH_TRANSLATED] eq \
-			  [$khttpd remote_path \
-			       [file join [my fs_path] "x/hogehoge"]]}
-	test::assert {[dict get $params QUERY_STRING] eq ""}
-	test::assert {[dict get $params REMOTE_ADDR] eq $host_addr}
-	test::assert {[dict get $params REQUEST_METHOD] eq "GET"}
-	test::assert {[dict get $params SCRIPT_NAME] eq $script_name}
-	test::assert {[dict get $params SERVER_NAME] eq $target_addr}
-	test::assert {[dict get $params SERVER_PORT] eq $http_port}
-	test::assert {[dict get $params SERVER_PROTOCOL] eq "HTTP/1.1"}
-	test::assert {[dict get $params SERVER_SOFTWARE] eq $server_software}
-	test::assert {[dict get $params HTTP_X_TEST] eq "foobar"}
-
-	# The server send an empty stdin record to the fastcgi server
-	lassign [test::fastcgi::receive_stdin client $last_record] \
-	    stdin last_record
-
-	# The fastcgi server sends the response.
-	set body {<!DOCTYPE html><html><head><meta charset="utf-8">}
-	append body {<title>The document root</title></head>}
-	append body {<body>Hello World!</body></html>}
-	set content_type text/html
-	set resp "Content-Type: $content_type\n"
-	append resp "Content-Length: [string length $body]\n"
-	append resp "X-Test: foobar\n"
-	append resp "\n"
-	append resp $body
-	test::fastcgi::send_output stdout $client $resp
-	test::fastcgi::close_output stdout $client
-	test::fastcgi::send_end_request $client
 
 	# The server relays the response to the client.
 	set response [my receive_response $sock $req]
 	test::assert {[$response status] == 200}
-	test::assert {[$response field Content-Type] eq $content_type}
+	test::assert {[$response field Content-Type] eq "text/html"}
 	test::assert {[$response field Content-Length] ==
-	    [string length $body]}
-	test::assert {[$response field X-Test] eq "foobar"}
-	test::assert {[$response body] eq $body}
+	    [string length $_resp_body]}
+	test::assert {[$response field X-Test-Response] eq "foobar"}
+	test::assert {[$response body] eq $_resp_body}
     }
 
     my check_access_log
     test::assert_error_log_is_empty $khttpd
+}
+
+test::define fcgi_get_splay test::fastcgi::get_basic_testcase {
+    variable _script_name
+    variable _resp_body
+
+    set khttpd [my khttpd]
+
+    # Create a script file
+    set script_fs_path \
+	[test::local_file [file join [my fs_path] "test.fcgi"]]
+    set script_file [open $script_fs_path w]
+    close $script_file
+
+    for {set i 0} {$i < 64} {incr i} {
+	set req "GET $_script_name/x/hogehoge HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "X-Test: $i\r\n\r\n"
+
+	my with_connection {sock} {
+	    # The client sends a GET request for the script.
+	    puts -nonewline $sock $req
+
+	    # The server relays the response to the client.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response status] == 200}
+	    test::assert {[$response field Content-Type] eq "text/html"}
+	    test::assert {[$response field Content-Length] ==
+		[string length $_resp_body]}
+	    test::assert {[$response field X-Test-Response] eq "$i"}
+	    test::assert {[$response body] eq $_resp_body}
+	}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define fcgi_get_splay_ignoring_response \
+    test::fastcgi::get_basic_testcase \
+{
+    variable _script_name
+
+    set khttpd [my khttpd]
+
+    # Create a script file
+    set script_fs_path \
+	[test::local_file [file join [my fs_path] "test.fcgi"]]
+    set script_file [open $script_fs_path w]
+    close $script_file
+
+    for {set i 0} {$i < 64} {incr i} {
+	set req "GET $_script_name/x/hogehoge HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "X-Test: $i\r\n\r\n"
+
+	my with_connection {sock} {
+	    # The client sends a GET request for the script.
+	    puts -nonewline $sock $req
+	}
+    }
+
+    test::assert_error_log_is_empty $khttpd
+}
+
+oo::class create test::fastcgi::timed_client_factory {
+    variable _script_name _fs_path _resp_hdr _resp_body
+    variable _count
+    variable _last_client
+    variable _expired
+
+    constructor {script_name fs_path resp_hdr resp_body} {
+	set _script_name $script_name
+	set _fs_path $fs_path
+	set _resp_hdr $resp_hdr
+	set _resp_body $resp_body
+	set _count 0
+    }
+
+    method set_counter {count} {
+	set _count $count
+    }
+
+    method create {upstream chan addr port} {
+	set _expired 0
+	set _last_client [::test::fastcgi::basic_client new \
+			      $_script_name $_fs_path $_resp_hdr $_resp_body \
+			      $_count "[self] expire" \
+			      $upstream $chan $addr $port]
+	return $_last_client
+    }
+
+    method last_client {} {
+	return $_last_client
+    }
+
+    method expire {client} {
+	puts "[self] expire $client"
+	$client close
+	set _expired 1
+    }
+
+    method expired {} {
+	return $_expired
+    }
+}
+
+test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
+    variable _client_factory
+    variable _script_name
+    variable _resp_body
+    variable _resp_hdr
+
+    set _script_name [my script_location_path]/test.fcgi
+
+    set _resp_body {<!DOCTYPE html><html><head><meta charset="utf-8">}
+    append _resp_body {<title>The document root</title></head>}
+    append _resp_body {<body>Hello World!</body></html>}
+
+    set _resp_hdr "Content-Type: text/html\n"
+    append _resp_hdr "Content-Length: [string length $_resp_body]\n"
+
+    set _client_factory [test::fastcgi::timed_client_factory new \
+			     $_script_name [my fs_path] $_resp_hdr $_resp_body]
+
+    set upstream [test::fastcgi::upstream new \
+		      "$_client_factory create" "" 10000]
+    my add_upstream $upstream
+    $upstream open
+
+    next
+} {
+    variable _script_name
+    variable _resp_body
+    variable _client_factory
+
+    set khttpd [my khttpd]
+
+    # Create a script file
+    set script_fs_path \
+	[test::local_file [file join [my fs_path] "test.fcgi"]]
+    set script_file [open $script_fs_path w]
+    close $script_file
+
+    for {set i 1} {1} {incr i} {
+	puts "counter = $i"
+	$_client_factory set_counter $i
+
+	set req "GET $_script_name/x/hogehoge HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "X-Test: $i\r\n\r\n"
+
+	my with_connection {sock} {
+	    # The client sends a GET request for the script.
+	    puts -nonewline $sock $req
+
+	    # The server relays the response to the client.
+	    set response [my receive_response $sock $req]
+
+	    if {[$_client_factory expired]} {
+		test::assert {[$response status] == 500}
+		test::assert_it_is_default_error_response $response
+
+	    } else {
+		test::assert {[$response status] == 200}
+		test::assert {[$response field Content-Type] eq "text/html"}
+		test::assert {[$response field Content-Length] ==
+		    [string length $_resp_body]}
+		test::assert {[$response field X-Test-Response] eq "$i"}
+		test::assert {[$response body] eq $_resp_body}
+		break
+	    }
+	}
+    }
+
+    my check_access_log
 }
 
 # TODO
@@ -643,3 +934,5 @@ test::define fcgi_get_basic test::fastcgi::testcase {
 # property 'upstreams'
 
 # property 'upstreams.address'
+
+# test for partial responses from the FastCGI server
