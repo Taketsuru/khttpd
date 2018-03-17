@@ -33,8 +33,11 @@
 #define KHTTPD_VERSION	1100000
 
 struct khttpd_ioctl_start_args {
-	const char	*data;
-	size_t		size;
+	char		*data;
+	char		*buf;
+	size_t		data_size;
+	size_t		buf_size;
+	int		status;
 };
 
 struct khttpd_ioctl_test_args {
@@ -46,6 +49,6 @@ struct khttpd_ioctl_test_args {
 
 #define KHTTPD_IOC 'h'
 
-#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 0)
-#define KHTTPD_IOC_TEST _IOWR(KHTTPD_IOC, 1, struct khttpd_ioctl_test_args)
-#define KHTTPD_IOC_START _IOW(KHTTPD_IOC, 2, struct khttpd_ioctl_start_args)
+#define KHTTPD_IOC_START _IOWR(KHTTPD_IOC, 0, struct khttpd_ioctl_start_args)
+#define KHTTPD_IOC_STOP _IO(KHTTPD_IOC, 1)
+#define KHTTPD_IOC_TEST _IOWR(KHTTPD_IOC, 2, struct khttpd_ioctl_test_args)

@@ -152,7 +152,9 @@ struct khttpd_ctrl_json_io_data {
 
 struct khttpd_main_start_command {
 	struct khttpd_main_command hdr;
+	struct khttpd_mbuf_json	output;
 	struct mbuf	*data;
+	int		status;
 };
 
 static void khttpd_ctrl_options(struct khttpd_exchange *, struct sbuf *);
@@ -2713,32 +2715,32 @@ khttpd_ctrl_clear(void)
 static void
 khttpd_ctrl_start_helper(void *arg)
 {
-	char buf[128];
-	struct khttpd_mbuf_json output;
+	struct khttpd_mbuf_json *output;
 	struct khttpd_problem_property prop_spec;
-	struct sbuf sbuf;
 	struct khttpd_main_start_command *cmd;
 	struct khttpd_json *args_j, *rewriters_j, *ports_j;
 	struct khttpd_json *servers_j, *locations_j;
 	struct khttpd_json *access_log_j, *error_log_j;
-	struct mbuf *data, *mb, *tmb;
+	struct mbuf *data;
 	int status;
+
+	KHTTPD_ENTRY("%s({data=%p})", __func__, arg);
 
 	cmd = arg;
 	data = cmd->data;
-	KHTTPD_ENTRY("%s({data=%p})", __func__, data);
+	output = &cmd->output;
 
 	prop_spec.link = NULL;
-	khttpd_mbuf_json_new(&output);
 	args_j = NULL;
 
-	status = khttpd_ctrl_parse_json(&args_j, &output, data);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	status = khttpd_ctrl_parse_json(&args_j, output, data);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		goto quit;
+	}
 
 	if (khttpd_json_type(args_j) != KHTTPD_JSON_OBJECT) {
-		khttpd_problem_wrong_type_response_begin(&output);
-		khttpd_problem_set_property(&output, &prop_spec);
+		khttpd_problem_wrong_type_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		status = KHTTPD_STATUS_BAD_REQUEST;
 		goto quit;
 	}
@@ -2746,14 +2748,14 @@ khttpd_ctrl_start_helper(void *arg)
 	prop_spec.name = "accessLog";
 	access_log_j = khttpd_json_object_get(args_j, "accessLog");
 	if (access_log_j == NULL) {
-		khttpd_problem_no_value_response_begin(&output);
-		khttpd_problem_set_property(&output, &prop_spec);
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		status = KHTTPD_STATUS_BAD_REQUEST;
 		goto quit;
 	}
 
 	status = khttpd_ctrl_log_set(khttpd_log_chan_access,
-	    &output, &prop_spec, access_log_j);
+	    output, &prop_spec, access_log_j);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		goto quit;
 	}
@@ -2761,13 +2763,13 @@ khttpd_ctrl_start_helper(void *arg)
 	prop_spec.name = "errorLog";
 	error_log_j = khttpd_json_object_get(args_j, "errorLog");
 	if (error_log_j == NULL) {
-		khttpd_problem_no_value_response_begin(&output);
-		khttpd_problem_set_property(&output, &prop_spec);
+		khttpd_problem_no_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
 		status = KHTTPD_STATUS_BAD_REQUEST;
 		goto quit;
 	}
 
-	status = khttpd_ctrl_log_set(khttpd_log_chan_error, &output,
+	status = khttpd_ctrl_log_set(khttpd_log_chan_error, output,
 	    &prop_spec, error_log_j);
 	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		goto quit;
@@ -2796,39 +2798,44 @@ khttpd_ctrl_start_helper(void *arg)
 
 	if (rewriters_j != NULL) {
 		prop_spec.name = "rewriters";
-		status = khttpd_obj_type_load(&khttpd_ctrl_rewriters, &output,
+		status = khttpd_obj_type_load(&khttpd_ctrl_rewriters, output,
 		    &prop_spec, rewriters_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 			goto unlock;
+		}
 	}
 
 	if (ports_j != NULL) {
 		prop_spec.name = "ports";
-		status = khttpd_obj_type_load(&khttpd_ctrl_ports, &output,
+		status = khttpd_obj_type_load(&khttpd_ctrl_ports, output,
 		    &prop_spec, ports_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 			goto unlock;
+		}
 	}
 
 	if (servers_j != NULL) {
 		prop_spec.name = "servers";
-		status = khttpd_obj_type_load(&khttpd_ctrl_servers, &output,
+		status = khttpd_obj_type_load(&khttpd_ctrl_servers, output,
 		    &prop_spec, servers_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 			goto unlock;
+		}
 	}
 
 	if (locations_j != NULL) {
 		prop_spec.name = "locations";
-		status = khttpd_obj_type_load(&khttpd_ctrl_locations, &output,
+		status = khttpd_obj_type_load(&khttpd_ctrl_locations, output,
 		    &prop_spec, locations_j);
-		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+		if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 			goto unlock;
+		}
 	}
 
  unlock:
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		khttpd_ctrl_clear();
+	}
 
 	sx_xunlock(&khttpd_ctrl_lock);
 
@@ -2836,29 +2843,14 @@ khttpd_ctrl_start_helper(void *arg)
 	khttpd_json_delete(args_j);
 
 	if (KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
-		sx_xlock(&khttpd_ctrl_lock);
-		cmd->hdr.error = 0;
-		wakeup(cmd);
-		sx_xunlock(&khttpd_ctrl_lock);
-		return;
+		m_freem(khttpd_mbuf_json_move(output));
+	} else {
+		khttpd_mbuf_json_object_end(output);
 	}
-
-	khttpd_mbuf_json_object_end(&output);
-	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
-	mb = khttpd_mbuf_json_move(&output);
-	while (mb != NULL) {
-		sbuf_bcat(&sbuf, mb->m_data, mb->m_len);
-		tmb = mb;
-		mb = mb->m_next;
-		m_free(tmb);
-	}
-	sbuf_finish(&sbuf);
-	log(LOG_ERR, "khttpd: failed to initialize the server. %s",
-	    sbuf_data(&sbuf));
-	sbuf_delete(&sbuf);
 
 	sx_xlock(&khttpd_ctrl_lock);
-	cmd->hdr.error = EINVAL;
+	cmd->hdr.error = 0;
+	cmd->status = status;
 	wakeup(cmd);
 	sx_xunlock(&khttpd_ctrl_lock);
 }
@@ -2879,56 +2871,69 @@ khttpd_ctrl_start(void *arg)
 	sx_sunlock(&khttpd_ctrl_lock);
 }
 
-static void
-khttpd_ctrl_free_cmdbuf_data(struct mbuf *m, void *arg1, void *arg2)
-{
-
-	KHTTPD_ENTRY("khttpd_ctrl_free_cmdbuf_data(%p,%p)", m, arg1);
-	free(arg1, M_TEMP);
-}
-
 static int
 khttpd_ctrl_ioctl_start(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
     struct thread *td)
 {
+	struct sbuf sbuf;
 	struct khttpd_main_start_command cmdbuf;
 	struct khttpd_ioctl_start_args *args;
-	char *buf;
+	struct mbuf *mb, *tmb;
+	char *cp;
+	unsigned resid, len;
 	int error;
-
-	args = (void *)data;
 
 	KHTTPD_ENTRY("khttpd_ctrl_ioctl_start(%p,%#lx,%p,%#x)", dev, cmd,
 	    data, fflag);
 
-	if (KHTTPD_CTRL_MAX_DATA_SIZE < args->size) {
-		log(LOG_ERR, "khttpd: configuration data size is larger than "
-		    "the limit (%#zx bytes)",
-		    KHTTPD_CTRL_MAX_DATA_SIZE);
+	args = (void *)data;
+
+	if (KHTTPD_CTRL_MAX_DATA_SIZE < args->data_size) {
 		return (EINVAL);
 	}
 
 	bzero(&cmdbuf, sizeof(cmdbuf));
-	cmdbuf.hdr.error = -1;
 	cmdbuf.hdr.handler = khttpd_ctrl_start;
-	cmdbuf.data = m_get(M_WAITOK, MT_DATA);
-	buf = malloc(roundup2(args->size, sizeof(u_int)) + sizeof(u_int),
-	    M_TEMP, M_WAITOK);
-	cmdbuf.data->m_len = args->size;
-	MEXTADD(cmdbuf.data, buf, args->size, khttpd_ctrl_free_cmdbuf_data,
-	    buf, NULL, 0, EXT_EXTREF);
-	cmdbuf.data->m_ext.ext_cnt = (u_int *)
-	    (buf + roundup2(args->size, sizeof(u_int)));
-	*cmdbuf.data->m_ext.ext_cnt = 1;
+	cmdbuf.hdr.error = -1;
+	cmdbuf.data = m_getm2(NULL, args->data_size, M_WAITOK, MT_DATA, 0);
+	khttpd_mbuf_json_new(&cmdbuf.output);
 
-	error = copyin(args->data, buf, args->size);
-
-	if (error == 0) {
-		khttpd_main_call(&cmdbuf.hdr);
-		error = cmdbuf.hdr.error;
+	mb = cmdbuf.data;
+	for (resid = args->data_size, cp = args->data; 0 < resid;
+	     resid -= len, mb = mb->m_next, cp += len) {
+		len = MIN(M_SIZE(mb), resid);
+		error = copyin(cp, mtod(mb, char *), len);
+		if (error != 0) {
+			goto quit;
+		}
+		mb->m_len = len;
 	}
 
-	m_free(cmdbuf.data);
+	khttpd_main_call(&cmdbuf.hdr);
+	error = cmdbuf.hdr.error;
+	if (error != 0) {
+		goto quit;
+	}
+
+	sbuf_new(&sbuf, NULL, 0, SBUF_AUTOEXTEND);
+	mb = khttpd_mbuf_json_move(&cmdbuf.output);
+	for (tmb = mb; tmb != NULL; tmb = tmb->m_next) {
+		sbuf_bcat(&sbuf, mtod(tmb, char *), tmb->m_len);
+	}
+	sbuf_finish(&sbuf);
+	m_freem(mb);
+
+	len = MIN(args->buf_size, sbuf_len(&sbuf));
+	args->buf_size = sbuf_len(&sbuf);
+	error = copyout(sbuf_data(&sbuf), args->buf, len);
+
+	sbuf_delete(&sbuf);
+
+	args->status = cmdbuf.status;
+
+quit:
+	m_freem(cmdbuf.data);
+	khttpd_mbuf_json_delete(&cmdbuf.output);
 
 	return (error);
 }

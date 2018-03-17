@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -52,11 +52,15 @@ struct command {
 	void (*handler)(int argc, char **argv);
 };
 
-static void do_load_command(int argc, char **argv);
-static void do_test_command(int argc, char **argv);
+static void do_start_command(int argc, char **argv);
 static void do_stop_command(int argc, char **argv);
+static void do_test_command(int argc, char **argv);
 
 static struct command command_table[] = {
+	{
+		.name = "start",
+		.handler = do_start_command
+	},
 	{
 		.name = "stop",
 		.handler = do_stop_command
@@ -65,22 +69,18 @@ static struct command command_table[] = {
 		.name = "test",
 		.handler = do_test_command
 	},
-	{
-		.name = "load",
-		.handler = do_load_command
-	}
 };
 
 static int dev_fd;
 
 static void
-do_load_command(int argc, char **argv)
+do_start_command(int argc, char **argv)
 {
 	struct sbuf sbuf;
 	struct khttpd_ioctl_start_args ioctl_args;
 	char *buf;
 	const char *config;
-	size_t bufsize;
+	size_t buf_size;
 	ssize_t rsize;
 	int fd;
 
@@ -100,12 +100,12 @@ do_load_command(int argc, char **argv)
 			    config);
 	}
 
-	bufsize = 65536;
-	buf = malloc(bufsize);
+	buf_size = 65536;
+	buf = malloc(buf_size);
 	sbuf_new(&sbuf, NULL, 0, SBUF_AUTOEXTEND);
 
 	for (;;) {
-		rsize = read(fd, buf, bufsize);
+		rsize = read(fd, buf, buf_size);
 		if (rsize == -1)
 			err(EX_IOERR, "failed to read configuration file "
 			    "\"%s\"", config);
@@ -114,14 +114,32 @@ do_load_command(int argc, char **argv)
 		sbuf_bcat(&sbuf, buf, rsize);
 	}
 	sbuf_finish(&sbuf);
+	free(buf);
 
 	ioctl_args.data = sbuf_data(&sbuf);
-	ioctl_args.size = sbuf_len(&sbuf);
-	if (ioctl(dev_fd, KHTTPD_IOC_START, &ioctl_args) == -1)
-		err(EX_DATAERR, "configuration error");
+	ioctl_args.data_size = sbuf_len(&sbuf);
+	ioctl_args.buf = malloc(buf_size);
+	ioctl_args.buf_size = buf_size;
+	ioctl_args.status = 0;
+	if (ioctl(dev_fd, KHTTPD_IOC_START, &ioctl_args) == -1) {
+		err(EX_DATAERR, "failed to start the server");
+	}
 
 	sbuf_delete(&sbuf);
-	free(buf);
+
+	fwrite(ioctl_args.buf, ioctl_args.buf_size, 1, stdout);
+	fflush(stdout);
+
+	free(ioctl_args.buf);
+
+	switch (ioctl_args.status / 100) {
+	case 2:
+		break;
+	case 4:
+		exit(EX_DATAERR);
+	default:
+		exit(EX_OSERR);
+	}
 }
 
 static void
