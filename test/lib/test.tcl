@@ -540,88 +540,88 @@ namespace eval test {
 	    return [$log chan]
 	}
 
-	method report {file} {
-	    puts $file "<?xml version=\"1.0\" ?>"
+	method run {report_name} {
+	    set report [open $report_name w]
+	    try {
+		chan configure $report -buffering line
+		puts $report "<?xml version=\"1.0\" ?>"
 
-	    set i -1
-	    set n [llength $test_objs]
-	    foreach obj $test_objs {
-		incr i
-		set class [info object class $obj]
-		set class_info [dict get $test_classes $class]
-		set class_file [lindex $class_info 0]
-		set class_line [lindex $class_info 1]
-		set time [expr {[$obj finish_time] - [$obj start_time]}]
-		set status [$obj status]
+		set name_field_len 0
 
-		if {$status == ""} {
-		    continue
-		}
-
-		puts -nonewline $file \
-		    "<testcase name=\"[string range $class 2 end]\""
-		puts -nonewline $file " file=\"$class_file\""
-		puts -nonewline $file " line=\"$class_line\""
-		puts $file " elapsed-time=\"$time\" status=\"$status\">"
-
-		if {$status != "pass"} {
-		    dict for {name value} [$obj data] {
-			puts $file "<data name=\"$name\">"
-			set body [regsub -all -- "]]>" $value \
-				      "]]]]><!\[CDATA\[>"]
-			puts $file "<!\[CDATA\[$body]]>"
-			puts $file "</data>"
+		foreach obj $test_objs {
+		    set len [string length [info object class $obj]]
+		    if {$name_field_len < $len} {
+			set name_field_len $len
 		    }
 		}
 
-		puts $file "</testcase>"
-	    }
-	}
+		set done_count 0
+		set pass_count 0
+		set fail_count 0
+		set error_count 0
+		set skip_count 0
 
-	method run {} {
-	    set name_field_len 0
+		foreach obj $test_objs {
+		    set current_obj $obj
+		    set class [regsub -- \
+				   {^::(.*)$} [info object class $obj] {\1}]
+		    set class_len [string length $class]
+		    set leader_len [expr {$name_field_len - $class_len + 1}]
+		    puts -nonewline "$class[string repeat . $leader_len]"
+		    flush stdout
 
-	    foreach obj $test_objs {
-		set len [string length [info object class $obj]]
-		if {$name_field_len < $len} {
-		    set name_field_len $len
-		}
-	    }
+		    $obj run
 
-	    set done_count 0
-	    set pass_count 0
-	    set fail_count 0
-	    set error_count 0
-	    set skip_count 0
+		    if {[$obj bailed_out]} {
+			incr done_count
+			incr error_count
+			puts "bailout"
+			break
+		    }
 
-	    foreach obj $test_objs {
-		set current_obj $obj
-		set class [regsub -- {^::(.*)$} [info object class $obj] {\1}]
-		set class_len [string length $class]
-		set leader_len [expr {$name_field_len - $class_len + 1}]
-		puts -nonewline "$class[string repeat . $leader_len]"
-		flush stdout
+		    set status [$obj status]
+		    puts $status
 
-		$obj run
-
-		if {[$obj bailed_out]} {
 		    incr done_count
-		    incr error_count
-		    puts "bailout"
-		    break
+
+		    switch -exact -- $status {
+			pass	{ incr pass_count }
+			fail	{ incr fail_count }
+			error	{ incr error_count }
+			skip	{ incr skip_count }
+		    }
+
+		    set class [info object class $obj]
+		    set class_info [dict get $test_classes $class]
+		    set class_file [lindex $class_info 0]
+		    set class_line [lindex $class_info 1]
+		    set time [expr {[$obj finish_time] - [$obj start_time]}]
+		    set status [$obj status]
+
+		    if {$status == ""} {
+			continue
+		    }
+
+		    puts -nonewline $report \
+			"<testcase name=\"[string range $class 2 end]\""
+		    puts -nonewline $report " file=\"$class_file\""
+		    puts -nonewline $report " line=\"$class_line\""
+		    puts $report " elapsed-time=\"$time\" status=\"$status\">"
+
+		    if {$status != "pass"} {
+			dict for {name value} [$obj data] {
+			    puts $report "<data name=\"$name\">"
+			    set body [regsub -all -- "]]>" $value \
+					  "]]]]><!\[CDATA\[>"]
+			    puts $report "<!\[CDATA\[$body]]>"
+			    puts $report "</data>"
+			}
+		    }
+
+		    puts $report "</testcase>"
 		}
-
-		set status [$obj status]
-		puts $status
-
-		incr done_count
-
-		switch -exact -- $status {
-		    pass	{ incr pass_count }
-		    fail	{ incr fail_count }
-		    error	{ incr error_count }
-		    skip	{ incr skip_count }
-		}
+	    } finally {
+		chan close $report
 	    }
 
 	    set current_obj {}

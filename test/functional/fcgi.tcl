@@ -136,22 +136,6 @@ namespace eval test {
 	    return $result
 	}
 
-	proc scan_get_values_record {contents} {
-	    variable type_id
-
-	    set nvlist [scan_name_value_pairs $contents]
-
-	    set result {}
-	    foreach {name value} $nvlist {
-		assert {$name in
-		    {FCGI_MAX_CONNS FCGI_MAX_REQS FCGI_MPXS_CONNS}}
-		assert {$value eq ""}
-		lappend result $name
-	    }
-
-	    return $result
-	}
-
 	proc scan_begin_request {contents} {
 	    test::assert {[binary scan $contents "Scc5" role flags reserved]
 		== 3}
@@ -420,7 +404,6 @@ oo::class create test::fastcgi::client {
 oo::class create test::fastcgi::upstream {
     variable _addr _port
     variable _client_factory _chan _clients
-    variable _configured
     variable _testcase
 
     constructor {client_factory {addr ""} {port ""}} {
@@ -438,7 +421,6 @@ oo::class create test::fastcgi::upstream {
 
 	set _clients {}
 	set _chan ""
-	set _configured 0
     }
 
     destructor {
@@ -469,14 +451,6 @@ oo::class create test::fastcgi::upstream {
 	return $_testcase
     }
 
-    method is_configured {} {
-	return $_configured
-    }
-
-    method set_configured {} {
-	set _configured 1
-    }
-
     method set_client_factory {client_factory} {
 	set _client_factory $client_factory
     }
@@ -491,7 +465,7 @@ oo::class create test::fastcgi::upstream {
     method remove_client {client} {
 	set pos [lsearch -exact $_clients $client]
 	test::assume {0 <= $pos}
-	set _clients [lreplace $_clients $pos $pos {}]
+	set _clients [lreplace $_clients $pos $pos]
     }
 
     method clients {} {
@@ -615,8 +589,12 @@ oo::class create ::test::fastcgi::basic_client {
     method expire {} {
 	set _counter_expired 1
 	if {![eval "$_counter_script [self]"]} {
-	    uplevel return
+	    return -level 2
 	}
+    }
+
+    method has_expired {} {
+	return $_counter_expired
     }
 
     method tick {} {
@@ -637,16 +615,6 @@ oo::class create ::test::fastcgi::basic_client {
 	}
 
 	next
-
-	if {![$_upstream is_configured]} {
-	    test::assert {[$_record type] == $type_id(get_values)}
-	    set resp [test::fastcgi::construct_get_values_result_record \
-			  $_record [list FCGI_MPXS_CONNS 0]]
-	    puts -nonewline [my chan] $resp
-	    $_upstream set_configured
-
-	    return
-	}
 
 	switch -exact -- $_state {
 	    begin {
@@ -680,18 +648,21 @@ oo::class create ::test::fastcgi::basic_client {
 
 		    # The fastcgi server sends the response.
 		    set chan [my chan]
-		    if {0 < $_counter && $_counter < $resplen} {
-			puts -nonewline $chan [string range $resp 0 $_counter-1]
+		    set old_counter $_counter
+		    incr _counter -1
+		    if {$_counter == 0} {
 			my expire
-			puts -nonewline $chan [string range $resp $_counter end]
-			incr _counter -$resplen
-		    } elseif {$_counter == $resplen} {
 			puts -nonewline $chan $resp
+		    } elseif {0 < $_counter && $_counter < $resplen} {
+			puts -nonewline $chan \
+			    [string range $resp 0 $_counter-1]
 			my expire
+			puts -nonewline $chan \
+			    [string range $resp $_counter end]
 			set _counter 0
 		    } else {
 			puts -nonewline $chan $resp
-			incr _counter -$resplen
+			incr _counter [expr {-($resplen - 1)}]
 		    }
 		}
 	    }
@@ -745,17 +716,19 @@ test::define fcgi_get_basic test::fastcgi::get_basic_testcase {
     append req "X-Test: foobar\r\n\r\n"
 
     my with_connection {sock} {
-	# The client sends a GET request for the script.
-	puts -nonewline $sock $req
+	for {set i 0} {$i < 3} {incr i} {
+	    # The client sends a GET request for the script.
+	    puts -nonewline $sock $req
 
-	# The server relays the response to the client.
-	set response [my receive_response $sock $req]
-	test::assert {[$response status] == 200}
-	test::assert {[$response field Content-Type] eq "text/html"}
-	test::assert {[$response field Content-Length] ==
-	    [string length $_resp_body]}
-	test::assert {[$response field X-Test-Response] eq "foobar"}
-	test::assert {[$response body] eq $_resp_body}
+	    # The server relays the response to the client.
+	    set response [my receive_response $sock $req]
+	    test::assert {[$response status] == 200}
+	    test::assert {[$response field Content-Type] eq "text/html"}
+	    test::assert {[$response field Content-Length] ==
+		[string length $_resp_body]}
+	    test::assert {[$response field X-Test-Response] eq "foobar"}
+	    test::assert {[$response body] eq $_resp_body}
+	}
     }
 
     my check_access_log
@@ -825,17 +798,29 @@ test::define fcgi_get_splay_ignoring_response \
     test::assert_error_log_is_empty $khttpd
 }
 
+proc test::fastcgi::close_client {client} {
+    $client close
+    return 0
+}
+
+proc test::fastcgi::pause_client {client} {
+    after 100
+    return 1
+}
+
 oo::class create test::fastcgi::timed_client_factory {
     variable _script_name _fs_path _resp_hdr _resp_body
     variable _count
     variable _last_client
-    variable _expired
+    variable _expire_script
 
-    constructor {script_name fs_path resp_hdr resp_body} {
+    constructor {script_name fs_path resp_hdr resp_body
+	{expire_script "::test::fastcgi::close_client"}} {
 	set _script_name $script_name
 	set _fs_path $fs_path
 	set _resp_hdr $resp_hdr
 	set _resp_body $resp_body
+	set _expire_script $expire_script
 	set _count 0
     }
 
@@ -844,39 +829,15 @@ oo::class create test::fastcgi::timed_client_factory {
     }
 
     method create {upstream chan addr port} {
-	set _expired 0
 	set _last_client [::test::fastcgi::basic_client new \
 			      $_script_name $_fs_path $_resp_hdr $_resp_body \
-			      $_count "[self] expire" \
+			      $_count $_expire_script \
 			      $upstream $chan $addr $port]
 	return $_last_client
     }
 
     method last_client {} {
 	return $_last_client
-    }
-
-    method _expire {client} {
-	$client close
-	return 0
-    }
-
-    method expire {client} {
-	set _expired 1
-	tailcall my _expire $client
-    }
-
-    method expired {} {
-	return $_expired
-    }
-}
-
-oo::class create test::fastcgi::segmenting_client_factory {
-    superclass test::fastcgi::timed_client_factory
-
-    method _expire {client} {
-	after 100
-	return 1
     }
 }
 
@@ -896,8 +857,10 @@ test::define fcgi_get_segmented_upstream_response test::fastcgi::testcase \
     set _resp_hdr "Content-Type: text/html\n"
     append _resp_hdr "Content-Length: [string length $_resp_body]\n"
 
-    set _client_factory [test::fastcgi::segmenting_client_factory new \
-			     $_script_name [my fs_path] $_resp_hdr $_resp_body]
+    set _client_factory [test::fastcgi::timed_client_factory new \
+			     $_script_name [my fs_path] \
+			     $_resp_hdr $_resp_body \
+			     "::test::fastcgi::pause_client"]
 
     set upstream [test::fastcgi::upstream new \
 		      "$_client_factory create" "" 10000]
@@ -940,10 +903,11 @@ test::define fcgi_get_segmented_upstream_response test::fastcgi::testcase \
 	    test::assert {[$response body] eq $_resp_body}
 	}
 
-	if {![$_client_factory expired]} {
+	set client [$_client_factory last_client]
+	if {![$client has_expired]} {
 	    break
 	}
-	[$_client_factory last_client] close
+	$client close
     }
 
     my check_access_log
@@ -986,7 +950,8 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
     set script_file [open $script_fs_path w]
     close $script_file
 
-    for {set i 1} {1} {incr i} {
+    set expired 1
+    for {set i 1} {$expired} {incr i} {
 	$_client_factory set_counter $i
 
 	set req "GET $_script_name/x/hogehoge HTTP/1.1\r\n"
@@ -999,9 +964,9 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
 
 	    # The server relays the response to the client.
 	    set response [my receive_response $sock $req]
+	    set expired [[$_client_factory last_client] has_expired]
 
-	    if {[$_client_factory expired]} {
-		test::assert {[$response status] == 500}
+	    if {[$response status] == 500} {
 		test::assert_it_is_default_error_response $response
 
 	    } else {
@@ -1011,8 +976,27 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
 		    [string length $_resp_body]}
 		test::assert {[$response field X-Test-Response] eq "$i"}
 		test::assert {[$response body] eq $_resp_body}
-		break
 	    }
+	    [$_client_factory last_client] destroy
+
+	    # Don't let FastCGI server fail to respond.
+	    $_client_factory set_counter 0
+
+	    # The client sends a GET request for the script.
+	    puts -nonewline $sock $req
+
+	    # The server relays the response to the client.
+	    set response [my receive_response $sock $req]
+
+	    # Succeeds this time.
+	    test::assert {[$response status] == 200}
+	    test::assert {[$response field Content-Type] eq "text/html"}
+	    test::assert {[$response field Content-Length] ==
+		[string length $_resp_body]}
+	    test::assert {[$response field X-Test-Response] eq "$i"}
+	    test::assert {[$response body] eq $_resp_body}
+
+	    [$_client_factory last_client] destroy
 	}
     }
 
@@ -1030,5 +1014,3 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
 # property 'upstreams'
 
 # property 'upstreams.address'
-
-# test for partial responses from the FastCGI server
