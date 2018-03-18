@@ -229,8 +229,6 @@ static void khttpd_fcgi_conn_data_is_available(struct khttpd_stream *);
 static void khttpd_fcgi_conn_clear_to_send(struct khttpd_stream *, ssize_t);
 static void khttpd_fcgi_conn_clear_to_send_new(struct khttpd_stream *,
     ssize_t);
-static void khttpd_fcgi_conn_clear_to_send_cfg(struct khttpd_stream *,
-    ssize_t);
 static void khttpd_fcgi_conn_error(struct khttpd_stream *,
     struct khttpd_mbuf_json *);
 static void khttpd_fcgi_conn_release_locked
@@ -257,12 +255,6 @@ static struct khttpd_stream_up_ops khttpd_fcgi_conn_new_ops = {
 	.error = khttpd_fcgi_conn_error
 };
 
-static struct khttpd_stream_up_ops khttpd_fcgi_conn_config_ops = {
-	.data_is_available = khttpd_fcgi_conn_data_is_available,
-	.clear_to_send = khttpd_fcgi_conn_clear_to_send_cfg,
-	.error = khttpd_fcgi_conn_error
-};
-
 static struct khttpd_exchange_ops khttpd_fcgi_exchange_ops = {
 	.dtor = khttpd_fcgi_exchange_dtor,
 	.get = khttpd_fcgi_exchange_get,
@@ -286,8 +278,6 @@ static uma_zone_t khttpd_fcgi_conn_zone;
 static int khttpd_fcgi_nconn;		  /* (a) */
 static bool khttpd_fcgi_nconn_waiting;	  /* (a) */
 static volatile bool khttpd_fcgi_exiting; /* (a) */
-static const char khttpd_fcgi_max_conns[] = "FCGI_MAX_CONNS";
-static const char khttpd_fcgi_max_reqs[] = "FCGI_MAX_REQS";
 
 MTX_SYSINIT(khttpd_fcgi_lock, &khttpd_fcgi_lock, "fcgi", MTX_DEF);
 
@@ -333,66 +323,6 @@ khttpd_fcgi_add_padding(struct mbuf *m, u_int cntlen)
 	padlen = (0 - cntlen) & (KHTTPD_FCGI_RECORD_ALIGN - 1);
 	khttpd_mbuf_append(m, pad, pad + padlen);
 	return (padlen);
-}
-
-static int
-khttpd_fcgi_parse_name_value_pair(struct mbuf *m, u_int off, 
-    u_int *nameoff_out, u_int *namelen_out,
-    u_int *valoff_out, u_int *vallen_out, u_int *endoff_out)
-{
-	u_char buf[8];
-	u_char *bp;
-	uint32_t namelen, vallen;
-	u_int len, tmpoff;
-
-	KHTTPD_ENTRY("%s(%p,%#x)", __func__, m, off);
-
-	tmpoff = off;
-	len = m_length(m, NULL);
-
-	m_copydata(m, off, MIN(sizeof(buf), len - off), buf);
-
-	bp = buf;
-	namelen = *bp++;
-	if ((namelen & 0x80) == 0) {
-		if (len < tmpoff + 1)
-			return (ENXIO);
-		++tmpoff;
-	} else {
-		if (len < tmpoff + 4)
-			return (ENXIO);
-		namelen = (namelen - 0x80) << 24;
-		namelen |= (uint32_t)*bp++ << 16;
-		namelen |= (uint32_t)*bp++ << 8;
-		namelen |= *bp++;
-		tmpoff += 4;
-	}
-
-	vallen = *bp++;
-	if ((vallen & 0x80) == 0) {
-		if (len < tmpoff + 1)
-			return (ENXIO);
-		++tmpoff;
-	} else {
-		if (len < tmpoff + 4)
-			return (ENXIO);
-		vallen = (vallen - 0x80) << 24;
-		vallen |= (uint32_t)*bp++ << 16;
-		vallen |= (uint32_t)*bp++ << 8;
-		vallen |= *bp++;
-		tmpoff += 4;
-	}
-
-	if (len < tmpoff + namelen + vallen)
-		return (ENXIO);
-
-	*nameoff_out = tmpoff;
-	*namelen_out = namelen;
-	*valoff_out = tmpoff + namelen;
-	*vallen_out = vallen;
-	*endoff_out = tmpoff + namelen + vallen;
-
-	return (0);
 }
 
 static void
@@ -886,8 +816,9 @@ khttpd_fcgi_append_param(struct mbuf **head, struct mbuf *tail,
 	char *bp;
 	size_t namelen, oldlen, newlen, len;
 
-	KHTTPD_ENTRY("%s(%p,%p,%s,%s), *len_inout=%#x", __func__, *head, tail,
-	    name, khttpd_ktr_printf("%.*s", (int)vallen, value), *len_inout);
+	KHTTPD_ENTRY("%s(%p,%p,%s), *len_inout=%#x", __func__, *head, tail,
+	    khttpd_ktr_printf("\"%s\",\"%.*s\"", name, 
+		(int)vallen, value), *len_inout);
 
 	bp = buf;
 
@@ -1422,7 +1353,7 @@ khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
 
 static int
 khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
-    struct khttpd_fcgi_upstream *upstream, bool config)
+    struct khttpd_fcgi_upstream *upstream)
 {
 	struct khttpd_fcgi_conn *conn;
 	struct khttpd_socket *socket;
@@ -1431,8 +1362,7 @@ khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, upstream);
 
 	conn = uma_zalloc_arg(khttpd_fcgi_conn_zone, upstream, M_WAITOK);
-	conn->stream.up_ops = config && upstream->max_conns == 1 ?
-	    &khttpd_fcgi_conn_config_ops : &khttpd_fcgi_conn_new_ops;
+	conn->stream.up_ops = &khttpd_fcgi_conn_new_ops;
 	conn->stream.down = socket = khttpd_socket_new(&conn->stream);
 	conn->connecting = true;
 
@@ -1460,10 +1390,7 @@ khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
 		KHTTPD_NOTE("%s error %d", __func__, error);
 		khttpd_fcgi_upstream_fail(upstream);
 		khttpd_fcgi_conn_destroy(conn);
-
-		if (!config) {
-			khttpd_fcgi_report_connection_error(upstream, error);
-		}
+		khttpd_fcgi_report_connection_error(upstream, error);
 
 		return (error);
 	}
@@ -1498,7 +1425,7 @@ khttpd_fcgi_connect(struct khttpd_fcgi_location_data *loc_data)
 		    tailqe);
 		mtx_unlock(&loc_data->lock);
 
-		khttpd_fcgi_conn_new(loc_data, upstream, false);
+		khttpd_fcgi_conn_new(loc_data, upstream);
 
 		mtx_lock(&loc_data->lock);
 	}
@@ -1584,100 +1511,6 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 	 * record, and then send them if both the app_status and
 	 * protocol_status is 0.
 	 */
-}
-
-static void
-khttpd_fcgi_get_values_result(struct khttpd_fcgi_upstream *upstream,
-    struct mbuf *data)
-{
-	char valbuf[16];
-	char namebuf[KHTTPD_FCGI_LONGEST_VALUE_NAME + 1];
-	intmax_t val;
-	struct khttpd_fcgi_location_data *loc_data;
-	u_int pos, end, nameoff, valoff;
-	u_int namelen, vallen;
-	int error, *valptr, max_conns, max_reqs;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, upstream, data);
-
-	loc_data = upstream->location_data;
-	error = 0;
-	pos = 0;
-	end = m_length(data, NULL);
-	max_conns = max_reqs = -1;
-	while (pos < end) {
-		error = khttpd_fcgi_parse_name_value_pair(data, pos,
-		    &nameoff, &namelen, &valoff, &vallen, &pos);
-
-		if (sizeof(namebuf) <= namelen || sizeof(valbuf) <= vallen) {
-			KHTTPD_NOTE("%s %u EINVAL %zd %zd", __func__, __LINE__,
-			    namelen, vallen);
-			error = EINVAL;
-			break;
-		}
-
-		m_copydata(data, nameoff, namelen, namebuf);
-		namebuf[namelen] = '\0';
-		m_copydata(data, valoff, vallen, valbuf);
-
-		if (strcmp(namebuf, khttpd_fcgi_max_conns) == 0) {
-			valptr = &max_conns;
-		} else if (strcmp(namebuf, khttpd_fcgi_max_reqs) == 0) {
-			valptr = &max_reqs;
-		} else {
-			KHTTPD_NOTE("%s %u EINVAL \"%s\"", __func__, __LINE__,
-			    khttpd_ktr_printf("%s", namebuf));
-			error = EINVAL;
-			break;
-		}
-
-		if (*valptr != -1) {
-			KHTTPD_NOTE("%s %u EINVAL", __func__, __LINE__);
-			error = EINVAL;
-			break;
-		}
-
-		error = khttpd_parse_digits(&val, valbuf, valbuf + vallen);
-		if (error != 0 || val <= 0 || INT_MAX < val) {
-			KHTTPD_NOTE("%s %u EINVAL %jd", __func__, __LINE__,
-			    val);
-			error = EINVAL;
-			break;
-		}
-
-		*valptr = val;
-	}
-
-	KHTTPD_NOTE("%s error %d, max_conns %d, max_reqs %d",
-	    __func__, error, max_conns, max_reqs);
-
-	if (max_conns == -1) {
-		max_conns = INT_MAX;
-	}
-
-	if (max_reqs == -1) {
-		max_reqs = INT_MAX;
-	}
-
-	max_conns = MIN(upstream->max_conns_config, MIN(max_conns, max_reqs));
-	if (error == 0 && 0 < max_conns) {
-		mtx_lock(&loc_data->lock);
-		upstream->max_conns = max_conns;
-		mtx_unlock(&loc_data->lock);
-	}
-
-	mtx_lock(&loc_data->lock);
-	if (upstream->nconn < upstream->max_conns) {
-		if (upstream->state == KHTTPD_FCGI_UPSTREAM_FULL) {
-			TAILQ_INSERT_TAIL(&loc_data->avl_upstreams, upstream,
-			    tailqe);
-			upstream->state = KHTTPD_FCGI_UPSTREAM_AVAILABLE;
-		}
-	} else if (upstream->state == KHTTPD_FCGI_UPSTREAM_AVAILABLE) {
-		TAILQ_REMOVE(&loc_data->avl_upstreams, upstream, tailqe);
-		upstream->state = KHTTPD_FCGI_UPSTREAM_FULL;
-	}
-	mtx_unlock(&loc_data->lock);
 }
 
 static void
@@ -1836,13 +1669,6 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 			khttpd_fcgi_report_error(conn->upstream, &logent);
 			break;
 
-		case KHTTPD_FCGI_TYPE_GET_VALUES_RESULT:
-			m_adj(m, sizeof(hdr));
-			m_adj(m, -padlen);
-			khttpd_fcgi_get_values_result(conn->upstream, m);
-			m_freem(m);
-			break;
-
 		default:
 			m_freem(m);
 
@@ -1896,64 +1722,6 @@ khttpd_fcgi_conn_clear_to_send_new(struct khttpd_stream *stream, long space)
 	conn->connecting = false;
 
 	khttpd_stream_continue_receiving(&conn->stream);
-
-	mtx_lock(&loc_data->lock);
-	--loc_data->nconnecting;
-	khttpd_fcgi_conn_release_locked(loc_data, conn);
-}
-
-static void
-khttpd_fcgi_conn_clear_to_send_cfg(struct khttpd_stream *stream, long space)
-{
-	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_hdr *header;
-	size_t namelen;
-	struct mbuf *m;
-	uint8_t *cp;
-	u_int cntlen;
-	int error;
-
-	KHTTPD_ENTRY("%s(%p,%zd)", __func__, stream, space);
-	conn = stream->up;
-
-	if ((error = khttpd_socket_error(stream->down)) != 0) {
-		khttpd_fcgi_upstream_fail(conn->upstream);
-		khttpd_fcgi_report_connection_error(conn->upstream, error);
-		khttpd_fcgi_conn_destroy(conn);
-		return;
-	}
-
-	m = m_gethdr(M_WAITOK, MT_DATA);
-	header = mtod(m, struct khttpd_fcgi_hdr *);
-
-	cp = (void *)(header + 1);
-	namelen = sizeof(khttpd_fcgi_max_conns) - 1;
-	*cp++ = namelen;
-	*cp++ = 0;
-	bcopy(khttpd_fcgi_max_conns, cp, namelen);
-	cp += namelen;
-
-	namelen = sizeof(khttpd_fcgi_max_reqs) - 1;
-	*cp++ = namelen;
-	*cp++ = 0;
-	bcopy(khttpd_fcgi_max_reqs, cp, namelen);
-	cp += namelen;
-
-	cntlen = cp - (uint8_t *)(header + 1);
-	khttpd_fcgi_init_record_header(header, KHTTPD_FCGI_TYPE_GET_VALUES,
-	    cntlen);
-	m->m_len = cp - mtod(m, uint8_t *);
-	KASSERT(m->m_len <= MLEN, ("overflow"));
-	khttpd_fcgi_add_padding(m, cntlen);
-
-	khttpd_stream_send(&conn->stream, m, KHTTPD_STREAM_FLUSH);
-	khttpd_stream_continue_receiving(&conn->stream);
-
-	loc_data = conn->upstream->location_data;
-	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
-	KASSERT(conn->connecting, ("!connecting"));
-	conn->connecting = false;
 
 	mtx_lock(&loc_data->lock);
 	--loc_data->nconnecting;
@@ -2032,7 +1800,7 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 	TAILQ_INSERT_TAIL(&loc_data->avl_upstreams, upstream, tailqe);
 	mtx_unlock(&loc_data->lock);
 
-	if ((error = khttpd_fcgi_conn_new(loc_data, upstream, true)) == 0) {
+	if ((error = khttpd_fcgi_conn_new(loc_data, upstream)) == 0) {
 		status = KHTTPD_STATUS_OK;
 
 	} else {
