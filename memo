@@ -1,0 +1,6 @@
+- Normalization of the target URI
+
+-- Does location lookup uses unescaped URI?
+-- Does cache lookup uses unescaped URI?
+
+- Does KHTTPD_REFCOUNT1_PROTOTYPE need two arguments?

@@ -31,10 +31,10 @@
 #error This file is not for userland code.
 #endif
 
-#include <sys/types.h>
-#include <sys/sbuf.h>
+#include <sys/param.h>
+#include <sys/mbuf.h>
 
-struct mbuf;
+struct khttpd_stream;
 
 enum {
 	KHTTPD_FIELD_UNKNOWN = -1,
@@ -52,34 +52,47 @@ enum {
 	KHTTPD_FIELD_END
 };
 
-enum {
-	KHTTPD_FIELD_ERROR_LONG_LINE,
-	KHTTPD_FIELD_ERROR_FOLD_LINE,
-	KHTTPD_FIELD_ERROR_NO_SEPARATOR,
-	KHTTPD_FIELD_ERROR_NO_NAME,
-	KHTTPD_FIELD_ERROR_WS_FOLLOWING_NAME,
-};
-
-struct khttpd_field_parser {
-	struct sbuf	line;
-	struct mbuf    *ptr;
-	struct mbuf    *tail;
-	u_int		off;
-	u_int		maxlen;
-	bool		consume;
-	char		buf[512];
+struct khttpd_fields {
+	char		*putp;
+	char		*begin;
+	char		*end;
+	int		resid;
 };
 
 int	khttpd_field_find(const char *, const char *);
-int	khttpd_field_maxlen(void);
 const char *
 	khttpd_field_name(int);
-int	khttpd_field_parse(struct khttpd_field_parser *_parser, void *_arg,
-	    int (*_found_fn)(void *_arg, int _field, const char *_name,
-		const char *_value),
-	    int (*_error_fn)(void *_arg, int _reason, const char *_line));
-void	khttpd_field_parse_add_data(struct khttpd_field_parser *_parser,
-	    struct mbuf *_data);
-void	khttpd_field_parse_destroy(struct khttpd_field_parser *_parser);
-void	khttpd_field_parse_init(struct khttpd_field_parser *_parser,
-	    u_int _maxlen, bool _consume, struct mbuf *_data, u_int off);
+int	khttpd_fields_receive(struct khttpd_fields *_fields, struct mbuf **_mb,
+	    struct khttpd_stream *_stream);
+
+inline void
+khttpd_fields_init(struct khttpd_fields *_fields, char *_begin,
+    size_t _bufsize, int _max_input_size)
+{
+
+	_fields->putp = _fields->begin = _begin;
+	_fields->end = _begin + _bufsize;
+	_fields->resid = _max_input_size;
+}
+
+inline char *
+khttpd_fields_begin(struct khttpd_fields *_fields)
+{
+
+	return (_fields->begin);
+}
+
+inline char *
+khttpd_fields_end(struct khttpd_fields *_fields)
+{
+
+	return (_fields->putp);
+}
+
+inline void
+khttpd_fields_reset(struct khttpd_fields *_fields, int _max_input_size)
+{
+
+	_fields->putp = _fields->begin;
+	_fields->resid = _max_input_size;
+}
