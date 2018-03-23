@@ -59,8 +59,7 @@ CLEANFILES += ddb crypto vnode_if.h
 
 .include <bsd.kmod.mk>
 
-# Enable the following definitions on debug build.
-# ========== BEGIN ==========
+.if defined(DEBUG_BUILD)
 
 CFLAGS += -O0 -g -DKHTTPD_DEBUG -DKTR=1 -DDDB=1 -DDEBUG_LOCKS
 CFLAGS += -DWITNESS -DINVARIANTS -DINVARIANT_SUPPORT
@@ -70,7 +69,7 @@ CFLAGS += -DKHTTPD_TRACE_MALLOC
 CFLAGS += -DKHTTPD_TRACE_FN -DKHTTPD_TRACE_BRANCH -DKHTTPD_TRACE_NOTE
 CFLAGS += -DKHTTPD_TEST_ENABLE
 
-# ========== END ==========
+.endif
 
 CWARNFLAGS += -Wno-cast-qual
 
