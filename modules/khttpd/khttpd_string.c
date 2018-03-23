@@ -343,10 +343,10 @@ khttpd_string_normalize_request_at_segend(struct sbuf *dst)
  */
 const char *
 khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
-    const char *end, int *query_off_out, int flags)
+    const char *end, int *query_off_out)
 {
 	const char *cp;
-	int ch, code, error, digit, query_off;
+	int ch, code, digit, query_off;
 
 	/* The request target must start with '/'. */
 	if (end <= begin || *begin != '/') {
@@ -357,24 +357,17 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 	}
 	sbuf_putc(dst, '/');
 
-	query_off = -1;
-	error = 0;
-	for (cp = begin + 1; cp < end;) {
+	for (cp = begin + 1; cp < end; ) {
 		ch = *cp;
 		switch (ch) {
 
 		case '?':
-			if ((flags & KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY)
-			    != 0) {
-				flags &=
-				    ~KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY;
-				khttpd_string_normalize_request_at_segend(dst);
-				query_off = sbuf_len(dst) + 1;
-				ch = '\0';
+			if (query_off_out == NULL) {
+				return (cp);
 			}
-			sbuf_putc(dst, ch);
-			++cp;
-			break;
+			sbuf_putc(dst, '\0');
+			query_off = sbuf_len(dst);
+			goto query_part;
 
 		case '%':
 			if (end < cp + 2) {
@@ -393,49 +386,78 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 			}
 			code = digit | (code << 4);
 
-			if ((flags & KHTTPD_STRING_NORMALIZE_FLAG_UNESCAPE) !=
-			    0 || isalpha(code) || isdigit(code) ||
-			    code == '-' || code == '.' || code == '_' ||
-			    code == '~') {
-				sbuf_putc(dst, code);
-			} else {
-				sbuf_printf(dst, "%02X", code);
-			}
-
+			sbuf_putc(dst, code);
 			cp += 3;
 			continue;
 
 		case '/':
-			if (query_off == -1) {
-				khttpd_string_normalize_request_at_segend(dst);
-				if (dst->s_buf[sbuf_len(dst) - 1] == '/') {
-					++cp;
-					break;
-				}
+			khttpd_string_normalize_request_at_segend(dst);
+			if (dst->s_buf[sbuf_len(dst) - 1] == '/') {
+				++cp;
+				continue;
 			}
+			break;
 
-			sbuf_putc(dst, ch);
-			++cp;
+		/* pchar */
+		case '-': case '.': case '_': case '~':
+		case '!': case '$': case '&': case '\'':
+		case '(': case ')': case '*': case '+':
+		case ',': case ';': case '=':
+		case ':': case '@':
 			break;
 
 		default:
 			if (!isalpha(ch) && !isdigit(ch)) {
-				goto quit;
+				return (cp);
 			}
-			/* FALLTHROUGH */
+		}
 
-		case ':': case '@':
+		sbuf_putc(dst, ch);
+		++cp;
+	}
+
+ query_part:
+	khttpd_string_normalize_request_at_segend(dst);
+
+	while (cp < end) {
+		ch = *cp;
+		switch (ch) {
+
+		case '%':
+			if (end < cp + 2) {
+				return (cp);
+			}
+
+			digit = khttpd_decode_hexdigit(cp[1]);
+			if (digit == -1) {
+				return (cp);
+			}
+
+			digit = khttpd_decode_hexdigit(cp[2]);
+			if (digit == -1) {
+				return (cp);
+			}
+
+			break;
+
+		/* pchar */
+		case '-': case '.': case '_': case '~':
 		case '!': case '$': case '&': case '\'':
 		case '(': case ')': case '*': case '+':
 		case ',': case ';': case '=':
-		case '-': case '.': case '_': case '~':
-			sbuf_putc(dst, ch);
-			++cp;
+		case ':': case '@':
+
+		case '/': case '?':
+			break;
+
+		default:
+			if (!isalpha(ch) && !isdigit(ch)) {
+				return (cp);
+			}
 		}
-	}
- quit:
-	if (query_off == -1) {
-		khttpd_string_normalize_request_at_segend(dst);
+
+		sbuf_putc(dst, ch);
+		++cp;
 	}
 
 	if (query_off_out != NULL) {

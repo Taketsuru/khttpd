@@ -1283,8 +1283,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		cp += 3;
 	} else {
 		cp = khttpd_string_normalize_request_target(&exchange->target,
-		    cp + 1, reqend, &query_off, 
-		    KHTTPD_STRING_NORMALIZE_FLAG_FIND_QUERY);
+		    cp + 1, reqend, &query_off);
 		if (reqend <= cp || *cp != ' ') {
 			KHTTPD_NOTE("reject %u", __LINE__);
 			khttpd_exchange_reject(exchange);

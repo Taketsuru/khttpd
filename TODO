@@ -1,8 +1,6 @@
-- BUG: If the FastCGI server fails to reply to a GET_VALUES record, khttpd
-  doesn't try to send the request again.
+- Does KHTTPD_REFCOUNT1_PROTOTYPE need two arguments?
 
 - More functional tests
-    - Write tests for chunked response body
 
 - BUG: closing a socket just after sending a request that targeted to a
   resource served by a fastcgi server doesn't abort the request sent to
@@ -14,7 +12,7 @@
 
 - Feature to redirect an access to a directory to a URI.
 
-- Last-Modified: and ETag:
+- Last-Modified: and ETag: for khttpd_file location.
 
 - Caching
 

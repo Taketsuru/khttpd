@@ -2411,7 +2411,7 @@ khttpd_ctrl_location_create(void *object_out, struct khttpd_mbuf_json *output,
 	KHTTPD_NOTE("path=%p, path end=%p", 
 	    path, path + strlen(path));
 	cp = khttpd_string_normalize_request_target(&sbuf, path,
-	    path + strlen(path), NULL, 0);
+	    path + strlen(path), NULL);
 	KHTTPD_NOTE("cp=%p", cp);
 	if (*cp != '\0' || sbuf_finish(&sbuf) != 0) {
 		khttpd_problem_invalid_value_response_begin(output);

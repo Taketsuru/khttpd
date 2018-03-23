@@ -650,8 +650,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	--target;
 
 	end = khttpd_string_normalize_request_target(&data->path,
-	    target, target + strlen(target), NULL,
-	    KHTTPD_STRING_NORMALIZE_FLAG_UNESCAPE);
+	    target, target + strlen(target), NULL);
 	if (*end != '\0')
 		goto not_found;
 	sbuf_finish(&data->path);
