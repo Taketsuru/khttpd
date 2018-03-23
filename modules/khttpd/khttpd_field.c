@@ -28,7 +28,6 @@
 #include "khttpd_field.h"
 
 #include <sys/param.h>
-#include <sys/limits.h>
 #include <sys/ctype.h>
 #include <sys/hash.h>
 #include <sys/queue.h>
@@ -38,7 +37,6 @@
 
 #include "khttpd_init.h"
 #include "khttpd_ktr.h"
-#include "khttpd_stream.h"
 #include "khttpd_strtab.h"
 
 static const char *khttpd_fields[] = {
@@ -55,6 +53,200 @@ static const char *khttpd_fields[] = {
 CTASSERT(nitems(khttpd_fields) == KHTTPD_FIELD_END);
 
 static struct khttpd_strtab *khttpd_field_strtab;
+
+int
+khttpd_field_find(const char *begin, const char *end)
+{
+
+	return (khttpd_strtab_find(khttpd_field_strtab, begin, end, FALSE));
+}
+
+int
+khttpd_field_maxlen(void)
+{
+
+	return (khttpd_strtab_maxlen(khttpd_field_strtab));
+}
+
+const char *
+khttpd_field_name(int field)
+{
+
+	return (field < 0 || KHTTPD_FIELD_END <= field ? NULL :
+	    khttpd_fields[field]);
+}
+
+int
+khttpd_field_parse(struct khttpd_field_parser *parser, void *arg,
+    int (*found_fn)(void *arg, int field, const char *name, const char *value),
+    int (*error_fn)(void *arg, int reason, const char *line))
+{
+	struct mbuf *ptr, *next;
+	char *cp0, *cp1, *bolp, *eolp, *enamep, *valuep;
+	u_int curlen, len, maxlen, off;
+	int ch, error, field;
+	bool consume, toolong;
+
+	KHTTPD_ENTRY("%s(%p,%p,%p,%p)",
+	    __func__, parser, arg, found_fn, error_fn);
+	KASSERT(khttpd_field_strtab != NULL, ("not initialized"));
+
+	ptr = parser->ptr;
+	off = parser->off;
+	maxlen = parser->maxlen;
+	error = 0;
+	consume = parser->consume;
+	toolong = false;
+	while (error == 0) {
+		cp0 = mtod(ptr, char *) + off;
+		len = ptr->m_len - off;
+		if ((cp1 = memchr(cp0, '\n', len)) != NULL) {
+			len = cp1 - cp0;
+		}
+
+		if (!toolong) {
+			curlen = sbuf_len(&parser->line);
+			toolong = maxlen < curlen + len;
+			sbuf_bcat(&parser->line, cp0, 
+			    MIN(len, maxlen - curlen + 1));
+		}
+
+		if (cp1 == NULL) {
+			if ((next = ptr->m_next) == NULL) {
+				if (consume) {
+					m_free(ptr);
+					ptr = NULL;
+					off = 0;
+				} else {
+					off = ptr->m_len;
+				}
+				error = EWOULDBLOCK;
+				break;
+			}
+
+			if (consume) {
+				m_free(ptr);
+			}
+			ptr = next;
+			off = 0;
+			continue;
+		}
+
+		sbuf_finish(&parser->line);
+
+		off += len + 1;
+		bolp = sbuf_data(&parser->line);
+		eolp = bolp + sbuf_len(&parser->line);
+
+		if (toolong) {
+			error = error_fn(arg, KHTTPD_FIELD_ERROR_LONG_LINE,
+			    bolp);
+			goto next;
+		}
+
+		if (bolp < eolp && eolp[-1] == '\r')
+			--eolp;
+
+		if (bolp == eolp) {
+			error = 0;
+			break;
+		}
+
+		while ((ch = eolp[-1]) == ' ' || ch == '\t')
+			--eolp;
+		*eolp = '\0';
+
+		enamep = memchr(bolp, ':', eolp - bolp);
+		if (enamep == NULL) {
+			error = error_fn(arg, KHTTPD_FIELD_ERROR_NO_SEPARATOR,
+			    bolp);
+			goto next;
+		}
+
+		if (bolp == enamep) {
+			error = error_fn(arg, KHTTPD_FIELD_ERROR_NO_NAME, bolp);
+			goto next;
+		}
+
+		if ((ch = enamep[-1]) == ' ' || ch == '\t') {
+			error = error_fn(arg,
+			    KHTTPD_FIELD_ERROR_WS_FOLLOWING_NAME, bolp);
+			goto next;
+		}
+
+		if ((ch = *bolp) == ' ' || ch == '\t') {
+			error = error_fn(arg, KHTTPD_FIELD_ERROR_FOLD_LINE,
+			    bolp);
+			goto next;
+		}
+
+		*enamep = '\0';
+
+		valuep = enamep + 1;
+		while (valuep < eolp && ((ch = *valuep) == ' ' || ch == '\t')) {
+			++valuep;
+		}
+
+		field = khttpd_field_find(bolp, enamep);
+		error = found_fn(arg, field, bolp, valuep);
+ next:
+		sbuf_clear(&parser->line);
+	}
+
+	parser->ptr = ptr;
+	parser->off = off;
+
+	return (error);
+}
+
+void
+khttpd_field_parse_add_data(struct khttpd_field_parser *parser,
+    struct mbuf *data)
+{
+	struct mbuf *tail;
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, parser, data);
+
+	if (parser->tail == NULL) {
+		parser->ptr = data;
+	} else {
+		parser->tail->m_next = data;
+	}
+
+	for (tail = data; tail->m_next != NULL; tail = tail->m_next) {
+	}
+	parser->tail = tail;
+}
+
+void
+khttpd_field_parse_destroy(struct khttpd_field_parser *parser)
+{
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, parser);
+
+	if (parser->consume) {
+		m_freem(parser->ptr);
+	}
+	sbuf_delete(&parser->line);
+}
+
+void
+khttpd_field_parse_init(struct khttpd_field_parser *parser,
+    u_int maxlen, bool consume, struct mbuf *data, u_int off)
+{
+
+	KHTTPD_ENTRY("%s(%p,%#x,%d,%p)",
+	    __func__, parser, maxlen, consume, data);
+
+	sbuf_new(&parser->line, parser->buf, sizeof(parser->buf),
+	    SBUF_AUTOEXTEND);
+
+	parser->tail = NULL;
+	khttpd_field_parse_add_data(parser, data);
+	parser->off = off;
+	parser->maxlen = maxlen;
+	parser->consume = consume;
+}
 
 static int
 khttpd_field_init(void)
@@ -75,126 +267,3 @@ khttpd_field_fini(void)
 
 KHTTPD_INIT(khttpd_field, khttpd_field_init, khttpd_field_fini,
     KHTTPD_INIT_PHASE_LOCAL);
-
-int
-khttpd_field_find(const char *begin, const char *end)
-{
-
-	return (khttpd_strtab_find(khttpd_field_strtab, begin, end, FALSE));
-}
-
-const char *
-khttpd_field_name(int field)
-{
-
-	return (field < 0 || KHTTPD_FIELD_END <= field ? NULL :
-	    khttpd_fields[field]);
-}
-
-int
-khttpd_fields_receive(struct khttpd_fields *fields, struct mbuf **mbp,
-    struct khttpd_stream *stream)
-{
-	off_t nread;
-	struct mbuf *next, *mb;
-	char *data, *cp;
-	char *begin, *end, *putp;
-	int clen, len;
-	int resid;
-	int error;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, fields);
-
-	mb = *mbp;
-	begin = fields->begin;
-	end = fields->end;
-	putp = fields->putp;
-	resid = fields->resid;
-	error = 0;
-
-	while (0 <= resid && putp < end) {
-		if (mb == NULL) {
-			nread = SSIZE_MAX;
-			error = khttpd_stream_receive(stream, &nread, &mb);
-			if (error != 0) {
-				KHTTPD_NOTE("error %d", error);
-				break;
-			}
-			if (nread == SSIZE_MAX) {
-				KHTTPD_NOTE("enomsg");
-				error = ENOMSG;
-				break;
-			}
-			KASSERT(mb != NULL, ("mb is NULL"));
-		}
-
-		data = mtod(mb, char *);
-		len = mb->m_len;
-		cp = memchr(data, '\n', len);
-		KHTTPD_NOTE("resid %d, putp - begin %d, len %d, cp %p(%d)",
-		    resid, putp - begin, len, cp, cp == NULL ? 0 : cp - data);
-		if (cp == NULL) {
-			resid -= len;
-			clen = MIN(end - putp, len);
-			bcopy(data, putp, clen);
-			putp += clen;
-			next = mb->m_next;
-			m_free(mb);
-			mb = next;
-			continue;
-		}
-
-		if (cp != data) {
-			len = cp[-1] == '\r' ? cp - data - 1 : cp - data;
-			clen = MIN(resid, MIN(end - putp, len));
-			bcopy(data, putp, clen);
-			putp += clen;
-		} else if (begin < putp && putp[-1] == '\r') {
-			--putp;
-		}
-
-		resid -= cp - data + 1;
-		m_adj(mb, cp - data + 1);
-
-		/*
-		 * This 'if' is necessary to ignore empty lines preceding a
-		 * header.
-		 */
-		if (0 <= resid && begin < putp) {
-			if (putp[-1] == '\n') { /* found an empty line */
-				break;
-			}
-			if (putp < end) {
-				*putp++ = '\n';
-			}
-		}
-	}
-
-	fields->putp = putp;
-
-	if (error == 0 && resid < 0) {
-		KHTTPD_NOTE("enobufs");
-		m_freem(mb);
-		*mbp = NULL;
-		fields->resid = 0;
-		return (ENOBUFS);
-	}
-
-	fields->resid = resid;
-	*mbp = mb;
-
-	return (error);
-}
-
-extern void 
-khttpd_fields_init(struct khttpd_fields *_fields, char *_begin,
-    size_t _bufsize, int _max_input_size);
-
-extern char *
-khttpd_fields_begin(struct khttpd_fields *_fields);
-
-extern char *
-khttpd_fields_end(struct khttpd_fields *_fields);
-
-extern void
-khttpd_fields_reset(struct khttpd_fields *_fields, int _max_input_size);

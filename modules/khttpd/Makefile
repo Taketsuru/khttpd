@@ -26,10 +26,10 @@
 SRCS = khttpd_ktr.c khttpd_test.c khttpd_malloc.c khttpd_init.c khttpd_main.c
 SRCS +=	khttpd_string.c khttpd_mbuf.c khttpd_problem.c khttpd_json.c
 SRCS += khttpd_costruct.c
-SRCS += khttpd_uuid.c khttpd_strtab.c khttpd_stream.c
+SRCS += khttpd_uuid.c khttpd_strtab.c
 SRCS += khttpd_method.c khttpd_field.c khttpd_status_code.c
 SRCS += khttpd_rewriter.c khttpd_webapi.c
-SRCS += khttpd_port.c khttpd_job.c khttpd_log.c
+SRCS += khttpd_stream.c khttpd_port.c khttpd_job.c khttpd_log.c
 SRCS += khttpd_server.c khttpd_vhost.c
 SRCS += khttpd_http.c
 SRCS += khttpd_ctrl.c
