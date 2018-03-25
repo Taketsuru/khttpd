@@ -25,8 +25,6 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-package provide test 0.0
-
 namespace eval test {
 
     namespace export {[a-z]*}

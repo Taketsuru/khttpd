@@ -25,10 +25,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-package provide test_http 0.0
-
 package require json
-package require test
 
 namespace eval test {
 

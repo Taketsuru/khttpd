@@ -28,9 +28,6 @@
 package require json
 package require json::write
 package require tcl::chan::random
-package require test
-package require test_http
-package require test_khttpd
 
 test::define file_basic test::khttpd_file_testcase {
     set khttpd [my khttpd]

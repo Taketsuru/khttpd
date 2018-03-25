@@ -25,9 +25,6 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-package provide test_khttpd 0.0
-package require test
-
 namespace eval test {
     namespace export {[a-z]*}
 

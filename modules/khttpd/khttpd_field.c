@@ -45,6 +45,7 @@ static const char *khttpd_fields[] = {
 	"Connection",
 	"Expect",
 	"Host",
+	"Content-Range",
 	"Content-Type",
 	"Location",
 	"Status"

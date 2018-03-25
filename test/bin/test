@@ -31,7 +31,10 @@ proc match_test {testcase} {
 set root [file join [file dirname [info script]] ..]
 lappend auto_path [file join $root lib]
 
-package require test
+source lib/test.tcl
+source lib/test_http.tcl
+source lib/test_khttpd.tcl
+source lib/test_fcgi.tcl
 
 test::test_driver new
 

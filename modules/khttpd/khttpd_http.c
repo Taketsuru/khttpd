@@ -109,6 +109,7 @@ struct khttpd_exchange {
 	unsigned		close_requested:1;
 	unsigned		continue_requested:1;
 	unsigned		request_has_host:1;
+	unsigned		request_has_content_range:1;
 	unsigned		request_has_content_length:1;
 	unsigned		request_chunked:1;
 	unsigned		response_has_content_length:1;
@@ -1395,6 +1396,10 @@ khttpd_session_receive_request(struct khttpd_session *session)
 			khttpd_session_receive_host_field(session, begin, end);
 			break;
 
+		case KHTTPD_FIELD_CONTENT_RANGE:
+			exchange->request_has_content_range = true;
+			break;
+
 		case KHTTPD_FIELD_CONTENT_LENGTH:
 			khttpd_session_receive_content_length_field(session,
 			    begin, end);
@@ -1465,10 +1470,23 @@ khttpd_session_receive_request(struct khttpd_session *session)
 			}
 		}
 
-		if (handler != NULL || (handler = ops->catch_all) != NULL) {
-			(*handler)(exchange);
-		} else {
+		if (handler == NULL) {
+			handler = ops->catch_all;
+		}
+
+		if (handler == NULL) {
 			khttpd_exchange_method_not_allowed(exchange);
+
+		} else if (exchange->request_has_content_range &&
+		    method == KHTTPD_METHOD_PUT) {
+			KHTTPD_NOTE("%u bad request", __LINE__);
+			status = KHTTPD_STATUS_BAD_REQUEST;
+			khttpd_exchange_set_error_response_body(exchange,
+			    status, NULL);
+			khttpd_exchange_respond(exchange, status);
+
+		} else {
+			(*handler)(exchange);
 		}
 
 	} else if (exchange->method == KHTTPD_METHOD_OPTIONS &&

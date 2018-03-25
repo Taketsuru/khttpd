@@ -27,9 +27,6 @@
 
 package require json
 package require json::write
-package require test
-package require test_http
-package require test_khttpd
 
 # The server closes the connection with no reply if the client closes a
 # connection without sending any data.
@@ -90,6 +87,109 @@ test::define http_no_host_field test::khttpd_1conn_testcase {
     test::assert {[$response status] == 400}
     test::assert_it_is_default_error_response $response
     test::assert_it_is_the_last_response $sock $response
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+# From RFC 7231 section 4.3.4:
+#
+# "An origin server that allows PUT on a given target resource MUST send a
+# 400 (Bad Request) response to a PUT request that contains a
+# Content-Range header field (Section 4.2 of [RFC7233]), since the payload
+# is likely to be partial content that has been mistakenly PUT as a full
+# representation. "
+
+test::define http_put_with_content_range_field test::fastcgi::testcase -setup {
+    variable _script_name
+    variable _client_factory
+
+    set _script_name [my script_location_path]/test.fcgi
+
+    set _client_factory [test::fastcgi::timed_client_factory new \
+			     $_script_name [my fs_path] "" ""]
+
+    set upstream [test::fastcgi::upstream new "$_client_factory create" ""]
+    my add_upstream $upstream
+    $upstream open
+
+    next
+} {
+    variable _script_name
+
+    set khttpd [my khttpd]
+
+    # Create a script file
+    set script_fs_path \
+	[test::local_file [file join [my fs_path] "test.fcgi"]]
+    set script_file [open $script_fs_path w]
+    close $script_file
+
+    my with_connection {sock} {
+	# The client sends a PUT request with a Content-Range field.
+	set req "PUT $_script_name HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "Content-Range: 0-10\r\n"
+	append req "\r\n"
+	puts -nonewline $sock $req
+
+	# The server sends a 'Bad Request' response
+	set response [my receive_response $sock $req]
+	test::assert {[$response status] == 400}
+	test::assert {[$response field Connection] eq ""}
+	test::assert_it_is_default_error_response $response
+	test::assert {[$response rest] == ""}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_put_nowhere_with_content_range_field test::khttpd_testcase {
+    set khttpd [my khttpd]
+
+    my with_connection {sock} {
+	# The client sends a PUT request with a Content-Range field for a
+	# non-existent resource.
+	set req "PUT /nowhere HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "Content-Range: 0-10\r\n"
+	append req "\r\n"
+	puts -nonewline $sock $req
+
+	# The server sends a 'Not Found' response
+	set response [my receive_response $sock $req]
+	test::assert {[$response status] == 404}
+	test::assert {[$response field Connection] eq ""}
+	test::assert_it_is_default_error_response $response
+	test::assert {[$response rest] == ""}
+    }
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+test::define http_forbidden_put_with_content_range_field \
+    test::khttpd_file_testcase \
+{
+    set khttpd [my khttpd]
+
+    my with_connection {sock} {
+	# The client sends a PUT request with a Content-Range field for a
+	# resource that does't allow it.
+	set req "PUT / HTTP/1.1\r\n"
+	append req "Host: [$khttpd host]\r\n"
+	append req "Content-Range: 0-10\r\n"
+	append req "\r\n"
+	puts -nonewline $sock $req
+
+	# The server sends a 'Method Not Allowed' response
+	set response [my receive_response $sock $req]
+	test::assert {[$response status] == 405}
+	test::assert {[$response field Connection] eq ""}
+	test::assert_it_is_default_error_response $response
+	test::assert {[$response rest] == ""}
+    }
 
     my check_access_log
     test::assert_error_log_is_empty $khttpd
