@@ -439,6 +439,7 @@ khttpd_file_read_file(void *arg)
 			pg = vm_page_grab(object, si + i, flags);
 			if (pg == NULL) {
 				VM_OBJECT_WUNLOCK(object);
+				VOP_UNLOCK(vp, 0);
 				khttpd_job_schedule(data->io_job, 0);
 				return;
 			}
