@@ -143,6 +143,7 @@ struct khttpd_session {
 	uma_zone_t		zone;
 
 #define khttpd_session_zero_begin server
+	struct khttpd_session_config config;
 	struct khttpd_server	*server;
 	struct khttpd_port	*port;
 	struct mbuf		*recv_ptr;
@@ -1571,7 +1572,12 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 			break;
 
 		case EWOULDBLOCK:
-			khttpd_stream_continue_receiving(stream);
+			khttpd_stream_continue_receiving(stream,
+			    receive == khttpd_session_receive_request &&
+			    session->exchange.request_header ==
+			    session->exchange.request_header_end ?
+			    session->config.idle_timeout :
+			    session->config.busy_timeout);
 			return;
 
 		case EBUSY:
@@ -2233,13 +2239,16 @@ khttpd_exchange_continue_receiving(struct khttpd_exchange *exchange)
 	struct khttpd_session *session;
 
 	session = khttpd_exchange_get_session(exchange);
-	khttpd_stream_continue_receiving(&session->stream);
+	khttpd_stream_continue_receiving(&session->stream,
+	    session->config.busy_timeout);
 }
 
 void
-khttpd_http_accept_http_client(struct khttpd_port *port)
+khttpd_http_accept_http_client(struct khttpd_port *port,
+    struct khttpd_session_config *config)
 {
 	struct khttpd_http_client *client;
+	struct khttpd_session *session;
 	struct khttpd_socket *socket;
 	struct khttpd_stream *stream;
 	int error;
@@ -2247,18 +2256,27 @@ khttpd_http_accept_http_client(struct khttpd_port *port)
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
 	client = uma_zalloc(khttpd_http_client_zone, M_WAITOK);
-	client->session.port = khttpd_port_acquire(port);
-	stream = &client->session.stream;
-	stream->down = client->session.socket = socket =
-	    khttpd_socket_new(stream);
+	session = &client->session;
+	stream = &session->stream;
+
+	KHTTPD_NOTE("%s idle_timeout=%#lx, busy_timeout=%#lx",
+	    __func__, config->idle_timeout, config->busy_timeout);
+	bcopy(config, &session->config, sizeof(session->config));
+	session->port = khttpd_port_acquire(port);
+	stream->down = session->socket = socket = khttpd_socket_new(stream);
 
 	error = khttpd_port_accept(port, socket);
-	if (error != 0)
+	if (error != 0) {
 		uma_zfree(khttpd_http_client_zone, client);
+	} else {
+		khttpd_stream_continue_receiving(stream,
+		    session->config.idle_timeout);
+	}
 }
 
 void
-khttpd_http_accept_https_client(struct khttpd_port *port)
+khttpd_http_accept_https_client(struct khttpd_port *port,
+    struct khttpd_session_config *config)
 {
 
 	panic("%s: not implemented yet", __func__);

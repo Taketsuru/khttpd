@@ -157,7 +157,8 @@ test::define http_put_nowhere_with_content_range_field test::khttpd_testcase {
 	append req "\r\n"
 	puts -nonewline $sock $req
 
-	# The server sends a 'Not Found' response
+	# The server sends a 'Not Found' response, not a 'Bad Request'
+	# response.
 	set response [my receive_response $sock $req]
 	test::assert {[$response status] == 404}
 	test::assert {[$response field Connection] eq ""}
@@ -176,14 +177,15 @@ test::define http_forbidden_put_with_content_range_field \
 
     my with_connection {sock} {
 	# The client sends a PUT request with a Content-Range field for a
-	# resource that does't allow it.
+	# resource that does't allow PUT method.
 	set req "PUT / HTTP/1.1\r\n"
 	append req "Host: [$khttpd host]\r\n"
 	append req "Content-Range: 0-10\r\n"
 	append req "\r\n"
 	puts -nonewline $sock $req
 
-	# The server sends a 'Method Not Allowed' response
+	# The server sends a 'Method Not Allowed' response, not a 'Bad Request'
+	# response.
 	set response [my receive_response $sock $req]
 	test::assert {[$response status] == 405}
 	test::assert {[$response field Connection] eq ""}
@@ -886,12 +888,231 @@ test::define http_partial_request_chunk_and_trailer test::khttpd_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
-# Request line only
+# port.idleTimeout of wrong type
 
-# Test URI escape/unescape is done correctly.
+test::define http_port_idle_timeout_wrong_type test::khttpd_testcase -setup {
 
-# Query string part of target URI is also normalized.  Test this.
-# - Is the query string is escaped/unescaped correctly?
-# - The dot segment removal must not be applied to query parts.  Test this.
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}wrong_type"}
+	test::assert {[dict get $value title] eq "wrong type"}
+	test::assert {[dict get $value property] == "ports\[0\].idleTimeout"}
+    }
 
-# Is the dot segment just before the query string normalized correctly?
+    set idle_timeout [json::write string hoge]
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout $idle_timeout]
+    next
+} {
+}
+
+# port.idleTimeout of negative value
+
+test::define http_port_idle_timeout_negative test::khttpd_testcase \
+-setup {
+
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}invalid_value"}
+	test::assert {[dict get $value title] eq "invalid value"}
+	test::assert {[dict get $value property] == "ports\[0\].idleTimeout"}
+    }
+
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout -1]
+    next
+} {
+}
+
+# port.idleTimeout of max valid value + 1
+
+test::define http_port_idle_timeout_max_plus_1 test::khttpd_testcase \
+-setup {
+
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}invalid_value"}
+	test::assert {[dict get $value title] eq "invalid value"}
+	test::assert {[dict get $value property] == "ports\[0\].idleTimeout"}
+    }
+
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout 2147483648]
+    next
+} {
+}
+
+# port.idleTimeout of max valid value
+
+test::define http_port_idle_timeout_max test::khttpd_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout 2147483647]
+    next
+} {
+}
+
+# A connection without sending any data will be disconnected by the server
+# after 'port.idleTimeout' seconds.
+
+test::define http_port_idle_timeout_unused test::khttpd_1conn_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout 2]
+    next
+} {
+    test::expect_eof_after [my socket] 2000 $test::timeout_fudge
+}
+
+# Each CRLF sequence sent by a client while the server is waiting a request
+# resets the timer.
+
+test::define http_port_idle_timeout_crlf_before_request \
+    test::khttpd_1conn_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout 2]
+    next
+} {
+    set sock [my socket]
+
+    # This value is slightly smaller than the timeout ('2' above).
+    set interval 1900
+
+    for {set i 0} {$i < 3} {incr i} {
+	after $interval
+	puts -nonewline $sock "\r\n"
+	read $sock 1
+	test::assert {![chan eof $sock]}
+    }
+
+    test::expect_eof_after $sock 2000 $test::timeout_fudge
+}
+
+# The server disconnects an idle connection after 'port.idleTimeout' seconds.
+
+test::define http_port_idle_timeout_after_request test::khttpd_1conn_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] idleTimeout 2]
+    next
+} {
+    set sock [my socket]
+    set khttpd [my khttpd]
+
+    # Exchange 'OPTIONS * HTTP/1.1' and the response
+    set req [test::create_options_asterisc_request $khttpd]
+    puts -nonewline $sock $req
+    set response [my receive_response $sock $req]
+    test::assert {[$response rest] == ""}
+    test::assert_it_is_options_asterisc_response $response
+
+    # The channel is not closed just after the exchange.
+    test::expect_eof_after [my socket] 2000 $test::timeout_fudge
+
+    my check_access_log
+    test::assert_error_log_is_empty $khttpd
+}
+
+# port.busyTimeout of wrong type
+
+test::define http_port_busy_timeout_wrong_type test::khttpd_testcase -setup {
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}wrong_type"}
+	test::assert {[dict get $value title] eq "wrong type"}
+	test::assert {[dict get $value property] == "ports\[0\].busyTimeout"}
+    }
+
+    set busy_timeout [json::write string hoge]
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] busyTimeout $busy_timeout]
+    next
+} {
+}
+
+# port.busyTimeout of negative value
+
+test::define http_port_busy_timeout_negative test::khttpd_testcase \
+-setup {
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}invalid_value"}
+	test::assert {[dict get $value title] eq "invalid value"}
+	test::assert {[dict get $value property] == "ports\[0\].busyTimeout"}
+    }
+
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] busyTimeout -1]
+    next
+} {
+}
+
+# port.busyTimeout of max valid value + 1
+
+test::define http_port_busy_timeout_max_plus_1 test::khttpd_testcase \
+-setup {
+
+    test::expect_start_to_fail [my khttpd] value {
+	test::assert {[dict get $value type] eq
+	    "${test::problem_base_uri}invalid_value"}
+	test::assert {[dict get $value title] eq "invalid value"}
+	test::assert {[dict get $value property] == "ports\[0\].busyTimeout"}
+    }
+
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] busyTimeout 2147483648]
+    next
+} {
+}
+
+# port.busyTimeout of max valid value
+
+test::define http_port_busy_timeout_max test::khttpd_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] busyTimeout 2147483647]
+    next
+} {
+}
+
+# Insert a pause at various positions in requests and see the server closes
+# connections after busyTimeout seconds.
+
+test::define http_port_busy_timeout_fire test::khttpd_testcase \
+-setup {
+    my add_port_config [test::create_port_conf [my port_id] http inet \
+			    "" [[my khttpd] port] busyTimeout 1]
+    next
+} {
+    variable _script_name
+
+    set khttpd [my khttpd]
+
+    set content_length 16
+    set req "OPTIONS * HTTP/1.1\r\n"
+    lappend splits [expr {[string length $req] - 2}]
+    lappend splits [expr {[string length $req] - 1}]
+    lappend splits [string length $req]
+    lappend splits [expr {[string length $req] + 1}]
+    append req "Host: [$khttpd host]\r\n"
+    append req "Content-Length: $content_length\r\n"
+    append req "\r\n"
+    lappend splits [string length $req]
+    lappend splits [expr {[string length $req] + 1}]
+    append req [string repeat X $content_length]
+
+    foreach reqlen $splits {
+	my with_connection {sock} {
+	    # The client sends a partial OPTIONS request
+	    puts -nonewline $sock [string range $req 0 $reqlen-1]
+
+	    # The server timeouts and close the connection
+	    test::expect_eof_after $sock 1000 $test::timeout_fudge
+	}
+    }
+}
+
+# Test that URI unescape is done correctly.
+# -- Is a dot segment just before a query string unescaped correctly?
+# -- Is the query string part of a target URI is kept escaped?

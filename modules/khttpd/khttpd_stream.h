@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,6 +44,8 @@ enum {
 typedef int (*khttpd_stream_receive_fn_t)
     (struct khttpd_stream *, ssize_t *, struct mbuf **);
 typedef void (*khttpd_stream_fn_t)(struct khttpd_stream *);
+typedef void (*khttpd_stream_timeout_fn_t)(struct khttpd_stream *,
+	sbintime_t);
 typedef void (*khttpd_stream_cts_fn_t)(struct khttpd_stream *, ssize_t);
 typedef bool (*khttpd_stream_send_fn_t)
     (struct khttpd_stream *, struct mbuf *, int);
@@ -54,8 +56,8 @@ typedef void (*khttpd_stream_log_fn_t)(struct khttpd_stream *,
 
 struct khttpd_stream_down_ops {
 	khttpd_stream_receive_fn_t	receive;
-	khttpd_stream_fn_t		continue_receiving;
 	khttpd_stream_fn_t		reset;
+	khttpd_stream_timeout_fn_t	continue_receiving;
 	khttpd_stream_send_fn_t		send;
 	khttpd_stream_bufstat_fn_t	send_bufstat;
 	khttpd_stream_fn_t		notify_of_drain;
@@ -87,10 +89,11 @@ khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid,
 }
 
 inline void
-khttpd_stream_continue_receiving(struct khttpd_stream *stream)
+khttpd_stream_continue_receiving(struct khttpd_stream *stream,
+    sbintime_t timeout)
 {
 
-	stream->down_ops->continue_receiving(stream);
+	stream->down_ops->continue_receiving(stream, timeout);
 }
 
 inline void

@@ -39,7 +39,7 @@ khttpd_stream_receive(struct khttpd_stream *stream, ssize_t *resid,
     struct mbuf **m_out);
 
 extern void
-khttpd_stream_continue_receiving(struct khttpd_stream *stream);
+khttpd_stream_continue_receiving(struct khttpd_stream *stream, sbintime_t);
 
 extern void
 khttpd_stream_reset(struct khttpd_stream *stream);

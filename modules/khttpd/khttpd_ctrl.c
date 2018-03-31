@@ -124,6 +124,7 @@ struct khttpd_obj_type {
 };
 
 struct khttpd_ctrl_port_data {
+	struct khttpd_session_config config;
 	struct sockaddr_storage addr;
 	int		protocol;
 };
@@ -181,7 +182,8 @@ static const char *khttpd_ctrl_protocol_table[] = {
 
 CTASSERT(nitems(khttpd_ctrl_protocol_table) == KHTTPD_CTRL_PROTOCOL_END);
 
-static void (*khttpd_ctrl_accept_fns[])(struct khttpd_port *) = {
+static void (*khttpd_ctrl_accept_fns[])
+    (struct khttpd_port *, struct khttpd_session_config *) = {
 	khttpd_http_accept_http_client,
 	khttpd_http_accept_https_client,
 };
@@ -1663,7 +1665,7 @@ khttpd_ctrl_port_ctor(void *host, void *arg)
 	struct khttpd_ctrl_port_data *data;
 
 	data = khttpd_costruct_get(host, khttpd_ctrl_port_data_key);
-	data->addr.ss_len = 0;
+	bzero(data, sizeof(*data));
 
 	return (0);
 }
@@ -1723,15 +1725,27 @@ khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
 	return (KHTTPD_STATUS_OK);
 }
 
+static void
+khttpd_ctrl_accept(struct khttpd_port *port)
+{
+	struct khttpd_ctrl_port_data *port_data;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, port);
+	port_data = khttpd_costruct_get(port, khttpd_ctrl_port_data_key);
+	khttpd_ctrl_accept_fns[port_data->protocol](port, &port_data->config);
+}
+
 static int
 khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
     struct khttpd_problem_property *input_prop_spec, struct khttpd_json *input)
 {
+	struct khttpd_session_config config;
 	struct sockaddr_storage addr;
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_ctrl_port_data *port_data;
 	struct khttpd_port *port;
 	const char *detail, *protocol;
+	int64_t intval;
 	int protocol_id;
 	int error, status;
 
@@ -1765,6 +1779,34 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 
 	port_data = khttpd_costruct_get(port, khttpd_ctrl_port_data_key);
 
+	bcopy(&port_data->config, &config, sizeof(config));
+
+	prop_spec.name = "idleTimeout";
+	status = khttpd_webapi_get_integer_property(&intval, prop_spec.name,
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+	if (intval < 0 || SBT_MAX >> 32 < intval) {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+	config.idle_timeout = intval << 32;
+
+	prop_spec.name = "busyTimeout";
+	status = khttpd_webapi_get_integer_property(&intval, prop_spec.name,
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+	if (intval < 0 || SBT_MAX >> 32 < intval) {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+	config.busy_timeout = intval << 32;
+
 	if (protocol_id != port_data->protocol ||
 	    addr.ss_len != port_data->addr.ss_len ||
 	    memcmp(&addr, &port_data->addr, addr.ss_len) != 0) {
@@ -1774,8 +1816,10 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 		port_data->addr = addr;
 	}
 
+	bcopy(&config, &port_data->config, sizeof(port_data->config));
+
 	error = khttpd_port_start(port, (struct sockaddr *)&port_data->addr,
-	    khttpd_ctrl_accept_fns[protocol_id], &detail);
+	    khttpd_ctrl_accept, &detail);
 	if (error == EADDRNOTAVAIL || error == EADDRINUSE) {
 		khttpd_problem_response_begin(output, KHTTPD_STATUS_CONFLICT,
 		    NULL, NULL);

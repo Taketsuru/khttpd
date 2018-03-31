@@ -36,6 +36,8 @@ namespace eval test {
     variable remote_rel_project_root work/khttpd
     variable remote_abs_project_root \
 	[file join $::env(HOME) $remote_rel_project_root]
+    variable problem_base_uri http://example.com/khttpd/problems/
+    variable timeout_fudge 1000
 
     proc remote_path {path} {
 	variable remote_abs_project_root
@@ -192,7 +194,7 @@ namespace eval test {
 	}
     }
 
-    proc create_port_conf {id protocol family addr port} {
+    proc create_port_conf {id protocol family addr port args} {
 	set addr_list [list family [json::write string $family]]
 	if {$addr != ""} {
 	    lappend addr_list address [json::write string $addr]
@@ -204,7 +206,7 @@ namespace eval test {
 	set id_json [json::write string $id]
 	set protocol_json [json::write string "http"]
 	return [json::write object id $id_json protocol $protocol_json \
-		    address $addr_json]
+		    address $addr_json {*}$args]
     }
 
     proc create_server_conf {id name ports} {
@@ -237,6 +239,25 @@ namespace eval test {
 	return $req
     }
 
+    proc expect_start_to_fail {khttpd varname body} {
+	set start_fn "[info object namespace $khttpd]::_start_fn"
+	set $start_fn [list $varname $body]
+
+	oo::objdefine $khttpd method start {config} {
+	    variable _start_fn
+
+	    try {
+		next $config
+	    } trap {CHILDSTATUS} {msg opts} {
+		set value [json::json2dict $msg]
+		test::assert {[dict get $value status] == 400}
+		apply $_start_fn $value
+	    } on ok {msg opts} {
+		throw [list KHTTPD TEST fail] "'start' is expected to fail"
+	    }
+	}
+    }
+    
     oo::class create khttpd {
 	variable handler host loaded module_dirname port
 
@@ -393,14 +414,8 @@ namespace eval test {
 	}
 
 	method run_remotely {cmd input} {
-	    set exec_error [catch {exec -- ssh $host \
-		"cd $::test::remote_rel_project_root; $cmd" << $input 2>@1} \
-			result options]
-	    if {$result != ""} {
-		set log [[test::test_driver instance] log_chan]
-		puts $log $result
-	    }
-	    test::assume {$exec_error == 0}
+	    exec -- ssh $host \
+		"cd $::test::remote_rel_project_root; $cmd" << $input
 	}
 
 	method start {config} {
@@ -422,6 +437,7 @@ namespace eval test {
     oo::class create khttpd_testcase {
 	superclass test::testcase
 	variable _khttpd _port_id _server_id _responses
+	variable _ports_conf _locations_conf
 
 	constructor {} {
 	    variable ::test::target_addr
@@ -431,6 +447,8 @@ namespace eval test {
 	    set _port_id [test::uuid_new]
 	    set _server_id [test::uuid_new]
 	    set _responses ""
+	    set _ports_conf ""
+	    set _locations_conf ""
 	}
 
 	destructor {
@@ -487,8 +505,21 @@ namespace eval test {
 	}
 
 	method _create_ports_config {} {
-	    return [list [test::create_port_conf $_port_id http \
-			      inet "" [$_khttpd port]]]
+	    if {$_ports_conf eq ""} {
+		return [list [test::create_port_conf $_port_id http \
+				  inet "" [$_khttpd port] idleTimeout 10 \
+				 busyTimeout 10]]
+	    }
+
+	    return $_ports_conf
+	}
+
+	method add_port_config {conf} {
+	    lappend _ports_conf $conf
+	}
+
+	method add_location_config {conf} {
+	    lappend _locations_conf $conf
 	}
 
 	method _create_servers_config {} {
@@ -501,7 +532,7 @@ namespace eval test {
 	}
 
 	method _create_locations_config {} {
-	    return {}
+	    return $_locations_conf
 	}
 
 	method _config {} {
@@ -515,7 +546,9 @@ namespace eval test {
 	    $_khttpd clear_logs
 	    $_khttpd load_kmod
 	    try {
-		$_khttpd start [my _config]
+		set config [my _config]
+		my add_data config $config
+		$_khttpd start $config
 	    } on error {msg opt} {
 		$_khttpd unload_kmod
 		return -options $opt $msg
@@ -581,6 +614,11 @@ namespace eval test {
 	}
 
 	method _setup {} {
+	    my add_location_config \
+		[test::create_location_conf \
+		     [test::uuid_new] khttpd_file [my server_id] / \
+		     fsPath [test::remote_path [my fs_path]]]
+
 	    set _random [tcl::chan::random [list 0 1 2 3 4 5]]
 	    chan configure $_random -translation binary -encoding binary
 
@@ -599,13 +637,6 @@ namespace eval test {
 	    close $_random
 	    file delete -force [test::local_file [my fs_path]]
 	    next
-	}
-
-	method _create_locations_config {} {
-	    set khttpd [my khttpd]
-	    return [list [test::create_location_conf \
-			      [test::uuid_new] khttpd_file [my server_id] / \
-			      fsPath [test::remote_path [my fs_path]]]]
 	}
     }
 }

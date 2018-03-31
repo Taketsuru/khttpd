@@ -297,3 +297,6 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
 # property 'upstreams'
 
 # property 'upstreams.address'
+
+# Send a partial request (with a request payload) to a khttpd_fcgi location and
+# make the server reject because of a port.busyTimeout.

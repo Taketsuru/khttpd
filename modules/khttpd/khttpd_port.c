@@ -153,10 +153,11 @@ LIST_HEAD(khttpd_port_list, khttpd_port);
 static void khttpd_port_dtor(struct khttpd_port *port);
 static void khttpd_port_fini(struct khttpd_port *port);
 
+static void khttpd_socket_stream_reset(struct khttpd_stream *);
 static int khttpd_socket_stream_receive(struct khttpd_stream *, ssize_t *,
     struct mbuf **);
-static void khttpd_socket_stream_continue_receiving(struct khttpd_stream *);
-static void khttpd_socket_stream_reset(struct khttpd_stream *);
+static void khttpd_socket_stream_continue_receiving(struct khttpd_stream *,
+	sbintime_t);
 static bool khttpd_socket_stream_send(struct khttpd_stream *,
     struct mbuf *, int);
 static void khttpd_socket_stream_send_bufstat(struct khttpd_stream *,
@@ -231,8 +232,9 @@ khttpd_socket_job_schedule_locked(struct khttpd_socket *socket,
 	KHTTPD_ENTRY("%s(%p,%p), inqueue %d, active %d",
 	    __func__, socket, job, job->inqueue, job->active);
 
-	if (socket != NULL)
+	if (socket != NULL) {
 		rm_assert(&socket->migration_lock, RA_LOCKED);
+	}
 
 	if (STAILQ_FIRST(&worker->queue) == job) {
 		KHTTPD_NOTE("%s again", __func__);
@@ -293,7 +295,6 @@ khttpd_port_drain_job(struct khttpd_port *port, struct khttpd_socket_job *job)
 	} else {
 		job->again = false;
 	}
-
 
 	mtx_unlock(&worker->lock);
 	return (true);
@@ -385,54 +386,6 @@ khttpd_socket_report_error(struct khttpd_socket *socket, int severity,
 	khttpd_stream_error(socket->stream, &entry);
 }
 
-static int
-khttpd_socket_on_recv_upcall(struct socket *so, void *arg, int flags)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
-
-	socket = arg;
-	rm_rlock(&socket->migration_lock, &trk);
-	khttpd_socket_job_schedule(socket, socket->worker,
-	    &socket->rcv_job.job);
-	rm_runlock(&socket->migration_lock, &trk);
-
-	return (SU_OK);
-}
-
-static int
-khttpd_socket_on_xmit_upcall(struct socket *so, void *arg, int flags)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
-
-	socket = arg;
-	rm_rlock(&socket->migration_lock, &trk);
-	khttpd_socket_job_schedule(socket, socket->worker,
-	    &socket->snd_job.job);
-	rm_runlock(&socket->migration_lock, &trk);
-
-	return (SU_OK);
-}
-
-static void
-khttpd_socket_schedule_reset(void *arg)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	socket = arg;
-	rm_rlock(&socket->migration_lock, &trk);
-	khttpd_socket_job_schedule(socket, socket->worker, &socket->rst_job);
-	rm_runlock(&socket->migration_lock, &trk);
-}
-
 static bool
 khttpd_socket_is_readable(struct socket *so)
 {
@@ -447,6 +400,29 @@ khttpd_socket_is_readable(struct socket *so)
 
 	return (so->so_rcv.sb_lowat <= sbavail(&so->so_rcv) ||
 	    so->so_error != 0 || so->so_rcv.sb_state & SBS_CANTRCVMORE);
+}
+
+static int
+khttpd_socket_on_recv_upcall(struct socket *so, void *arg, int flags)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
+
+	socket = arg;
+
+	if (khttpd_socket_is_readable(so)) {
+		soupcall_clear(so, SO_RCV);
+		callout_stop(&socket->rcv_job.timeo_callout);
+
+		rm_rlock(&socket->migration_lock, &trk);
+		khttpd_socket_job_schedule(socket, socket->worker,
+		    &socket->rcv_job.job);
+		rm_runlock(&socket->migration_lock, &trk);
+	}
+
+	return (SU_OK);
 }
 
 static bool
@@ -473,16 +449,52 @@ khttpd_socket_is_writeable(struct socket *so)
 	return (so->so_snd.sb_lowat <= sbspace(&so->so_snd));
 }
 
+static int
+khttpd_socket_on_xmit_upcall(struct socket *so, void *arg, int flags)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
+
+	socket = arg;
+
+	if (khttpd_socket_is_writeable(so)) {
+		soupcall_clear(so, SO_SND);
+		callout_stop(&socket->snd_job.timeo_callout);
+
+		rm_rlock(&socket->migration_lock, &trk);
+		khttpd_socket_job_schedule(socket, socket->worker,
+		    &socket->snd_job.job);
+		rm_runlock(&socket->migration_lock, &trk);
+	}
+
+	return (SU_OK);
+}
+
+static void
+khttpd_socket_schedule_reset(void *arg)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
+	socket = arg;
+	rm_rlock(&socket->migration_lock, &trk);
+	khttpd_socket_job_schedule(socket, socket->worker, &socket->rst_job);
+	rm_runlock(&socket->migration_lock, &trk);
+}
+
 static void
 khttpd_socket_schedule_event(struct khttpd_socket *socket, int side,
-    bool enable)
+    bool enable, sbintime_t timeout)
 {
 	struct rm_priotracker trk;
 	struct khttpd_socket_worker *worker;
 	struct khttpd_sockbuf_job *job;
 	struct socket *so;
 	struct sockbuf *sb;
-	int timeo;
 	bool kick_callout, has_upcall;
 
 	KHTTPD_ENTRY("%s(%p,%s,%d)", __func__, socket,
@@ -511,11 +523,11 @@ khttpd_socket_schedule_event(struct khttpd_socket *socket, int side,
 	has_upcall = (sb->sb_flags & SB_UPCALL) != 0;
 	kick_callout = false;
 	if (enable && (side == SO_RCV ?
-	    khttpd_socket_is_readable(so) : khttpd_socket_is_writeable(so)))
+	    khttpd_socket_is_readable(so) : khttpd_socket_is_writeable(so))) {
 		khttpd_socket_job_schedule_locked(socket, worker, &job->job);
-	else if (!enable && has_upcall)
+	} else if (!enable && has_upcall) {
 		soupcall_clear(so, side);
-	else if (enable && !has_upcall) {
+	} else if (enable && !has_upcall) {
 		KHTTPD_BRANCH("%s soupcall_set %p", __func__, so);
 		soupcall_set(so, side, side == SO_RCV ? 
 		    khttpd_socket_on_recv_upcall : 
@@ -527,12 +539,15 @@ khttpd_socket_schedule_event(struct khttpd_socket *socket, int side,
 	rm_runlock(&socket->migration_lock, &trk);
 	SOCKBUF_UNLOCK(sb);
 
-	if (!kick_callout)
+	if (!kick_callout) {
+		KHTTPD_NOTE("stop timeout");
 		callout_stop(&job->timeo_callout);
-	else if (0 < (timeo = job->timeo))
+	} else if (0 < timeout) {
+		KHTTPD_NOTE("set timeout %#lx", timeout);
 		callout_reset_sbt_curcpu(&job->timeo_callout,
-		    timeo, khttpd_port_timeout_pr,
+		    timeout, khttpd_port_timeout_pr,
 		    khttpd_socket_schedule_reset, socket, 0);
+	}
 }
 
 static bool
@@ -905,7 +920,7 @@ khttpd_socket_do_rcv_job(void *arg)
 
 	socket = arg;
 	khttpd_socket_assert_curthread(socket);
-	khttpd_socket_schedule_event(socket, SO_RCV, false);
+	khttpd_socket_schedule_event(socket, SO_RCV, false, 0);
 	khttpd_stream_data_is_available(socket->stream);
 }
 
@@ -921,17 +936,18 @@ khttpd_socket_do_snd_job(void *arg)
 	socket = arg;
 	khttpd_socket_assert_curthread(socket);
 
-	khttpd_socket_schedule_event(socket, SO_SND, false);
+	khttpd_socket_schedule_event(socket, SO_SND, false, 0);
 
-	if (socket->xmit_buf != NULL && khttpd_socket_send(socket))
-		khttpd_socket_schedule_event(socket, SO_SND, true);
+	if (socket->xmit_buf != NULL && khttpd_socket_send(socket)) {
+		khttpd_socket_schedule_event(socket, SO_SND, true, 0);
 
-	if (socket->xmit_notification_requested &&
+	} else if (socket->xmit_notification_requested &&
 	    socket->xmit_buf == NULL) {
 		socket->xmit_notification_requested = false;
 
 		so = socket->so;
 		SOCKBUF_LOCK(&so->so_snd);
+		KASSERT(khttpd_socket_is_writeable(so), ("not writeable"));
 		space = sbspace(&so->so_snd);
 		SOCKBUF_UNLOCK(&so->so_snd);
 
@@ -1092,6 +1108,7 @@ khttpd_socket_worker_main(void *arg)
 			continue;
 		}
 again:
+		job->again = false;
 		mtx_unlock(&worker->lock);
 
 		KHTTPD_NOTE("%s start %p", __func__, job);
@@ -1101,8 +1118,7 @@ again:
 		mtx_lock(&worker->lock);
 
 		if (job->again) {
-			KHTTPD_NOTE("%s wakeup %p", __func__, job);
-			job->again = false;
+			KHTTPD_NOTE("%s run again %p", __func__, job);
 			goto again;
 		}
 
@@ -1275,12 +1291,13 @@ khttpd_socket_stream_receive(struct khttpd_stream *stream, ssize_t *resid,
 }
 
 static void
-khttpd_socket_stream_continue_receiving(struct khttpd_stream *stream)
+khttpd_socket_stream_continue_receiving(struct khttpd_stream *stream,
+	sbintime_t timeout)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 	KASSERT(stream->down != NULL, ("no socket"));
-	khttpd_socket_schedule_event(stream->down, SO_RCV, true);
+	khttpd_socket_schedule_event(stream->down, SO_RCV, true, timeout);
 }
 
 static void
@@ -1315,7 +1332,7 @@ khttpd_socket_stream_send(struct khttpd_stream *stream, struct mbuf *m,
 		socket->xmit_buf = m;
 
 	if (khttpd_socket_send(socket))
-		khttpd_socket_schedule_event(socket, SO_SND, true);
+		khttpd_socket_schedule_event(socket, SO_SND, true, 0);
 
 	return (socket->xmit_buf != NULL);
 }
@@ -1352,7 +1369,7 @@ khttpd_socket_stream_notify_of_drain(struct khttpd_stream *stream)
 
 	socket = stream->down;
 	socket->xmit_notification_requested = true;
-	khttpd_socket_schedule_event(socket, SO_SND, true);
+	khttpd_socket_schedule_event(socket, SO_SND, true, 0);
 }
 
 static void
@@ -1575,8 +1592,6 @@ khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket)
 	LIST_INSERT_HEAD(&port->sockets, socket, link);
 	khttpd_port_acquire(port);
 	mtx_unlock(&port->lock);
-
-	khttpd_socket_schedule_event(socket, SO_RCV, true);
 
 	return (0);
 }

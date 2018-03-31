@@ -58,6 +58,11 @@ struct khttpd_exchange_ops {
 	void (*put)(struct khttpd_exchange *, void *, struct mbuf *, bool *);
 };
 
+struct khttpd_session_config {
+	sbintime_t	idle_timeout;
+	sbintime_t	busy_timeout;
+};
+
 void	khttpd_http_error(struct khttpd_mbuf_json *);
 
 struct khttpd_mbuf_json *
@@ -122,5 +127,7 @@ void	khttpd_exchange_reject(struct khttpd_exchange *_xchg);
 void	khttpd_exchange_reset(struct khttpd_exchange *_xchg);
 void	khttpd_exchange_continue_sending(struct khttpd_exchange *);
 void	khttpd_exchange_continue_receiving(struct khttpd_exchange *);
-void	khttpd_http_accept_http_client(struct khttpd_port *_port);
-void	khttpd_http_accept_https_client(struct khttpd_port *_port);
+void	khttpd_http_accept_http_client(struct khttpd_port *_port,
+	    struct khttpd_session_config *_config);
+void	khttpd_http_accept_https_client(struct khttpd_port *_port,
+	    struct khttpd_session_config *_config);

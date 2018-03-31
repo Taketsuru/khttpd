@@ -735,6 +735,21 @@ namespace eval test {
 	}
 	return ""
     }
+
+    proc expect_eof_after {chan timeout fudge} {
+	# The channel is not closed just after the exchange.
+	set idle_start [clock milliseconds]
+	test_chan -timeout [expr {$timeout + $fudge + 1000}] $chan {
+	    method on_readable {chan} {
+		test::assert {[read $chan 1] eq ""}
+		test::assert {[chan eof $chan]}
+		my done
+	    }
+	}
+	set idle_end [clock milliseconds]
+	test::assert {$timeout <= $idle_end - $idle_start && 
+	    $idle_end - $idle_start < $timeout + $fudge}
+    }
 }
 
 # Local Variables:

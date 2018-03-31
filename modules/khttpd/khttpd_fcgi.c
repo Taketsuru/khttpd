@@ -184,6 +184,8 @@ struct khttpd_fcgi_upstream {
 	struct khttpd_fcgi_location_data *location_data;
 
 #define khttpd_fcgi_upstream_zctor_begin nconn
+	sbintime_t	idle_timeout;
+	sbintime_t	busy_timeout;
 	int		nconn;	/* (b) */
 	int		state;	/* (b) */
 
@@ -1563,8 +1565,13 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 	resid = SSIZE_MAX;
 	error = khttpd_stream_receive(&conn->stream, &resid, &m);
 	if (error != 0) {
+		KHTTPD_NOTE("%s error %d", __func__, error);
+
 		if (error == EWOULDBLOCK) {
-			khttpd_stream_continue_receiving(stream);
+			khttpd_stream_continue_receiving(stream,
+			    conn->xchg_data == NULL ? 
+			    conn->upstream->idle_timeout :
+			    conn->upstream->busy_timeout);
 			return;
 		}
 
@@ -1681,8 +1688,10 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 		KHTTPD_NOTE("%s continue mlen %d", __func__, mlen);
 	}
 
-	if (!suspend_recv)
-		khttpd_stream_continue_receiving(stream);
+	if (!suspend_recv) {
+		khttpd_stream_continue_receiving(stream,
+		    conn->upstream->busy_timeout);
+	}
 }
 
 static void
@@ -1721,7 +1730,8 @@ khttpd_fcgi_conn_clear_to_send_new(struct khttpd_stream *stream, long space)
 	KASSERT(conn->connecting, ("!connecting"));
 	conn->connecting = false;
 
-	khttpd_stream_continue_receiving(&conn->stream);
+	khttpd_stream_continue_receiving(&conn->stream,
+	    conn->upstream->idle_timeout);
 
 	mtx_lock(&loc_data->lock);
 	--loc_data->nconnecting;
@@ -1876,7 +1886,8 @@ khttpd_fcgi_exchange_dtor(struct khttpd_exchange *exchange, void *arg)
 		if (conn->suspend_recv) {
 			KHTTPD_NOTE("%s suspend_recv", __func__);
 			conn->suspend_recv = false;
-			khttpd_stream_continue_receiving(&conn->stream);
+			khttpd_stream_continue_receiving(&conn->stream,
+				conn->upstream->busy_timeout);
 		}
 
 		if (!conn->header_finished) {
@@ -1933,7 +1944,8 @@ khttpd_fcgi_exchange_get(struct khttpd_exchange *exchange, void *arg,
 	if ((conn->stdout = m_split(hd, space, M_WAITOK)) == NULL &&
 	    conn->suspend_recv) {
 		conn->suspend_recv = false;
-		khttpd_stream_continue_receiving(&conn->stream);
+		khttpd_stream_continue_receiving(&conn->stream,
+		    conn->upstream->busy_timeout);
 	}
 
 	KHTTPD_NOTE("%s send %#x", __func__, m_length(hd, NULL));
