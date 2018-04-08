@@ -2,21 +2,15 @@
 
 - More functional tests
 
-- BUG: closing a socket just after sending a request that targeted to a
-  resource served by a fastcgi server doesn't abort the request sent to
-  the fastcgi server.  This is because khttpd doesn't monitor the http
-  socket in the interval from the arrival of a request till the sending of
-  the response.
+- Feature to redirect accesses
 
-- Local redirect
+- FastCGI timeout/redirect
 
-- Feature to redirect an access to a directory to a URI.
+- Support range requests for khttpd_file locations.
 
 - Last-Modified: and ETag: for khttpd_file location.
 
 - Caching
-
-- FastCGI timeout/redirect
 
 - TLS
 
@@ -41,3 +35,9 @@
     - Log construction functions should be redesigned.
 
 - Add configuration parameter 'translucent' to khttpd_file location handler.
+
+- BUG: closing a socket just after sending a request that targeted to a
+  resource served by a fastcgi server doesn't abort the request sent to
+  the fastcgi server.  This is because khttpd doesn't monitor the http
+  socket in the interval from the arrival of a request till the sending of
+  the response.

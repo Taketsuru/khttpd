@@ -42,6 +42,8 @@ source functional/http.tcl
 source functional/file.tcl
 source functional/fcgi.tcl
 
+source benchmarks/siege.tcl
+
 [test::test_driver instance] select {{testcase} {match_test $testcase}}
 [test::test_driver instance] run report.xml
 
