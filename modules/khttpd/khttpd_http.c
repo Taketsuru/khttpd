@@ -171,6 +171,7 @@ static int khttpd_session_receive_body(struct khttpd_session *);
 static int khttpd_session_receive_request(struct khttpd_session *);
 static void khttpd_session_data_is_available(struct khttpd_stream *);
 static void khttpd_session_clear_to_send(struct khttpd_stream *, ssize_t);
+static void khttpd_session_reset(struct khttpd_stream *);
 
 static size_t khttpd_header_size_limit = 16384;
 static size_t khttpd_chunkbuf_size = 128;
@@ -180,6 +181,7 @@ static const char khttpd_crlf[] = { '\r', '\n' };
 static struct khttpd_stream_up_ops khttpd_session_ops = {
 	.data_is_available = khttpd_session_data_is_available,
 	.clear_to_send = khttpd_session_clear_to_send,
+	.reset = khttpd_session_reset,
 	.error = khttpd_session_error,
 };
 
@@ -206,13 +208,11 @@ khttpd_exchange_clear(struct khttpd_exchange *exchange)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	KASSERT(exchange->log_entry.mbuf == NULL,
-	    ("exchange->log_entry.mbuf %p", exchange->log_entry.mbuf));
-
 	if (exchange->ops->dtor != NULL) {
 		exchange->ops->dtor(exchange, exchange->arg);
 	}
 
+	khttpd_mbuf_json_delete(&exchange->log_entry);
 	sbuf_clear(&exchange->target);
 	exchange->request_header_end = exchange->request_header;
 	exchange->ops = &khttpd_exchange_null_ops;
@@ -257,10 +257,10 @@ khttpd_session_next(struct khttpd_session *session)
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
 
 	exchange = &session->exchange;
-	KASSERT(session->receive == NULL,
-	    ("session->receive %p", session->receive));
 	session->receive = exchange->close ? khttpd_session_receive_trash :
 	    khttpd_session_receive_request;
+	khttpd_socket_set_smesg(session->socket, 
+	    exchange->close ? "trash" : "request");
 	khttpd_exchange_clear(exchange);
 	if (session->recv_paused) {
 		khttpd_session_data_is_available(&session->stream);
@@ -416,6 +416,7 @@ khttpd_exchange_send_response(struct khttpd_exchange *exchange)
 
 	session = khttpd_exchange_get_session(exchange);
 	status = exchange->status;
+	khttpd_socket_set_smesg(session->socket, "send");
 
 	if (exchange->close_requested) {
 		khttpd_exchange_close(exchange);
@@ -478,7 +479,7 @@ khttpd_exchange_bailout(struct khttpd_exchange *exchange, int status)
 		exchange->close = true;
 		session = khttpd_exchange_get_session(exchange);
 		khttpd_session_transmit_finish(session, NULL);
-		khttpd_stream_reset(&session->stream);
+		khttpd_socket_reset(session->socket);
 		return;
 	}
 
@@ -570,6 +571,7 @@ khttpd_session_receive_finish(struct khttpd_session *session)
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, session);
 
 	session->receive = NULL;
+	khttpd_socket_set_smesg(session->socket, "stall");
 	exchange = &session->exchange;
 
 	if (exchange->request_payload_size != 0) {
@@ -579,11 +581,13 @@ khttpd_session_receive_finish(struct khttpd_session *session)
 		    (uintmax_t)exchange->request_payload_size);
 	}
 
-	if (exchange->ops->put != NULL)
+	if (exchange->ops->put != NULL) {
 		exchange->ops->put(exchange, exchange->arg, NULL, &pause);
+	}
 
-	if (exchange->response_pending)
+	if (exchange->response_pending) {
 		khttpd_exchange_send_response(exchange);
+	}
 }
 
 /*
@@ -885,6 +889,7 @@ khttpd_session_receive_chunk(struct khttpd_session *session)
 
 	if (len == 0) {
 		session->receive = khttpd_session_receive_trailer;
+		khttpd_socket_set_smesg(session->socket, "trailer");
 
 	} else if (OFF_MAX - exchange->request_payload_size < len) {
 		goto too_large;
@@ -892,6 +897,7 @@ khttpd_session_receive_chunk(struct khttpd_session *session)
 	} else {
 		exchange->request_body_resid = len;
 		session->receive = khttpd_session_receive_body;
+		khttpd_socket_set_smesg(session->socket, "body");
 	}
 
 	return (0);
@@ -923,6 +929,7 @@ khttpd_session_receive_chunk_terminator(struct khttpd_session *session)
 	}
 
 	session->receive = khttpd_session_receive_chunk;
+	khttpd_socket_set_smesg(session->socket, "chunk");
 
 	return (0);
 }
@@ -995,6 +1002,7 @@ khttpd_session_receive_body(struct khttpd_session *session)
 	if (exchange->request_chunked) {
 		session->chunkbuf_end = session->chunkbuf_begin;
 		session->receive = khttpd_session_receive_chunk_terminator;
+		khttpd_socket_set_smesg(session->socket, "chunk_terminator");
 	} else {
 		khttpd_session_receive_finish(session);
 	}
@@ -1534,6 +1542,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		 */
 		session->chunkbuf_end = session->chunkbuf_begin;
 		session->receive = khttpd_session_receive_chunk;
+		khttpd_socket_set_smesg(session->socket, "chunk");
 
 	} else if (exchange->request_has_content_length &&
 	    0 < exchange->request_content_length) {
@@ -1541,6 +1550,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		exchange->request_body_resid =
 		    exchange->request_content_length;
 		session->receive = khttpd_session_receive_body;
+		khttpd_socket_set_smesg(session->socket, "body");
 
 	} else {
 		/*
@@ -1599,12 +1609,25 @@ khttpd_session_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 {
 	struct khttpd_session *session;
 
+	KHTTPD_ENTRY("%s(%p,%#x)", __func__, stream, space);
 	session = stream->up;
 	if (session->xmit_waiting_for_drain) {
 		session->xmit_waiting_for_drain = false;
 		khttpd_session_next(session);
-	} else
+	} else {
 		khttpd_session_transmit(session, space);
+	}
+}
+
+static void
+khttpd_session_reset(struct khttpd_stream *stream)
+{
+	struct khttpd_session *session;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, stream);
+	session = stream->up;
+	session->exchange.close = true;
+	khttpd_session_next(session);
 }
 
 static void
@@ -1642,8 +1665,7 @@ khttpd_exchange_fini(struct khttpd_exchange *exchange)
 }
 
 static void
-khttpd_session_init(struct khttpd_session *session,
-    struct khttpd_stream_down_ops *ops, uma_zone_t zone)
+khttpd_session_init(struct khttpd_session *session, uma_zone_t zone)
 {
 	struct khttpd_stream *stream;
 
@@ -1653,7 +1675,6 @@ khttpd_session_init(struct khttpd_session *session,
 
 	stream = &session->stream;
 	stream->up_ops = &khttpd_session_ops;
-	stream->down_ops = ops;
 	stream->up = session;
 
 	sbuf_new(&session->host, session->host_buf, sizeof(session->host_buf),
@@ -1707,8 +1728,7 @@ khttpd_http_client_init(void *mem, int size, int flags)
 	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
 
 	client = mem;
-	khttpd_session_init(&client->session, &khttpd_socket_ops,
-	    khttpd_http_client_zone);
+	khttpd_session_init(&client->session, khttpd_http_client_zone);
 
 	return (0);
 }
@@ -2206,6 +2226,7 @@ khttpd_exchange_respond_immediately(struct khttpd_exchange *exchange,
 
 	session = khttpd_exchange_get_session(exchange);
 	session->receive = NULL;
+	khttpd_socket_set_smesg(session->socket, "stall");
 
 	khttpd_exchange_respond(exchange, status);
 }
@@ -2243,15 +2264,14 @@ khttpd_exchange_continue_receiving(struct khttpd_exchange *exchange)
 	    session->config.busy_timeout);
 }
 
-void
+int
 khttpd_http_accept_http_client(struct khttpd_port *port,
-    struct khttpd_session_config *config)
+    struct khttpd_socket *socket, struct khttpd_session_config *sess_conf,
+    struct khttpd_socket_config *sock_conf)
 {
 	struct khttpd_http_client *client;
 	struct khttpd_session *session;
-	struct khttpd_socket *socket;
 	struct khttpd_stream *stream;
-	int error;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
@@ -2259,24 +2279,21 @@ khttpd_http_accept_http_client(struct khttpd_port *port,
 	session = &client->session;
 	stream = &session->stream;
 
-	KHTTPD_NOTE("%s idle_timeout=%#lx, busy_timeout=%#lx",
-	    __func__, config->idle_timeout, config->busy_timeout);
-	bcopy(config, &session->config, sizeof(session->config));
+	bcopy(sess_conf, &session->config, sizeof(session->config));
 	session->port = khttpd_port_acquire(port);
-	stream->down = session->socket = socket = khttpd_socket_new(stream);
+	session->socket = socket;
+	khttpd_socket_set_smesg(session->socket, "request");
 
-	error = khttpd_port_accept(port, socket);
-	if (error != 0) {
-		uma_zfree(khttpd_http_client_zone, client);
-	} else {
-		khttpd_stream_continue_receiving(stream,
-		    session->config.idle_timeout);
-	}
+	sock_conf->timeout = sess_conf->idle_timeout;
+	sock_conf->stream = stream;
+
+	return (0);
 }
 
-void
+int
 khttpd_http_accept_https_client(struct khttpd_port *port,
-    struct khttpd_session_config *config)
+    struct khttpd_socket *socket, struct khttpd_session_config *sess_conf,
+    struct khttpd_socket_config *sock_conf)
 {
 
 	panic("%s: not implemented yet", __func__);

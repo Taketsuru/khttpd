@@ -56,7 +56,6 @@ typedef void (*khttpd_stream_log_fn_t)(struct khttpd_stream *,
 
 struct khttpd_stream_down_ops {
 	khttpd_stream_receive_fn_t	receive;
-	khttpd_stream_fn_t		reset;
 	khttpd_stream_timeout_fn_t	continue_receiving;
 	khttpd_stream_send_fn_t		send;
 	khttpd_stream_bufstat_fn_t	send_bufstat;
@@ -67,7 +66,9 @@ struct khttpd_stream_down_ops {
 struct khttpd_stream_up_ops {
 	khttpd_stream_fn_t	data_is_available;
 	khttpd_stream_cts_fn_t	clear_to_send;
+	khttpd_stream_fn_t	reset;
 	khttpd_stream_log_fn_t	error;
+	khttpd_stream_fn_t	on_configured;
 };
 
 struct khttpd_stream {
@@ -100,7 +101,9 @@ inline void
 khttpd_stream_reset(struct khttpd_stream *stream)
 {
 
-	stream->down_ops->reset(stream);
+	if (stream->up_ops->reset != NULL) {
+		stream->up_ops->reset(stream);
+	}
 }
 
 inline bool
@@ -155,6 +158,15 @@ khttpd_stream_error(struct khttpd_stream *stream,
 {
 
 	stream->up_ops->error(stream, entry);
+}
+
+inline void
+khttpd_stream_on_configured(struct khttpd_stream *stream)
+{
+
+	if (stream->up_ops->on_configured != NULL) {
+		stream->up_ops->on_configured(stream);
+	}
 }
 
 #endif	/* _KERNEL */

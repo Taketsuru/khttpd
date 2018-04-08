@@ -229,10 +229,10 @@ struct khttpd_fcgi_request_header_context {
 static void khttpd_fcgi_connect(struct khttpd_fcgi_location_data *);
 static void khttpd_fcgi_conn_data_is_available(struct khttpd_stream *);
 static void khttpd_fcgi_conn_clear_to_send(struct khttpd_stream *, ssize_t);
-static void khttpd_fcgi_conn_clear_to_send_new(struct khttpd_stream *,
-    ssize_t);
+static void khttpd_fcgi_conn_reset(struct khttpd_stream *);
 static void khttpd_fcgi_conn_error(struct khttpd_stream *,
     struct khttpd_mbuf_json *);
+static void khttpd_fcgi_conn_on_configured(struct khttpd_stream *);
 static void khttpd_fcgi_conn_release_locked
     (struct khttpd_fcgi_location_data *, struct khttpd_fcgi_conn *);
 static void khttpd_fcgi_exchange_dtor(struct khttpd_exchange *, void *);
@@ -248,13 +248,9 @@ static bool khttpd_fcgi_filter(struct khttpd_location *,
 static struct khttpd_stream_up_ops khttpd_fcgi_conn_ops = {
 	.data_is_available = khttpd_fcgi_conn_data_is_available,
 	.clear_to_send = khttpd_fcgi_conn_clear_to_send,
-	.error = khttpd_fcgi_conn_error
-};
-
-static struct khttpd_stream_up_ops khttpd_fcgi_conn_new_ops = {
-	.data_is_available = khttpd_fcgi_conn_data_is_available,
-	.clear_to_send = khttpd_fcgi_conn_clear_to_send_new,
-	.error = khttpd_fcgi_conn_error
+	.reset = khttpd_fcgi_conn_reset,
+	.error = khttpd_fcgi_conn_error,
+	.on_configured = khttpd_fcgi_conn_on_configured
 };
 
 static struct khttpd_exchange_ops khttpd_fcgi_exchange_ops = {
@@ -274,12 +270,10 @@ static struct khttpd_fcgi_conn_list khttpd_fcgi_conns =
     LIST_HEAD_INITIALIZER(khttpd_fcgi_conns); /* (a) */
 static struct khttpd_fcgi_location_data_list khttpd_fcgi_locations =
     LIST_HEAD_INITIALIZER(khttpd_fcgi_locations); /* (a) */
-static eventhandler_tag khttpd_fcgi_shutdown_tag;
 static uma_zone_t khttpd_fcgi_xchg_data_zone;
 static uma_zone_t khttpd_fcgi_conn_zone;
 static int khttpd_fcgi_nconn;		  /* (a) */
 static bool khttpd_fcgi_nconn_waiting;	  /* (a) */
-static volatile bool khttpd_fcgi_exiting; /* (a) */
 
 MTX_SYSINIT(khttpd_fcgi_lock, &khttpd_fcgi_lock, "fcgi", MTX_DEF);
 
@@ -1353,27 +1347,63 @@ khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
 		uma_zfree(khttpd_fcgi_conn_zone, conn);
 }
 
+static struct khttpd_socket *
+khttpd_fcgi_conn_socket(struct khttpd_fcgi_conn *conn)
+{
+
+	return (conn->stream.down);
+}
+
+static void
+khttpd_fcgi_conn_on_configured(struct khttpd_stream *stream)
+{
+	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_upstream *upstream;
+	struct khttpd_fcgi_location_data *loc_data;
+
+	conn = stream->up;
+	upstream = conn->upstream;
+	loc_data = upstream->location_data;
+
+	conn->connecting = false;
+
+	mtx_lock(&loc_data->lock);
+	--loc_data->nconnecting;
+	khttpd_fcgi_conn_release_locked(loc_data, conn);
+}
+
+static int
+khttpd_fcgi_did_connected(struct khttpd_socket *socket, void *arg,
+	struct khttpd_socket_config *conf)
+{
+	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_upstream *upstream;
+	struct khttpd_fcgi_location_data *loc_data;
+
+	conn = arg;
+	upstream = conn->upstream;
+	loc_data = upstream->location_data;
+
+	conf->stream = &conn->stream;
+	conf->timeout = upstream->idle_timeout;
+
+	return (0);
+}
+
 static int
 khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
     struct khttpd_fcgi_upstream *upstream)
 {
 	struct khttpd_fcgi_conn *conn;
-	struct khttpd_socket *socket;
 	int error;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, upstream);
 
 	conn = uma_zalloc_arg(khttpd_fcgi_conn_zone, upstream, M_WAITOK);
-	conn->stream.up_ops = &khttpd_fcgi_conn_new_ops;
-	conn->stream.down = socket = khttpd_socket_new(&conn->stream);
+	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
 	conn->connecting = true;
 
 	mtx_lock(&khttpd_fcgi_lock);
-	if (khttpd_fcgi_exiting) {
-		mtx_unlock(&khttpd_fcgi_lock);
-		uma_zfree(khttpd_fcgi_conn_zone, conn);
-		return (EINTR);
-	}
 	LIST_INSERT_HEAD(&khttpd_fcgi_conns, conn, allliste);
 	mtx_unlock(&khttpd_fcgi_lock);
 
@@ -1386,18 +1416,14 @@ khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
 	}
 	mtx_unlock(&loc_data->lock);
 
-	error = khttpd_socket_connect(socket, 
-	    (struct sockaddr *)&upstream->sockaddr, NULL);
+	error = khttpd_socket_connect((struct sockaddr *)&upstream->sockaddr,
+	    NULL, khttpd_fcgi_did_connected, conn);
 	if (error != 0 && error != EINPROGRESS) {
 		KHTTPD_NOTE("%s error %d", __func__, error);
 		khttpd_fcgi_upstream_fail(upstream);
 		khttpd_fcgi_conn_destroy(conn);
 		khttpd_fcgi_report_connection_error(upstream, error);
-
-		return (error);
 	}
-
-	khttpd_stream_notify_of_drain(&conn->stream);
 
 	return (0);
 }
@@ -1410,13 +1436,7 @@ khttpd_fcgi_connect(struct khttpd_fcgi_location_data *loc_data)
 	KHTTPD_ENTRY("%s(%p)", __func__, loc_data);
 	mtx_assert(&loc_data->lock, MA_OWNED);
 
-	/*
-	 * The following access to khttpd_fcgi_exiting doesn't need a lock on
-	 * khttpd_fcgi_lock because the code need only an assumption that the
-	 * setting of khttpd_fcgi_exiting eventually observed by the access.
-	 */
-	while (__predict_true(!khttpd_fcgi_exiting) &&
-	    loc_data->nconnecting < loc_data->nwaiting &&
+	while (loc_data->nconnecting < loc_data->nwaiting &&
 	    (upstream = TAILQ_FIRST(&loc_data->avl_upstreams)) != NULL) {
 		KASSERT(upstream->nconn < upstream->max_conns,
 		    ("upstream %p, nconn %d, max_conns %d", upstream,
@@ -1583,9 +1603,7 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 		m_freem(conn->recv_buf);
 		conn->recv_buf = NULL;
 
-		khttpd_stream_reset(&conn->stream);
-		khttpd_fcgi_found_eof(conn);
-
+		khttpd_socket_reset(khttpd_fcgi_conn_socket(conn));
 		return;
 	}
 
@@ -1594,9 +1612,9 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 		return;
 	}
 
-	if (conn->recv_buf == NULL)
+	if (conn->recv_buf == NULL) {
 		conn->recv_buf = m;
-	else {
+	} else {
 		m_cat(conn->recv_buf, m);
 		m = conn->recv_buf;
 	}
@@ -1622,8 +1640,7 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 			conn->recv_buf = NULL;
 			m_freem(m);
 
-			khttpd_stream_reset(&conn->stream);
-			khttpd_fcgi_found_eof(conn);
+			khttpd_socket_reset(khttpd_fcgi_conn_socket(conn));
 			return;
 		}
 
@@ -1632,8 +1649,9 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 		pktlen = sizeof(hdr) + cntlen + padlen;
 		KHTTPD_NOTE("%s cntlen %d, padlen %d, pktlen %d",
 		    __func__, cntlen, padlen, pktlen);
-		if (mlen < pktlen)
+		if (mlen < pktlen) {
 			break;
+		}
 
 		conn->recv_buf = m_split(m, pktlen, M_WAITOK);
 		mlen -= pktlen;
@@ -1702,40 +1720,24 @@ khttpd_fcgi_conn_clear_to_send(struct khttpd_stream *stream, long space)
 	KHTTPD_ENTRY("%s(%p,%#x)", __func__, stream, space);
 
 	conn = stream->up;
-	if (conn->active && conn->xchg_data != NULL)
+	if (conn->active && conn->xchg_data != NULL) {
 		khttpd_fcgi_send_stdin(conn, space);
+	}
 }
 
 static void
-khttpd_fcgi_conn_clear_to_send_new(struct khttpd_stream *stream, long space)
+khttpd_fcgi_conn_reset(struct khttpd_stream *stream)
 {
 	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_upstream *upstream;
-	int error;
 
-	KHTTPD_ENTRY("%s(%p,%#x)", __func__, stream, space);
+	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 	conn = stream->up;
-	upstream = conn->upstream;
-	loc_data = upstream->location_data;
 
-	if ((error = khttpd_socket_error(stream->down)) != 0) {
-		khttpd_fcgi_upstream_fail(upstream);
-		khttpd_fcgi_report_connection_error(conn->upstream, error);
-		khttpd_fcgi_conn_destroy(conn);
-		return;
+	if (conn->suspend_recv) {
+		KHTTPD_NOTE("%s suspend_recv", __func__);
+		conn->suspend_recv = false;
+		khttpd_stream_continue_receiving(&conn->stream, 0);
 	}
-
-	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
-	KASSERT(conn->connecting, ("!connecting"));
-	conn->connecting = false;
-
-	khttpd_stream_continue_receiving(&conn->stream,
-	    conn->upstream->idle_timeout);
-
-	mtx_lock(&loc_data->lock);
-	--loc_data->nconnecting;
-	khttpd_fcgi_conn_release_locked(loc_data, conn);
 }
 
 static void
@@ -1963,7 +1965,7 @@ khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, exchange, arg);
 
-	xchg_data = khttpd_exchange_ops_arg(exchange);
+	xchg_data = arg;
 
 	if (xchg_data->aborted) {
 		KHTTPD_NOTE("%s aborted", __func__);
@@ -1982,10 +1984,11 @@ khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
 			return;
 		}
 
-		if (xchg_data->put_buf == NULL)
+		if (xchg_data->put_buf == NULL) {
 			xchg_data->put_buf = data;
-		else
+		} else {
 			m_cat(xchg_data->put_buf, data);
+		}
 
 		*pause_out = true;
 		return;
@@ -1993,16 +1996,17 @@ khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
 
 	conn = xchg_data->conn;
 
-	if (data == NULL)
+	if (data == NULL) {
 		conn->stdin_send_eof = true;
-	else if (conn->stdin == NULL)
+	} else if (conn->stdin == NULL) {
 		conn->stdin = data;
-	else
+	} else {
 		m_cat(conn->stdin, data);
+	}
 
-	if (conn->send_busy)
+	if (conn->send_busy) {
 		*pause_out = conn->suspend_put = data != NULL;
-	else {
+	} else {
 		conn->send_busy = true;
 		khttpd_stream_send_bufstat(&conn->stream, NULL, NULL, &space);
 		khttpd_fcgi_send_stdin(conn, space);
@@ -2195,14 +2199,6 @@ khttpd_fcgi_do_method(struct khttpd_exchange *exchange)
 		return;
 	}
 
-	if (__predict_false(khttpd_fcgi_exiting)) {
-		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
-		return;
-	}
-
  	mtx_lock(&loc_data->lock);
 	if ((conn = LIST_FIRST(&loc_data->idle_conn)) == NULL) {
 		xchg_data->waiting = true;
@@ -2234,7 +2230,6 @@ khttpd_fcgi_conn_init(void *mem, int size, int flags)
 	sbuf_new(&conn->line, conn->line_buf,
 	    sizeof(conn->line_buf), SBUF_AUTOEXTEND);
 	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
-	conn->stream.down_ops = &khttpd_socket_ops;
 	conn->stream.up = conn;
 	conn->stream.down = NULL;
 	conn->xchg_data = NULL;
@@ -2357,138 +2352,11 @@ khttpd_fcgi_xchg_data_dtor(void *mem, int size, void *arg)
 	m_freem(xchg_data->put_buf);
 }
 
-static void
-khttpd_fcgi_abort_waiting_exchange(void *arg)
-{
-	struct khttpd_exchange *exchange;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_xchg_data *xchg_data;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	xchg_data = arg;
-	exchange = xchg_data->exchange;
-	loc_data = khttpd_location_data(khttpd_exchange_location(exchange));
-
-	mtx_lock(&loc_data->lock);
-	STAILQ_REMOVE_HEAD(&loc_data->queue, link);
-	xchg_data->waiting = false;
-	wakeup(xchg_data);
-	mtx_unlock(&loc_data->lock);
-
-	if (xchg_data->put_buf != NULL) {
-		khttpd_exchange_continue_receiving(exchange);
-	} else if (xchg_data->suspend_get) {
-		khttpd_exchange_continue_sending(exchange);
-	}
-
-	khttpd_exchange_clear_response_header(exchange);
-	khttpd_exchange_set_error_response_body(exchange,
-	    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL);
-	khttpd_exchange_respond(exchange,
-	    KHTTPD_STATUS_INTERNAL_SERVER_ERROR);
-}
-
-static void
-khttpd_fcgi_shutdown(void *arg)
-{
-	struct khttpd_location *prev_loc, *cur_loc;
-	struct khttpd_exchange *exchange;
-	struct khttpd_fcgi_conn *conn, *free;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_xchg_data *xchg_data;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	free = NULL;
-	mtx_lock(&khttpd_fcgi_lock);
-	khttpd_fcgi_exiting = true;
-	LIST_FOREACH(conn, &khttpd_fcgi_conns, allliste) {
-		conn->hold = true;
-		if (free != NULL)
-			LIST_REMOVE(free, allliste);
-		mtx_unlock(&khttpd_fcgi_lock);
-
-		if (free != NULL) {
-			uma_zfree(khttpd_fcgi_conn_zone, free);
-			free = NULL;
-		}
-
-		khttpd_stream_reset(&conn->stream);
-
-		mtx_lock(&khttpd_fcgi_lock);
-
-		if (conn->free_on_unhold)
-			free = conn;
-		else
-			conn->hold = false;
-	}
-	if (free != NULL)
-		LIST_REMOVE(free, allliste);
-
-	prev_loc = NULL;
-	LIST_FOREACH(loc_data, &khttpd_fcgi_locations, liste) {
-		cur_loc = loc_data->location;
-		if (cur_loc == NULL) {
-			continue;
-		}
-
-		khttpd_location_acquire(cur_loc);
-		mtx_unlock(&khttpd_fcgi_lock);
-		khttpd_location_release(prev_loc);
-
-		mtx_lock(&loc_data->lock);
-		while ((xchg_data = STAILQ_FIRST(&loc_data->queue)) != NULL) {
-			exchange = xchg_data->exchange;
-			socket = khttpd_exchange_socket(xchg_data->exchange);
-			mtx_unlock(&loc_data->lock);
-
-			if (khttpd_socket_on_worker_thread(socket)) {
-				khttpd_fcgi_abort_waiting_exchange(xchg_data);
-				mtx_lock(&loc_data->lock);
-
-			} else {
-				khttpd_socket_run_later(socket, 
-				    khttpd_fcgi_abort_waiting_exchange,
-				    xchg_data);
-
-				mtx_lock(&loc_data->lock);
-				while (STAILQ_FIRST(&loc_data->queue) ==
-				    xchg_data) {
-					mtx_sleep(xchg_data, &loc_data->lock,
-					    0, "fcgishut", 0);
-				}
-			}
-		}
-		mtx_unlock(&loc_data->lock);
-		
-		mtx_lock(&khttpd_fcgi_lock);
-		prev_loc = cur_loc;
-	}
-	mtx_unlock(&khttpd_fcgi_lock);
-	khttpd_location_release(prev_loc);
-
-	if (free != NULL)
-		uma_zfree(khttpd_fcgi_conn_zone, free);
-
-	mtx_lock(&khttpd_fcgi_lock);
-	while (0 < khttpd_fcgi_nconn) {
-		khttpd_fcgi_nconn_waiting = true;
-		mtx_sleep(&khttpd_fcgi_nconn, &khttpd_fcgi_lock, 0, "fcgidown",
-		    0);
-	}
-	mtx_unlock(&khttpd_fcgi_lock);
-}
-
 static int
 khttpd_fcgi_run(void)
 {
 
 	KHTTPD_ENTRY("%s()", __func__);
-
-	khttpd_fcgi_shutdown_tag = EVENTHANDLER_REGISTER(khttpd_main_shutdown,
-	    khttpd_fcgi_shutdown, NULL, EVENTHANDLER_PRI_FIRST);
 
 	khttpd_fcgi_xchg_data_zone = uma_zcreate("fcgixchg",
 	    sizeof(struct khttpd_fcgi_xchg_data),
@@ -2509,9 +2377,6 @@ khttpd_fcgi_exit(void)
 {
 
 	KHTTPD_ENTRY("%s()", __func__);
-
-	EVENTHANDLER_DEREGISTER(khttpd_main_shutdown,
-	    khttpd_fcgi_shutdown_tag);
 
 	/*
 	 * Destroying khttpd_fcgi_xchg_data_zone at this point is safe

@@ -61,13 +61,24 @@
 #include "khttpd_mbuf.h"
 #include "khttpd_stream.h"
 
+/* 
+ * lock ordering
+ * 
+ * - port->lock
+ * - khttpd_port_lock
+ * - SOCKBUF_LOCK
+ * - socket->migration_lock
+ * - worker->lock
+ * 
+ */
+
+
 struct khttpd_socket_job {
 	STAILQ_ENTRY(khttpd_socket_job) stqe;
 	void		(*fn)(void *);
 	void		*arg;
-	bool		active;
-	bool		inqueue;
 	bool		again;
+	bool		inqueue;
 	bool		waiting;
 	bool		oneoff;
 };
@@ -76,6 +87,11 @@ STAILQ_HEAD(khttpd_socket_job_stq, khttpd_socket_job);
 
 struct socket;
 SLIST_HEAD(khttpd_socket_slist, khttpd_socket);
+LIST_HEAD(khttpd_socket_list, khttpd_socket);
+
+/*
+ * 1 - worker lock
+ */
 
 struct khttpd_socket_worker {
 	SLIST_ENTRY(khttpd_socket_worker) sle;
@@ -90,31 +106,34 @@ SLIST_HEAD(khttpd_socket_worker_slist, khttpd_socket_worker);
 struct khttpd_sockbuf_job {
 	struct khttpd_socket_job job;
 	struct callout	timeo_callout;
-	int		timeo;
 };
 
 struct khttpd_socket_migration_job {
 	struct khttpd_socket_job job;
-	struct khttpd_socket *socket;
 	struct khttpd_socket_worker *worker;
-	struct khttpd_socket_job *succ;
 };
 
 struct khttpd_socket {
-	LIST_ENTRY(khttpd_socket) link;
+	LIST_ENTRY(khttpd_socket) liste;
 	SLIST_ENTRY(khttpd_socket) sliste;
 	struct khttpd_sockbuf_job rcv_job;
 	struct khttpd_sockbuf_job snd_job;
+	struct khttpd_socket_job cnf_job;
+	struct khttpd_socket_job ntf_job;
 	struct khttpd_socket_job rst_job;
+	struct khttpd_socket_migration_job mig_job;
 	struct rmlock		migration_lock;
 	struct sockaddr_storage	peeraddr;
 	struct khttpd_socket_worker *worker;
-	struct khttpd_stream	*stream;
-
-#define khttpd_socket_zero_begin port
 	struct khttpd_port	*port;
+
+#define khttpd_socket_zero_begin stream
+	struct khttpd_stream	*stream;
 	struct mbuf		*xmit_buf;
 	struct socket		*so;
+	const char		*smesg;
+	khttpd_socket_config_fn_t config_fn;
+	void			*config_arg;
 	unsigned		is_tcp:1;
 	unsigned		xmit_flush_scheduled:1;
 	unsigned		xmit_close_scheduled:1;
@@ -122,27 +141,23 @@ struct khttpd_socket {
 	unsigned		marker:1;
 };
 
-LIST_HEAD(khttpd_socket_list, khttpd_socket);
-
 /* 
  * (a) khttpd_port_lock
  */
 
 struct khttpd_port {
-	LIST_ENTRY(khttpd_port)	liste;
-	struct mtx		lock;
-	struct khttpd_socket_list sockets;
+	LIST_ENTRY(khttpd_port) liste;
+	struct sx		lock;
 	struct khttpd_socket_worker *worker;
 
 #define khttpd_port_zctor_begin	addr
 	struct sockaddr_storage	addr;
-	khttpd_port_accept_fn_t	arrival_fn;
 	struct khttpd_socket_job arrival_job;
 	struct socket		*so;
-	unsigned		is_tcp:1;
+	khttpd_socket_config_fn_t config_fn;
+	void			*config_arg;
 	unsigned		costructs_ready:1;
-	u_int			hold; /* (a) */
-	bool			waiting_unhold; /* (a) */
+	unsigned		marker:1;
 
 #define khttpd_port_zctor_end	refcount
 	KHTTPD_REFCOUNT1_MEMBERS;
@@ -150,10 +165,6 @@ struct khttpd_port {
 
 LIST_HEAD(khttpd_port_list, khttpd_port);
 
-static void khttpd_port_dtor(struct khttpd_port *port);
-static void khttpd_port_fini(struct khttpd_port *port);
-
-static void khttpd_socket_stream_reset(struct khttpd_stream *);
 static int khttpd_socket_stream_receive(struct khttpd_stream *, ssize_t *,
     struct mbuf **);
 static void khttpd_socket_stream_continue_receiving(struct khttpd_stream *,
@@ -164,188 +175,43 @@ static void khttpd_socket_stream_send_bufstat(struct khttpd_stream *,
     u_int *, int *, long *);
 static void khttpd_socket_stream_notify_of_drain(struct khttpd_stream *);
 static void khttpd_socket_stream_destroy(struct khttpd_stream *);
+static void khttpd_port_dtor(struct khttpd_port *);
+static void khttpd_port_fini(struct khttpd_port *);
 
 extern int uma_align_cache;
 
-struct khttpd_stream_down_ops khttpd_socket_ops = {
+struct khttpd_costruct_info *khttpd_port_costruct_info;
+
+static struct khttpd_stream_down_ops khttpd_socket_ops = {
 	.receive = khttpd_socket_stream_receive,
 	.continue_receiving = khttpd_socket_stream_continue_receiving,
-	.reset = khttpd_socket_stream_reset,
 	.send = khttpd_socket_stream_send,
 	.send_bufstat = khttpd_socket_stream_send_bufstat,
 	.notify_of_drain = khttpd_socket_stream_notify_of_drain,
 	.destroy = khttpd_socket_stream_destroy
 };
-
-struct khttpd_costruct_info *khttpd_port_costruct_info;
-
 static struct mtx khttpd_port_lock;
+static struct khttpd_port_list khttpd_ports_running =
+    LIST_HEAD_INITIALIZER(khttpd_ports);
+static struct khttpd_socket_list khttpd_port_sockets =
+    LIST_HEAD_INITIALIZER(khttpd_sockets);
 static struct khttpd_socket_worker **khttpd_socket_workers;
-static struct khttpd_socket_worker_slist *khttpd_socket_worker_table;
-static struct khttpd_port_list khttpd_port_ports;
 static volatile uint64_t khttpd_port_siphash_counter;
+static eventhandler_tag khttpd_port_shutdown_tag;
 static uma_zone_t khttpd_socket_zone;
-static eventhandler_tag khttpd_port_reset_all_tag;
 static sbintime_t khttpd_port_timeout_pr = SBT_1S * 2;
-static u_int khttpd_socket_worker_table_mask;
 static u_int khttpd_socket_worker_count;
-static bool khttpd_port_exiting;
+static enum {
+	KHTTPD_PORT_STATE_READY,
+	KHTTPD_PORT_STATE_SHUTDOWN,
+	KHTTPD_PORT_STATE_EXITING,
+} volatile khttpd_port_state;
 static char khttpd_port_siphash_key[SIPHASH_KEY_LENGTH];
 
-MTX_SYSINIT(khttpd_port_lock, &khttpd_port_lock, "port", MTX_DEF);
+MTX_SYSINIT(khttpd_port_lock, &khttpd_port_lock, "ports", MTX_DEF);
 
 KHTTPD_REFCOUNT1_GENERATE(khttpd_port, khttpd_port, khttpd_port_dtor,
     khttpd_port_fini);
-
-static u_int
-khttpd_socket_worker_hash(struct thread *td)
-{
-
-	return (murmur3_32_hash(&td, sizeof(td), 0xdeadbeef) & 
-	    khttpd_socket_worker_table_mask);
-}
-
-static struct khttpd_socket_worker *
-khttpd_socket_current_worker(void)
-{
-	struct khttpd_socket_worker *worker;
-	struct thread *td;
-
-	td = curthread;
-	SLIST_FOREACH(worker,
-	    &khttpd_socket_worker_table[khttpd_socket_worker_hash(td)], sle) {
-		if (worker->thread == td) {
-			return (worker);
-		}
-	}
-
-	return (NULL);
-}
-
-static void
-khttpd_socket_job_schedule_locked(struct khttpd_socket *socket,
-    struct khttpd_socket_worker *worker,
-    struct khttpd_socket_job *job)
-{
-	bool result;
-
-	KHTTPD_ENTRY("%s(%p,%p), inqueue %d, active %d",
-	    __func__, socket, job, job->inqueue, job->active);
-
-	if (socket != NULL) {
-		rm_assert(&socket->migration_lock, RA_LOCKED);
-	}
-
-	if (STAILQ_FIRST(&worker->queue) == job) {
-		KHTTPD_NOTE("%s again", __func__);
-		job->again = true;
-		return;
-	}
-
-	if ((result = !job->inqueue && job->active)) {
-		KHTTPD_NOTE("%s enqueue", __func__);
-		job->inqueue = true;
-		if (STAILQ_EMPTY(&worker->queue))
-			wakeup(&worker->queue);
-		STAILQ_INSERT_TAIL(&worker->queue, job, stqe);
-	}
-}
-
-static void
-khttpd_socket_job_schedule(struct khttpd_socket *socket,
-    struct khttpd_socket_worker *worker,
-    struct khttpd_socket_job *job)
-{
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, socket, job);
-	mtx_lock(&worker->lock);
-	khttpd_socket_job_schedule_locked(socket, worker, job);
-	mtx_unlock(&worker->lock);
-}
-
-static bool
-khttpd_port_drain_job(struct khttpd_port *port, struct khttpd_socket_job *job)
-{
-	struct khttpd_socket_worker *worker;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, port, job);
-	mtx_assert(&port->lock, MA_OWNED);
-
-	worker = port->worker;
-
-	mtx_lock(&worker->lock);
-
-	job->active = false;
-
-	if (!job->inqueue) {
-
-	} else if (STAILQ_FIRST(&worker->queue) != job) {
-		KHTTPD_NOTE("%s inqueue", __func__);
-		STAILQ_REMOVE(&worker->queue, job, khttpd_socket_job, stqe);
-		job->inqueue = false;
-
-	} else if (curthread != worker->thread) {
-		KHTTPD_NOTE("%s running", __func__);
-		job->again = false;
-		job->waiting = true;
-		mtx_unlock(&port->lock);
-		mtx_sleep(job, &worker->lock, PDROP, "jobdrain", 0);
-		return (false);
-
-	} else {
-		job->again = false;
-	}
-
-	mtx_unlock(&worker->lock);
-	return (true);
-}
-
-static void
-khttpd_port_dtor(struct khttpd_port *port)
-{
-	struct socket *so;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, port);
-
-	KASSERT(LIST_EMPTY(&port->sockets), ("port->sockets not empty"));
-
-	if (port->costructs_ready) {
-		khttpd_costruct_call_dtors(khttpd_port_costruct_info, port);
-
-		mtx_lock(&khttpd_port_lock);
-		while (port->hold != 0) {
-			port->waiting_unhold = true;
-			mtx_sleep(port, &khttpd_port_lock, 0, "porthold", 0);
-		}
-		LIST_REMOVE(port, liste);
-		if (LIST_EMPTY(&khttpd_port_ports))
-			wakeup(&khttpd_port_ports);
-		mtx_unlock(&khttpd_port_lock);
-	}
-
- again:
-	/*
-	 * The following lock is necessary to satisfy the mtx_assert in
-	 * khttpd_port_drain_job.
-	 */
-	mtx_lock(&port->lock);
-	if ((so = port->so) != NULL) {
-		if (!khttpd_port_drain_job(port, &port->arrival_job))
-			goto again;
-		soclose(so);
-	}
-	mtx_unlock(&port->lock);
-
-	mtx_destroy(&port->lock);
-}
-
-static void
-khttpd_port_fini(struct khttpd_port *port)
-{
-
-	KHTTPD_ENTRY("%s(%p)", __func__, port);
-	khttpd_free(port);
-}
 
 static struct khttpd_socket_worker *
 khttpd_socket_worker_find(void)
@@ -372,718 +238,75 @@ khttpd_socket_assert_curthread(struct khttpd_socket *socket)
 }
 
 static void
-khttpd_socket_report_error(struct khttpd_socket *socket, int severity,
-    int error, const char *detail)
+khttpd_socket_job_schedule_locked(struct khttpd_socket_worker *worker,
+    struct khttpd_socket_job *job, bool expedited)
 {
-	struct khttpd_mbuf_json entry;
+	struct khttpd_socket_job *first;
+	bool result;
 
-	khttpd_socket_assert_curthread(socket);
+	KHTTPD_ENTRY("%s(%p,%d), inqueue %d",
+	    __func__, job, expedited, job->inqueue);
 
-	khttpd_problem_log_new(&entry, severity, "socket_error",
-	    "socket I/O error");
-	khttpd_problem_set_detail(&entry, detail);
-	khttpd_problem_set_errno(&entry, error);
-	khttpd_stream_error(socket->stream, &entry);
-}
-
-static bool
-khttpd_socket_is_readable(struct socket *so)
-{
-
-	KHTTPD_ENTRY("%s(%p)", __func__, so);
-	SOCKBUF_LOCK_ASSERT(&so->so_rcv);
-
-	KHTTPD_TR("%s state %#x, sb_state %#x, error %d", __func__,
-	    so->so_state, so->so_rcv.sb_state, so->so_error);
-	KHTTPD_TR("%s sb_lowat %d, sbavail %d", __func__,
-	    so->so_rcv.sb_lowat, sbavail(&so->so_rcv));
-
-	return (so->so_rcv.sb_lowat <= sbavail(&so->so_rcv) ||
-	    so->so_error != 0 || so->so_rcv.sb_state & SBS_CANTRCVMORE);
-}
-
-static int
-khttpd_socket_on_recv_upcall(struct socket *so, void *arg, int flags)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
-
-	socket = arg;
-
-	if (khttpd_socket_is_readable(so)) {
-		soupcall_clear(so, SO_RCV);
-		callout_stop(&socket->rcv_job.timeo_callout);
-
-		rm_rlock(&socket->migration_lock, &trk);
-		khttpd_socket_job_schedule(socket, socket->worker,
-		    &socket->rcv_job.job);
-		rm_runlock(&socket->migration_lock, &trk);
+	first = STAILQ_FIRST(&worker->queue);
+	if (first == job) {
+		KHTTPD_NOTE("%s again", __func__);
+		job->again = true;
+		return;
 	}
 
-	return (SU_OK);
-}
-
-static bool
-khttpd_socket_is_writeable(struct socket *so)
-{
-
-	KHTTPD_ENTRY("%s(%p)", __func__, so);
-	SOCKBUF_LOCK_ASSERT(&so->so_snd);
-
-	KHTTPD_TR("%s state %#x, sb_state %#x, error %d", __func__,
-	    so->so_state, so->so_snd.sb_state, so->so_error);
-	KHTTPD_TR("%s sb_lowat %d, sbspace %d", __func__,
-	    so->so_snd.sb_lowat, sbspace(&so->so_snd));
-
-	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0 ||
-	    so->so_error != 0) {
-		return (true);
+	if ((result = !job->inqueue)) {
+		KHTTPD_NOTE("%s enqueue", __func__);
+		job->inqueue = true;
+		if (STAILQ_EMPTY(&worker->queue)) {
+			wakeup(&worker->queue);
+		}
+		if (expedited) {
+			STAILQ_INSERT_AFTER(&worker->queue, first, job, stqe);
+		} else {
+			STAILQ_INSERT_TAIL(&worker->queue, job, stqe);
+		}
 	}
-
-	if ((so->so_state & SS_ISCONNECTED) == 0) {
-		return (false);
-	}
-
-	return (so->so_snd.sb_lowat <= sbspace(&so->so_snd));
-}
-
-static int
-khttpd_socket_on_xmit_upcall(struct socket *so, void *arg, int flags)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
-
-	socket = arg;
-
-	if (khttpd_socket_is_writeable(so)) {
-		soupcall_clear(so, SO_SND);
-		callout_stop(&socket->snd_job.timeo_callout);
-
-		rm_rlock(&socket->migration_lock, &trk);
-		khttpd_socket_job_schedule(socket, socket->worker,
-		    &socket->snd_job.job);
-		rm_runlock(&socket->migration_lock, &trk);
-	}
-
-	return (SU_OK);
 }
 
 static void
-khttpd_socket_schedule_reset(void *arg)
+khttpd_socket_job_schedule(struct khttpd_socket_worker *worker,
+    struct khttpd_socket_job *job, bool expedited)
 {
-	struct rm_priotracker trk;
-	struct khttpd_socket *socket;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	socket = arg;
-	rm_rlock(&socket->migration_lock, &trk);
-	khttpd_socket_job_schedule(socket, socket->worker, &socket->rst_job);
-	rm_runlock(&socket->migration_lock, &trk);
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, job, expedited);
+	mtx_lock(&worker->lock);
+	khttpd_socket_job_schedule_locked(worker, job, expedited);
+	mtx_unlock(&worker->lock);
 }
 
 static void
-khttpd_socket_schedule_event(struct khttpd_socket *socket, int side,
-    bool enable, sbintime_t timeout)
+khttpd_socket_job_cancel(struct khttpd_socket *socket,
+    struct khttpd_socket_job *job)
 {
 	struct rm_priotracker trk;
 	struct khttpd_socket_worker *worker;
-	struct khttpd_sockbuf_job *job;
-	struct socket *so;
-	struct sockbuf *sb;
-	bool kick_callout, has_upcall;
 
-	KHTTPD_ENTRY("%s(%p,%s,%d)", __func__, socket,
-	    side == SO_RCV ? "recv" : side == SO_SND ? "send" : "invalid",
-	    enable);
-
-	if ((so = socket->so) == NULL)
-		return;
-
-	job = side == SO_RCV ? &socket->rcv_job : &socket->snd_job;
-	sb = side == SO_RCV ? &so->so_rcv : &so->so_snd;
-	SOCKBUF_LOCK(sb);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, socket, job);
+	khttpd_socket_assert_curthread(socket);
+	KASSERT(!job->oneoff, ("job %p oneoff", job));
 
 	rm_rlock(&socket->migration_lock, &trk);
 	worker = socket->worker;
 	mtx_lock(&worker->lock);
 
-	if (job->job.active == enable) {
-		mtx_unlock(&worker->lock);
-		rm_runlock(&socket->migration_lock, &trk);
-		SOCKBUF_UNLOCK(sb);
-		return;
-	}
-	job->job.active = enable;
+	if (!job->inqueue) {
 
-	has_upcall = (sb->sb_flags & SB_UPCALL) != 0;
-	kick_callout = false;
-	if (enable && (side == SO_RCV ?
-	    khttpd_socket_is_readable(so) : khttpd_socket_is_writeable(so))) {
-		khttpd_socket_job_schedule_locked(socket, worker, &job->job);
-	} else if (!enable && has_upcall) {
-		soupcall_clear(so, side);
-	} else if (enable && !has_upcall) {
-		KHTTPD_BRANCH("%s soupcall_set %p", __func__, so);
-		soupcall_set(so, side, side == SO_RCV ? 
-		    khttpd_socket_on_recv_upcall : 
-		    khttpd_socket_on_xmit_upcall, socket);
-		kick_callout = true;
+	} else if (STAILQ_FIRST(&worker->queue) != job) {
+		KHTTPD_NOTE("%s inqueue", __func__);
+		STAILQ_REMOVE(&worker->queue, job, khttpd_socket_job, stqe);
+		job->inqueue = false;
+
+	} else {
+		job->again = false;
 	}
 
 	mtx_unlock(&worker->lock);
 	rm_runlock(&socket->migration_lock, &trk);
-	SOCKBUF_UNLOCK(sb);
-
-	if (!kick_callout) {
-		KHTTPD_NOTE("stop timeout");
-		callout_stop(&job->timeo_callout);
-	} else if (0 < timeout) {
-		KHTTPD_NOTE("set timeout %#lx", timeout);
-		callout_reset_sbt_curcpu(&job->timeo_callout,
-		    timeout, khttpd_port_timeout_pr,
-		    khttpd_socket_schedule_reset, socket, 0);
-	}
-}
-
-static bool
-khttpd_socket_send(struct khttpd_socket *socket)
-{
-	struct socket *so;
-	struct mbuf *end, *head, *m, *prev;
-	struct thread *td;
-	ssize_t space, len, endlen;
-	int error, flags;
-	bool need_close;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, socket);
-	khttpd_socket_assert_curthread(socket);
-
-	if (socket->snd_job.job.active || socket->xmit_buf == NULL)
-		return (false);
-
-	td = curthread;
-
-	so = socket->so;
-	KHTTPD_NOTE("%s so %p", __func__, so);
-	SOCKBUF_LOCK(&so->so_snd);
-	space = sbspace(&so->so_snd);
-	SOCKBUF_UNLOCK(&so->so_snd);
-
-	/* 
-	 * Find 'end' such that the total length from 'head' to 'end' is
-	 * less than the available space in the socket.
-	 */
-
-	head = socket->xmit_buf;
-	prev = NULL;
-	len = 0;
-	for (end = head; end != NULL; end = end->m_next) {
-		endlen = end->m_len;
-		if (space < len + endlen)
-			break;
-		len += endlen;
-		prev = end;
-	}
-
-	socket->xmit_buf = end;
-
-	if (prev == NULL)
-		head = NULL;
-	else
-		prev->m_next = NULL;
-
-	flags = MSG_DONTWAIT;
-	if (end != NULL ||
-	    (!socket->xmit_close_scheduled && !socket->xmit_flush_scheduled)) {
-		flags |= MSG_MORETOCOME;
-	}
-
-	need_close = end == NULL && socket->xmit_close_scheduled;
-	if (need_close) {
-		socket->xmit_close_scheduled =
-		    socket->xmit_flush_scheduled = false;
-	} else if (end == NULL && socket->xmit_flush_scheduled) {
-		socket->xmit_flush_scheduled = false;
-	}
-
-	if (head != NULL) {
-		/* sosend needs a packet */
-		if ((head->m_flags & M_PKTHDR) == 0) {
-			m = m_gethdr(M_WAITOK, MT_DATA);
-			m->m_next = head;
-			head = m;
-		}
-		head->m_pkthdr.len = len;
-
-		error = sosend(so, NULL, NULL, head, NULL, flags, td);
-		if (error != 0 && error != EPIPE)
-			khttpd_socket_report_error(socket, LOG_WARNING, error,
-			    "send() failed");
-	}
-
-	if (need_close) {
-		error = soshutdown(so, SHUT_WR);
-		if (error != 0 && error != ENOTCONN)
-			khttpd_socket_report_error(socket, LOG_WARNING, error,
-			    "shutdown(SHUT_WR) failed");
-	}
-
-	return (end != NULL || socket->xmit_notification_requested);
-}
-
-static void
-khttpd_socket_reset(void *arg)
-{
-	struct linger linger;
-	struct sockopt sockopt;
-	struct socket *so;
-	struct khttpd_socket *socket;
-	int error;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	socket = arg;
-	so = socket->so;
-	if (so == NULL)
-		return;
-
-	khttpd_socket_assert_curthread(socket);
-
-	sockopt.sopt_dir = SOPT_SET;
-	sockopt.sopt_level = SOL_SOCKET;
-	sockopt.sopt_name = SO_LINGER;
-	sockopt.sopt_val = &linger;
-	sockopt.sopt_valsize = sizeof(linger);
-	sockopt.sopt_td = NULL;
-	linger.l_onoff = 1;
-	linger.l_linger = 0;
-	error = sosetopt(so, &sockopt);
-	if (error != 0)
-		khttpd_socket_report_error(socket, LOG_ERR, error,
-		    "setsockopt(SOL_SOCKET, SO_LINGER) failed");
-
-	error = soshutdown(so, SHUT_RDWR);
-	if (error != 0 && error != ENOTCONN)
-		khttpd_socket_report_error(socket, LOG_ERR, error,
-		    "shutdown(SHUT_RD) failed");
-}
-
-static void
-khttpd_socket_migrate(struct khttpd_socket *socket,
-    struct khttpd_socket_worker *curworker,
-    struct khttpd_socket_worker *newworker,
-    struct khttpd_socket_job *auxjob)
-{
-	struct khttpd_socket_job *jobs[4], **jobp;
-	struct khttpd_socket_job *job, *prev;
-	int i, njobs;
-	bool need_wakeup;
-
-	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, curworker, newworker);
-	rm_assert(&socket->migration_lock, RA_WLOCKED);
-	mtx_assert(&curworker->lock, MA_OWNED);
-
-	jobp = jobs;
-
-	if (auxjob != NULL) {
-		*jobp++ = auxjob;
-	}
-
-	prev = STAILQ_FIRST(&curworker->queue);
-	for (job = STAILQ_NEXT(prev, stqe); job != NULL;
-	     job = STAILQ_NEXT(job, stqe)) {
-		if (job == &socket->rcv_job.job ||
-		    job == &socket->snd_job.job ||
-		    job == &socket->rst_job) {
-			KASSERT(jobp - jobs < nitems(jobs), ("jobs overflow"));
-			STAILQ_REMOVE_AFTER(&curworker->queue, prev, stqe);
-			job->inqueue = false;
-			*jobp++ = job;
-			job = prev;
-		}
-	}
-	mtx_unlock(&curworker->lock);
-
-	socket->worker = newworker;
-
-	mtx_lock(&newworker->lock);
-	njobs = jobp - jobs;
-	need_wakeup = jobp != jobs && STAILQ_EMPTY(&newworker->queue);
-	for (i = 0; i < njobs; ++i) {
-		job = jobs[i];
-		STAILQ_INSERT_TAIL(&newworker->queue, job, stqe);
-		job->inqueue = false;
-	}
-	if (need_wakeup)
-		wakeup(&newworker->queue);
-	mtx_unlock(&newworker->lock);
-
-	rm_wunlock(&socket->migration_lock);
-}
-
-static void
-khttpd_socket_do_migration_job(void *arg)
-{
-	struct khttpd_socket *socket;
-	struct khttpd_socket_migration_job *job;
-	struct khttpd_socket_worker *curworker, *newworker;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	job = arg;
-	socket = job->socket;
-	newworker = job->worker;
-	khttpd_socket_assert_curthread(socket);
-
-	rm_wlock(&socket->migration_lock);
-	curworker = socket->worker;
-
-	mtx_lock(&curworker->lock);
-	khttpd_socket_migrate(socket, curworker, newworker, job->succ);
-}
-
-void
-khttpd_socket_run_later(struct khttpd_socket *socket, void (*fn)(void *),
-    void *arg)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket_job *job;
-	struct khttpd_socket_worker *worker;
-
-	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, fn, arg);
-
-	job = khttpd_malloc(sizeof(struct khttpd_socket_job));
-	bzero(job, sizeof(*job));
-	job->fn = fn;
-	job->arg = arg;
-	job->oneoff = job->active = true;
-
-	if (socket != NULL) {
-		rm_rlock(&socket->migration_lock, &trk);
-		khttpd_socket_job_schedule(socket, socket->worker, job);
-		rm_runlock(&socket->migration_lock, &trk);
-
-	} else {
-		worker = khttpd_socket_worker_find();
-
-		mtx_lock(&worker->lock);
-		job->inqueue = true;
-		if (STAILQ_EMPTY(&worker->queue))
-			wakeup(&worker->queue);
-		STAILQ_INSERT_TAIL(&worker->queue, job, stqe);
-		mtx_unlock(&worker->lock);
-	}
-}
-
-int
-khttpd_socket_set_affinity(struct khttpd_socket *subject, 
-    struct khttpd_socket *source, void (*notify)(void *), void *arg)
-{
-	struct khttpd_socket_job *running, *job2;
-	struct khttpd_socket_migration_job *job1;
-	struct khttpd_socket_worker *curworker, *newworker;
-	struct thread *td;
-	bool on_newworker, need_wakeup;
-
-	KHTTPD_ENTRY("%s(%p,%p,%p,%p)",
-	    __func__, subject, source, notify, arg);
-
-	td = curthread;
-	job1 = NULL;
-	job2 = NULL;
-	if (source->worker->thread != td)
-		goto alloc_job2;
-	for (;;) {
-		rm_wlock(&subject->migration_lock);
-
-		curworker = subject->worker;
-		newworker = source->worker;
-		on_newworker = newworker->thread == td;
-
-		if (__predict_true(curworker == newworker ||
-		    (!subject->rcv_job.job.inqueue && 
-		     !subject->snd_job.job.inqueue &&
-		     !subject->rst_job.inqueue))) {
-			/*
-			 * Member 'inqueue' is set only by
-			 * khttpd_socket_job_schedule_locked() and it requires
-			 * the caller to lock migration_lock.  Because we have
-			 * the writer lock of migration_lock, it's guaranteed
-			 * that inqueue doesn't change to true even if we don't
-			 * have curworker->lock.
-			 */
-
-			if (__predict_false(!on_newworker && job2 == NULL)) {
-				rm_wunlock(&subject->migration_lock);
-				goto alloc_job2;
-			}
-
-			subject->worker = newworker;
-
-			if (!on_newworker) {
-				mtx_lock(&newworker->lock);
-				need_wakeup = STAILQ_EMPTY(&newworker->queue);
-				STAILQ_INSERT_TAIL(&newworker->queue, job2,
-				    stqe);
-				job2->inqueue = true;
-				if (need_wakeup)
-					wakeup(&newworker->queue);
-				mtx_unlock(&newworker->lock);
-				job2 = NULL;
-			}
-
-			rm_wunlock(&subject->migration_lock);
-			break;
-		}
-
-		mtx_lock(&curworker->lock);
-
-		running = STAILQ_FIRST(&curworker->queue);
-		if (running != &subject->rcv_job.job &&
-		    running != &subject->snd_job.job &&
-		    running != &subject->rst_job) {
-			if (on_newworker)
-				khttpd_socket_migrate(subject, curworker,
-				    newworker, NULL);
-			else if (job2 != NULL) {
-				khttpd_socket_migrate(subject, curworker,
-				    newworker, job2);
-				job2 = NULL;
-			} else {
-				mtx_unlock(&curworker->lock);
-				rm_wunlock(&subject->migration_lock);
-				goto alloc_job2;
-			}
-			break;
-		}
-
-		if (job1 != NULL && job2 != NULL) {
-			job1->worker = newworker;
-			STAILQ_INSERT_AFTER(&curworker->queue, running,
-			    &job1->job, stqe);
-			job1->job.inqueue = true;
-
-			mtx_unlock(&curworker->lock);
-			rm_wunlock(&subject->migration_lock);
-
-			return (EINPROGRESS);
-		}
-
-		mtx_unlock(&curworker->lock);
-		rm_wunlock(&subject->migration_lock);
-
-		if (job1 == NULL) {
-			job1 = khttpd_malloc
-			    (sizeof(struct khttpd_socket_migration_job));
-			bzero(job1, sizeof(*job1));
-			job1->job.fn = khttpd_socket_do_migration_job;
-			job1->job.arg = job1;
-			job1->job.oneoff = job1->job.active = true;
-			job1->socket = subject;
-		}
-
-		if (job2 == NULL) {
- alloc_job2:
-			job2 = khttpd_malloc(sizeof(struct khttpd_socket_job));
-			bzero(job2, sizeof(*job2));
-			job2->fn = notify;
-			job2->arg = arg;
-			job2->oneoff = job2->active = true;
-		}
-
-		if (job1 != NULL)
-			job1->succ = job2;
-	}
-
-	khttpd_free(job1);
-	khttpd_free(job2);
-
-	if (on_newworker) {
-		notify(arg);
-		return (0);
-	}
-
-	return (EINPROGRESS);
-}
-
-static void
-khttpd_socket_do_rcv_job(void *arg)
-{
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	socket = arg;
-	khttpd_socket_assert_curthread(socket);
-	khttpd_socket_schedule_event(socket, SO_RCV, false, 0);
-	khttpd_stream_data_is_available(socket->stream);
-}
-
-static void
-khttpd_socket_do_snd_job(void *arg)
-{
-	struct khttpd_socket *socket;
-	struct socket *so;
-	long space;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-
-	socket = arg;
-	khttpd_socket_assert_curthread(socket);
-
-	khttpd_socket_schedule_event(socket, SO_SND, false, 0);
-
-	if (socket->xmit_buf != NULL && khttpd_socket_send(socket)) {
-		khttpd_socket_schedule_event(socket, SO_SND, true, 0);
-
-	} else if (socket->xmit_notification_requested &&
-	    socket->xmit_buf == NULL) {
-		socket->xmit_notification_requested = false;
-
-		so = socket->so;
-		SOCKBUF_LOCK(&so->so_snd);
-		KASSERT(khttpd_socket_is_writeable(so), ("not writeable"));
-		space = sbspace(&so->so_snd);
-		SOCKBUF_UNLOCK(&so->so_snd);
-
-		khttpd_stream_clear_to_send(socket->stream, space);
-	}
-}
-
-static int
-khttpd_socket_init(void *mem, int size, int flags)
-{
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
-
-	socket = mem;
-
-	rm_init_flags(&socket->migration_lock, "sock", RM_RECURSE);
-
-	bzero(&socket->rcv_job, sizeof(socket->rcv_job));
-	socket->rcv_job.job.fn = khttpd_socket_do_rcv_job;
-	socket->rcv_job.job.arg = socket;
-	callout_init(&socket->rcv_job.timeo_callout, 0);
-
-	bzero(&socket->snd_job, sizeof(socket->snd_job));
-	socket->snd_job.job.fn = khttpd_socket_do_snd_job;
-	socket->snd_job.job.arg = socket;
-	callout_init(&socket->snd_job.timeo_callout, 0);
-
-	bzero(&socket->rst_job, sizeof(socket->rst_job));
-	socket->rst_job.fn = khttpd_socket_reset;
-	socket->rst_job.arg = socket;
-	socket->rst_job.active = true;
-
-	return (0);
-}
-
-static void
-khttpd_socket_fini(void *mem, int size)
-{
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%d)", __func__, mem, size);
-
-	socket = mem;
-	rm_destroy(&socket->migration_lock);
-}
-
-static int
-khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
-{
-	struct khttpd_socket *socket;
-
-	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
-
-	socket = mem;
-	socket->peeraddr.ss_len = offsetof(struct sockaddr_storage,
-	    ss_family) + sizeof(socket->peeraddr.ss_family);
-	socket->peeraddr.ss_family = AF_UNSPEC;
-	socket->worker = khttpd_socket_current_worker();
-	socket->stream = arg;
-
-	socket->rcv_job.job.active = false;
-	socket->rcv_job.job.inqueue = socket->rcv_job.job.again = 
-	    socket->rcv_job.job.waiting = socket->rcv_job.job.oneoff = false;
-
-	socket->rst_job.active = true;
-	socket->rst_job.inqueue = socket->rst_job.again = 
-	    socket->rst_job.waiting = socket->rst_job.oneoff = false;
-
-	socket->snd_job.job.active = false;
-	socket->snd_job.job.inqueue = socket->snd_job.job.again = 
-	    socket->snd_job.job.waiting = socket->snd_job.job.oneoff = false;
-
-	bzero(&socket->khttpd_socket_zero_begin, sizeof(*socket) -
-	    offsetof(struct khttpd_socket, khttpd_socket_zero_begin));
-
-	return (0);
-}
-
-static void
-khttpd_socket_dtor(void *mem, int size, void *arg)
-{
-	struct khttpd_port *port;
-	struct khttpd_socket *socket;
-	struct socket *so;
-	struct thread *td;
-
-	KHTTPD_ENTRY("%s(%p,%d,%p)", __func__, mem, size, arg);
-
-	td = curthread;
-	socket = mem;
-	port = socket->port;
-
-	if ((so = socket->so) != NULL) {
-		KHTTPD_NOTE("%s soclose", __func__);
-		soclose(socket->so);
-	}
-
-	m_freem(socket->xmit_buf);
-
-	if (port != NULL) {
-		mtx_lock(&port->lock);
-		LIST_REMOVE(socket, link);
-		if (LIST_EMPTY(&port->sockets))
-			wakeup(&port->sockets);
-		mtx_unlock(&port->lock);
-
-		khttpd_port_release(port);
-	}
-}
-
-static void
-khttpd_port_reset_all(void *arg)
-{
-	struct khttpd_port *ptr;
-
-	mtx_lock(&khttpd_port_lock);
-	LIST_FOREACH(ptr, &khttpd_port_ports, liste) {
-		++ptr->hold;
-		mtx_unlock(&khttpd_port_lock);
-
-		khttpd_port_reset(ptr);
-
-		mtx_lock(&khttpd_port_lock);
-		if (--ptr->hold == 0 && ptr->waiting_unhold) {
-			ptr->waiting_unhold = false;
-			wakeup(ptr);
-		}
-	}
-	mtx_unlock(&khttpd_port_lock);
-
-	mtx_lock(&khttpd_port_lock);
-	while (!LIST_EMPTY(&khttpd_port_ports))
-		mtx_sleep(&khttpd_port_ports, &khttpd_port_lock, 0,
-		    "portexit", 0);
-	mtx_unlock(&khttpd_port_lock);
 }
 
 static void
@@ -1092,17 +315,19 @@ khttpd_socket_worker_main(void *arg)
 	struct khttpd_socket *socket, *tmpsock;
 	struct khttpd_socket_job *job;
 	struct khttpd_socket_worker *worker;
+	struct khttpd_socket_slist deathrow;
 
-	KHTTPD_ENTRY("%s(%p), name %s", __func__, arg,
-	    khttpd_ktr_printf("%s", curthread->td_name));
+	KHTTPD_ENTRY("%s(%p), name %s", __func__, arg);
 
 	worker = arg;
+	SLIST_INIT(&deathrow);
 
 	mtx_lock(&worker->lock);
 	for (;;) {
 		if ((job = STAILQ_FIRST(&worker->queue)) == NULL) {
-			if (khttpd_port_exiting)
+			if (khttpd_port_state == KHTTPD_PORT_STATE_EXITING) {
 				break;
+			}
 			mtx_sleep(&worker->queue, &worker->lock, 0,
 			    "portidle", 0);
 			continue;
@@ -1140,125 +365,317 @@ again:
 
 		if (!SLIST_EMPTY(&worker->free)) {
 			KHTTPD_NOTE("%s free", __func__);
+			SLIST_SWAP(&worker->free, &deathrow, khttpd_socket);
 			mtx_unlock(&worker->lock);
-			SLIST_FOREACH_SAFE(socket, &worker->free, sliste,
-			    tmpsock)
+
+			SLIST_FOREACH_SAFE(socket, &deathrow, sliste,
+			    tmpsock) {
 				uma_zfree(khttpd_socket_zone, socket);
-			SLIST_INIT(&worker->free);
+			}
+
+			SLIST_INIT(&deathrow);
+
 			mtx_lock(&worker->lock);
 		}
 	}
 	mtx_unlock(&worker->lock);
 
 	mtx_lock(&khttpd_port_lock);
-	KHTTPD_NOTE("%s exiting. count %d",
-	    __func__, khttpd_socket_worker_count);
-	if (--khttpd_socket_worker_count == 0)
+	if (--khttpd_socket_worker_count == 0) {
 		wakeup(&khttpd_socket_worker_count);
+	}
 	mtx_unlock(&khttpd_port_lock);
 
 	kthread_exit();
 }
 
-static int
-khttpd_port_run(void)
+static void
+khttpd_socket_report_error(struct khttpd_socket *socket, int severity,
+    int error, const char *detail)
 {
-	struct khttpd_socket_worker **workers, *worker;
-	size_t worker_size;
-	int error, i, n;
+	struct khttpd_mbuf_json entry;
 
-	KHTTPD_ENTRY("%s()", __func__);
+	khttpd_socket_assert_curthread(socket);
 
-	khttpd_port_reset_all_tag =
-	    EVENTHANDLER_REGISTER(khttpd_main_shutdown,
-		khttpd_port_reset_all, NULL, EVENTHANDLER_PRI_ANY);
+	khttpd_problem_log_new(&entry, severity, "socket_error",
+	    "socket I/O error");
+	khttpd_problem_set_detail(&entry, detail);
+	khttpd_problem_set_errno(&entry, error);
+	khttpd_stream_error(socket->stream, &entry);
+}
 
-	khttpd_socket_zone = uma_zcreate("socket",
-	    sizeof(struct khttpd_socket),
-	    khttpd_socket_ctor, khttpd_socket_dtor,
-	    khttpd_socket_init, khttpd_socket_fini,
-	    UMA_ALIGN_PTR, 0);
+static bool
+khttpd_socket_is_readable(struct socket *so)
+{
 
-	n = mp_ncpus;
-	khttpd_socket_workers = workers =
-	    khttpd_malloc(n * sizeof(struct khttpd_socket_worker *));
-	worker_size = roundup2(sizeof(struct khttpd_socket_worker),
-	    uma_align_cache + 1);
+	KHTTPD_ENTRY("%s(%p)", __func__, so);
+	SOCKBUF_LOCK_ASSERT(&so->so_rcv);
 
-	khttpd_socket_worker_table = khttpd_malloc(n *
-	    sizeof(struct khttpd_socket_worker_slist));
-	khttpd_socket_worker_table_mask = n - 1;
-	for (i = 0; i < n; ++i) {
-		SLIST_INIT(&khttpd_socket_worker_table[i]);
+	KHTTPD_NOTE("%s state %#x, sb_state %#x, error %d", __func__,
+	    so->so_state, so->so_rcv.sb_state, so->so_error);
+	KHTTPD_NOTE("%s sb_lowat %d, sbavail %d", __func__,
+	    so->so_rcv.sb_lowat, sbavail(&so->so_rcv));
+
+	return (so->so_rcv.sb_lowat <= sbavail(&so->so_rcv) ||
+	    so->so_error != 0 || so->so_rcv.sb_state & SBS_CANTRCVMORE);
+}
+
+static bool
+khttpd_socket_is_writeable(struct socket *so)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, so);
+	SOCKBUF_LOCK_ASSERT(&so->so_snd);
+
+	KHTTPD_NOTE("%s state %#x, sb_state %#x, error %d", __func__,
+	    so->so_state, so->so_snd.sb_state, so->so_error);
+	KHTTPD_NOTE("%s sb_lowat %d, sbspace %d", __func__,
+	    so->so_snd.sb_lowat, sbspace(&so->so_snd));
+
+	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0 ||
+	    so->so_error != 0) {
+		return (true);
 	}
 
-	khttpd_socket_worker_count = 0;
-
-	for (i = 0; i < n; ++i) {
-		workers[i] = worker = khttpd_malloc(worker_size);
-		STAILQ_INIT(&worker->queue);
-		SLIST_INIT(&worker->free);
-		mtx_init(&worker->lock, "prtwrkr", NULL, MTX_DEF | MTX_NEW);
-		worker->thread = NULL;
-
-		error = kthread_add(khttpd_socket_worker_main, worker, curproc,
-		    &worker->thread, 0, 0, "prtwrkr%d", i);
-		if (error != 0) {
-			mtx_destroy(&worker->lock);
-			khttpd_free(worker);
-
-			log(LOG_ERR, "khttpd: kthread_add() failed "
-			    "(error: %d, file: %s, line: %u)",
-			    error, __FILE__, __LINE__);
-
-			break;
-		}
-
-		SLIST_INSERT_HEAD(&khttpd_socket_worker_table
-		    [khttpd_socket_worker_hash(worker->thread)], worker, sle);
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
+		return (false);
 	}
 
-	khttpd_socket_worker_count = i;
-
-	return (error);
+	return (so->so_snd.sb_lowat <= sbspace(&so->so_snd));
 }
 
 static void
-khttpd_port_exit(void)
+khttpd_socket_schedule_reset(void *arg)
 {
-	struct khttpd_socket_worker *worker;
-	int i, n;
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
 
-	KHTTPD_ENTRY("%s()", __func__);
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
-	khttpd_port_exiting = true;
-
-	n = khttpd_socket_worker_count;
-	for (i = 0; i < n; ++i)
-		wakeup(&khttpd_socket_workers[i]->queue);
-
-	mtx_lock(&khttpd_port_lock);
-	while (0 < khttpd_socket_worker_count)
-		mtx_sleep(&khttpd_socket_worker_count, &khttpd_port_lock, 0,
-		    "portexit", 0);
-	mtx_unlock(&khttpd_port_lock);
-
-	for (i = 0; i < n; ++i) {
-		worker = khttpd_socket_workers[i];
-		mtx_destroy(&worker->lock);
-		khttpd_free(khttpd_socket_workers[i]);
-	}
-	khttpd_free(khttpd_socket_workers);
-	khttpd_free(khttpd_socket_worker_table);
-
-	uma_zdestroy(khttpd_socket_zone);
-
-	EVENTHANDLER_DEREGISTER(khttpd_main_shutdown,
-	    khttpd_port_reset_all_tag);
+	socket = arg;
+	rm_rlock(&socket->migration_lock, &trk);
+	khttpd_socket_job_schedule(socket->worker, &socket->rst_job, false);
+	rm_runlock(&socket->migration_lock, &trk);
 }
 
-KHTTPD_INIT(khttpd_port, khttpd_port_run, khttpd_port_exit,
-    KHTTPD_INIT_PHASE_RUN);
+static int
+khttpd_socket_on_recv_upcall(struct socket *so, void *arg, int flags)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
+
+	socket = arg;
+
+	if (khttpd_socket_is_readable(so)) {
+		soupcall_clear(so, SO_RCV);
+		callout_stop(&socket->rcv_job.timeo_callout);
+
+		rm_rlock(&socket->migration_lock, &trk);
+		khttpd_socket_job_schedule(socket->worker, 
+		    &socket->rcv_job.job, false);
+		rm_runlock(&socket->migration_lock, &trk);
+	}
+
+	return (SU_OK);
+}
+
+static int
+khttpd_socket_on_xmit_upcall(struct socket *so, void *arg, int flags)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
+
+	socket = arg;
+
+	if (!khttpd_socket_is_writeable(so)) {
+		return (SU_OK);
+	}
+
+	soupcall_clear(so, SO_SND);
+	callout_stop(&socket->snd_job.timeo_callout);
+
+	rm_rlock(&socket->migration_lock, &trk);
+	khttpd_socket_job_schedule(socket->worker,
+	    &socket->snd_job.job, false);
+	rm_runlock(&socket->migration_lock, &trk);
+
+	return (SU_OK);
+}
+
+static void
+khttpd_socket_set_upcall(struct khttpd_socket *socket, int side,
+    sbintime_t timeout)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket_worker *worker;
+	struct khttpd_sockbuf_job *job;
+	struct socket *so;
+	struct sockbuf *sb;
+	bool kick_callout;
+
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, socket,
+	    side == SO_RCV ? "recv" : side == SO_SND ? "send" : "invalid");
+	KASSERT(socket->so != NULL, ("socket %p, so NULL", socket));
+
+	so = socket->so;
+	if (side == SO_RCV) {
+		job = &socket->rcv_job;
+		sb = &so->so_rcv;
+	} else {
+		job = &socket->snd_job;
+		sb = &so->so_snd;
+	}
+
+	SOCKBUF_LOCK(sb);
+	KASSERT((sb->sb_flags & SB_UPCALL) == 0,
+	    ("socket %p already set upcall", socket));
+
+	rm_rlock(&socket->migration_lock, &trk);
+	worker = socket->worker;
+	mtx_lock(&worker->lock);
+
+	kick_callout = false;
+	if ((side == SO_RCV ? khttpd_socket_is_readable(so) :
+		khttpd_socket_is_writeable(so))) {
+		khttpd_socket_job_schedule_locked(worker, &job->job, false);
+
+	} else {
+		KHTTPD_NOTE("%s soupcall_set %p", __func__, so);
+		soupcall_set(so, side, side == SO_RCV ? 
+		    khttpd_socket_on_recv_upcall : 
+		    khttpd_socket_on_xmit_upcall, socket);
+		kick_callout = true;
+	}
+
+	mtx_unlock(&worker->lock);
+	rm_runlock(&socket->migration_lock, &trk);
+	SOCKBUF_UNLOCK(sb);
+
+	if (kick_callout && 0 < timeout) {
+		KHTTPD_NOTE("set timeout %#lx", timeout);
+		callout_reset_sbt_curcpu(&job->timeo_callout,
+		    timeout, khttpd_port_timeout_pr,
+		    khttpd_socket_schedule_reset, socket, 0);
+	}
+}
+
+static bool
+khttpd_socket_send(struct khttpd_socket *socket)
+{
+	struct socket *so;
+	struct mbuf *end, *head, *m, *prev;
+	struct thread *td;
+	ssize_t space, len, endlen;
+	int error, flags;
+	bool need_close;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+	khttpd_socket_assert_curthread(socket);
+
+	if (socket->xmit_buf == NULL) {
+		return (false);
+	}
+
+	td = curthread;
+
+	so = socket->so;
+	KHTTPD_NOTE("%s so %p", __func__, so);
+	SOCKBUF_LOCK(&so->so_snd);
+	space = sbspace(&so->so_snd);
+	SOCKBUF_UNLOCK(&so->so_snd);
+
+	/* 
+	 * Find 'end' such that the total length from 'head' to 'end' is
+	 * less than the available space in the socket.
+	 */
+
+	head = socket->xmit_buf;
+	prev = NULL;
+	len = 0;
+	for (end = head; end != NULL; end = end->m_next) {
+		endlen = end->m_len;
+		if (space < len + endlen) {
+			break;
+		}
+		len += endlen;
+		prev = end;
+	}
+
+	socket->xmit_buf = end;
+
+	if (prev == NULL) {
+		head = NULL;
+	} else {
+		prev->m_next = NULL;
+	}
+
+	flags = MSG_DONTWAIT;
+	if (end != NULL ||
+	    (!socket->xmit_close_scheduled && !socket->xmit_flush_scheduled)) {
+		flags |= MSG_MORETOCOME;
+	}
+
+	need_close = end == NULL && socket->xmit_close_scheduled;
+	if (need_close) {
+		socket->xmit_close_scheduled =
+		    socket->xmit_flush_scheduled = false;
+	} else if (end == NULL && socket->xmit_flush_scheduled) {
+		socket->xmit_flush_scheduled = false;
+	}
+
+	if (head != NULL) {
+		/* sosend needs a packet */
+		if ((head->m_flags & M_PKTHDR) == 0) {
+			m = m_gethdr(M_WAITOK, MT_DATA);
+			m->m_next = head;
+			head = m;
+		}
+		head->m_pkthdr.len = len;
+
+		error = sosend(so, NULL, NULL, head, NULL, flags, td);
+		if (error != 0) {
+			KHTTPD_NOTE("%s error %d", __func__, error);
+			khttpd_socket_report_error(socket, LOG_WARNING, error,
+			    "send() failed");
+		}
+	}
+
+	if (need_close) {
+		error = soshutdown(so, SHUT_WR);
+		if (error != 0) {
+			KHTTPD_NOTE("%s error %d", __func__, error);
+			khttpd_socket_report_error(socket, LOG_WARNING, error,
+			    "shutdown(SHUT_WR) failed");
+		}
+	}
+
+	if (end == NULL) {
+		return (false);
+	}
+
+	khttpd_socket_set_upcall(socket, SO_SND, 0);
+
+	return (true);
+}
+
+static bool
+khttpd_socket_enter(struct khttpd_socket *socket)
+{
+
+	mtx_lock(&khttpd_port_lock);
+	if (khttpd_port_state != KHTTPD_PORT_STATE_READY) {
+		mtx_unlock(&khttpd_port_lock);
+		return (true);
+	}
+	LIST_INSERT_HEAD(&khttpd_port_sockets, socket, liste);
+	mtx_unlock(&khttpd_port_lock);
+
+	return (false);
+}
 
 static int
 khttpd_socket_stream_receive(struct khttpd_stream *stream, ssize_t *resid,
@@ -1294,18 +711,16 @@ static void
 khttpd_socket_stream_continue_receiving(struct khttpd_stream *stream,
 	sbintime_t timeout)
 {
+	struct khttpd_socket *socket;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
-	KASSERT(stream->down != NULL, ("no socket"));
-	khttpd_socket_schedule_event(stream->down, SO_RCV, true, timeout);
-}
 
-static void
-khttpd_socket_stream_reset(struct khttpd_stream *stream)
-{
+	socket = stream->down;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, stream);
-	khttpd_socket_schedule_reset(stream->down);
+	KASSERT(socket != NULL, ("no socket"));
+	khttpd_socket_assert_curthread(socket);
+
+	khttpd_socket_set_upcall(socket, SO_RCV, timeout);
 }
 
 static bool
@@ -1320,21 +735,22 @@ khttpd_socket_stream_send(struct khttpd_stream *stream, struct mbuf *m,
 	khttpd_socket_assert_curthread(socket);
 	KASSERT(!socket->xmit_close_scheduled, ("socket has been closed"));
 
-	if ((flags & KHTTPD_STREAM_CLOSE) != 0)
+	if ((flags & KHTTPD_STREAM_CLOSE) != 0) {
 		socket->xmit_close_scheduled = true;
+	}
 
-	if ((flags & KHTTPD_STREAM_FLUSH) != 0)
+	if ((flags & KHTTPD_STREAM_FLUSH) != 0) {
 		socket->xmit_flush_scheduled = true;
+	}
 
-	if (socket->xmit_buf != NULL)
+	if (socket->xmit_buf != NULL) {
 		m_cat(socket->xmit_buf, m);
-	else
-		socket->xmit_buf = m;
+		return (true);
+	}
 
-	if (khttpd_socket_send(socket))
-		khttpd_socket_schedule_event(socket, SO_SND, true, 0);
+	socket->xmit_buf = m;
 
-	return (socket->xmit_buf != NULL);
+	return (khttpd_socket_send(socket));
 }
 
 static void
@@ -1351,12 +767,15 @@ khttpd_socket_stream_send_bufstat(struct khttpd_stream *stream, u_int *hiwat,
 	khttpd_socket_assert_curthread(socket);
 
 	SOCKBUF_LOCK(&so->so_snd);
-	if (hiwat != NULL)
+	if (hiwat != NULL) {
 		*hiwat = so->so_snd.sb_hiwat;
-	if (lowat != NULL)
+	}
+	if (lowat != NULL) {
 		*lowat = so->so_snd.sb_lowat;
-	if (space != NULL)
+	}
+	if (space != NULL) {
 		*space = sbspace(&so->so_snd);
+	}
 	SOCKBUF_UNLOCK(&so->so_snd);
 }
 
@@ -1368,47 +787,11 @@ khttpd_socket_stream_notify_of_drain(struct khttpd_stream *stream)
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 
 	socket = stream->down;
+	khttpd_socket_assert_curthread(socket);
 	socket->xmit_notification_requested = true;
-	khttpd_socket_schedule_event(socket, SO_SND, true, 0);
-}
-
-static void
-khttpd_socket_drain_job(struct khttpd_socket *socket,
-    struct khttpd_socket_job *job)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket_worker *worker;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, socket, job);
-
- again:
-	rm_rlock(&socket->migration_lock, &trk);
-	worker = socket->worker;
-	mtx_lock(&worker->lock);
-
-	job->active = false;
-
-	if (!job->inqueue) {
-
-	} else if (STAILQ_FIRST(&worker->queue) != job) {
-		KHTTPD_NOTE("%s inqueue", __func__);
-		STAILQ_REMOVE(&worker->queue, job, khttpd_socket_job, stqe);
-		job->inqueue = false;
-
-	} else if (curthread != worker->thread) {
-		KHTTPD_NOTE("%s running", __func__);
-		job->again = false;
-		job->waiting = true;
-		rm_runlock(&socket->migration_lock, &trk);
-		mtx_sleep(job, &worker->lock, PDROP, "jobdrain", 0);
-		goto again;
-
-	} else {
-		job->again = false;
+	if (socket->xmit_buf == NULL) {
+		khttpd_socket_set_upcall(socket, SO_SND, 0);
 	}
-
-	mtx_unlock(&worker->lock);
-	rm_runlock(&socket->migration_lock, &trk);
 }
 
 static void
@@ -1421,31 +804,51 @@ khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 
 	KHTTPD_ENTRY("%s(%p), so %p",
 	    __func__, stream, ((struct khttpd_socket *)stream->down)->so);
+	
+#ifdef INVARIANTS
+	LIST_FOREACH(socket, &khttpd_port_sockets, liste) {
+		if (socket == stream->down) {
+			break;
+		}
+	}
+	KASSERT(socket == stream->down, ("not in khttpd_port_sockets"));
+#endif
 
 	socket = stream->down;
+	KASSERT(socket->so != NULL, ("so is NULL"));
 	khttpd_socket_assert_curthread(socket);
 
 	callout_drain(&socket->rcv_job.timeo_callout);
 	callout_drain(&socket->snd_job.timeo_callout);
 
-	if ((so = socket->so) == NULL) {
-		uma_zfree(khttpd_socket_zone, socket);
-		return;
-	}
+	so = socket->so;
 
 	SOCKBUF_LOCK(&so->so_rcv);
-	if ((so->so_rcv.sb_flags & SB_UPCALL) != 0)
+	if ((so->so_rcv.sb_flags & SB_UPCALL) != 0) {
 		soupcall_clear(so, SO_RCV);
+	}
 	SOCKBUF_UNLOCK(&so->so_rcv);
 
 	SOCKBUF_LOCK(&so->so_snd);
-	if ((so->so_snd.sb_flags & SB_UPCALL) != 0)
+	if ((so->so_snd.sb_flags & SB_UPCALL) != 0) {
 		soupcall_clear(so, SO_SND);
+	}
 	SOCKBUF_UNLOCK(&so->so_snd);
 
-	khttpd_socket_drain_job(socket, &socket->rcv_job.job);
-	khttpd_socket_drain_job(socket, &socket->rst_job);
-	khttpd_socket_drain_job(socket, &socket->snd_job.job);
+	khttpd_socket_job_cancel(socket, &socket->rcv_job.job);
+	khttpd_socket_job_cancel(socket, &socket->snd_job.job);
+	khttpd_socket_job_cancel(socket, &socket->cnf_job);
+	khttpd_socket_job_cancel(socket, &socket->ntf_job);
+	khttpd_socket_job_cancel(socket, &socket->rst_job);
+	khttpd_socket_job_cancel(socket, &socket->mig_job.job);
+
+	mtx_lock(&khttpd_port_lock);
+	LIST_REMOVE(socket, liste);
+	if (LIST_EMPTY(&khttpd_port_sockets) &&
+	    khttpd_port_state != KHTTPD_PORT_STATE_READY) {
+		wakeup(&khttpd_port_sockets);
+	}
+	mtx_unlock(&khttpd_port_lock);
 
 	rm_rlock(&socket->migration_lock, &trk);
 	worker = socket->worker;
@@ -1455,105 +858,23 @@ khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 	rm_runlock(&socket->migration_lock, &trk);
 }
 
-static int
-khttpd_port_costruct_init(void)
-{
-
-	KHTTPD_ENTRY("%s()", __func__);
-	khttpd_costruct_info_new(&khttpd_port_costruct_info, 
-	    sizeof(struct khttpd_port));
-	return (0);
-}
-
 static void
-khttpd_port_costruct_fini(void)
+khttpd_socket_do_config(void *arg)
 {
-
-	KHTTPD_ENTRY("%s()", __func__);
-	khttpd_costruct_info_destroy(khttpd_port_costruct_info);
-}
-
-KHTTPD_INIT(, khttpd_port_costruct_init, khttpd_port_costruct_fini,
-    KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS - 1);
-
-int
-khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket)
-{
+	struct khttpd_socket_config conf;
 	struct sockopt sockopt;
-	struct thread *td;
-	struct sockaddr *name;
-	struct socket *head, *so;
+	struct khttpd_socket *socket;
+	struct khttpd_stream *stream;
+	struct socket *so;
 	int error, soptval;
+	bool is_readable;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, port, socket);
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+	socket = arg;
 
-	td = curthread;
+	khttpd_socket_assert_curthread(socket);
 
-#ifdef INVARIANT
-	mtx_lock(&port->lock);
-	KASSERT(td == port->worker->thread,
-	    ("curthread %p, worker %p", td, port->worker->thread));
-	KASSERT(socket->port == NULL,
-	    ("socket=%p, socket->port=%p", socket, socket->port));
-	mtx_unlock(&port->lock);
-#endif
-
-	/*
-	 * Pointer 'head' is guaranteed not to be changed because all codes
-	 * that modifies port->socket make sure that the worker is not
-	 * executing concurrently with the modification.
-	 */
-	head = port->so;
-	if (head == NULL) {
-		KHTTPD_NOTE("%s EBADF", __func__);
-		return (EBADF);
-	}
-
-	ACCEPT_LOCK();
-	if (TAILQ_EMPTY(&head->so_comp)) {
-		ACCEPT_UNLOCK();
-		KHTTPD_NOTE("%s EWOULDBLOCK", __func__);
-		return (EWOULDBLOCK);
-	}
-
-	if (head->so_rcv.sb_state & SBS_CANTRCVMORE) {
-		ACCEPT_UNLOCK();
-		KHTTPD_NOTE("%s ECONNABORTED", __func__);
-		return (ECONNABORTED);
-	}
-
-	if (head->so_error != 0) {
-		error = head->so_error;
-		head->so_error = 0;
-		ACCEPT_UNLOCK();
-		KHTTPD_NOTE("%s error %d", __func__, error);
-		return (error);
-	}
-
-	so = TAILQ_FIRST(&head->so_comp);
-	KHTTPD_NOTE("%s so %p", __func__, so);
-	SOCK_LOCK(so);
-	soref(so);
-
-	TAILQ_REMOVE(&head->so_comp, so, so_list);
-	--head->so_qlen;
-	so->so_state |= SS_NBIO;
-	so->so_qstate &= ~SQ_COMP;
-	so->so_head = NULL;
-
-	SOCK_UNLOCK(so);
-	ACCEPT_UNLOCK();
-
-	error = soaccept(so, &name);
-	if (error != 0) {
-		KHTTPD_NOTE("%s error %d", __func__, error);
-		soclose(so);
-		return (error);
-	}
-
-	bcopy(name, &socket->peeraddr,
-	    MIN(sizeof(socket->peeraddr), name->sa_len));
-
+	so = socket->so;
 	soptval = 1;
 	sockopt.sopt_dir = SOPT_SET;
 	sockopt.sopt_level = SOL_SOCKET;
@@ -1561,53 +882,441 @@ khttpd_port_accept(struct khttpd_port *port, struct khttpd_socket *socket)
 	sockopt.sopt_val = &soptval;
 	sockopt.sopt_valsize = sizeof(soptval);
 	sockopt.sopt_td = NULL;
-	error = sosetopt(so, &sockopt);
-	if (error != 0) {
-		khttpd_socket_report_error(socket, LOG_ERR, error,
-		    "setsockopt(SO_NOSIGPIPE) failed");
-		soclose(so);
-		return (error);
-	}
+	sosetopt(so, &sockopt);
 
-	if (port->is_tcp) {
-		socket->is_tcp = true;
-
+	if (socket->is_tcp) {
 		soptval = 1;
 		sockopt.sopt_level = IPPROTO_TCP;
 		sockopt.sopt_name = TCP_NODELAY;
-		error = sosetopt(so, &sockopt);
+		sosetopt(so, &sockopt);
+	}
+
+	error = socket->config_fn(socket, socket->config_arg, &conf);
+	socket->stream = stream = conf.stream;
+	stream->down = socket;
+	stream->down_ops = &khttpd_socket_ops;
+
+	khttpd_stream_on_configured(stream);
+
+	SOCKBUF_LOCK(&so->so_rcv);
+	is_readable = khttpd_socket_is_readable(so);
+	SOCKBUF_UNLOCK(&so->so_rcv);
+
+	if (is_readable) {
+		khttpd_stream_data_is_available(socket->stream);
+	} else {
+		khttpd_socket_set_upcall(socket, SO_RCV, conf.timeout);
+	}
+}
+
+static void
+khttpd_socket_do_accept_and_config_job(void *arg)
+{
+	struct khttpd_socket *socket;
+	struct sockaddr *name;
+	struct socket *so;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
+	socket = arg;
+	so = socket->so;
+	khttpd_socket_assert_curthread(socket);
+
+	error = soaccept(so, &name);
+	if (error != 0) {
+		KHTTPD_NOTE("%s soaccept error %d", __func__, error);
+		uma_zfree(khttpd_socket_zone, socket);
+		return;
+	}
+
+	bcopy(name, &socket->peeraddr,
+	    MIN(sizeof(socket->peeraddr), name->sa_len));
+	socket->is_tcp = name->sa_family == AF_INET ||
+	    name->sa_family == AF_INET6;
+
+	if (khttpd_socket_enter(socket)) {
+		KHTTPD_NOTE("%s shutdown", __func__);
+		uma_zfree(khttpd_socket_zone, socket);
+		return;
+	}
+
+	khttpd_socket_do_config(socket);
+}
+
+const struct sockaddr *
+khttpd_socket_name(struct khttpd_socket *socket)
+{
+	struct sockaddr *sa;
+	struct socket *so;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+	khttpd_socket_assert_curthread(socket);
+
+	so = socket->so;
+	sa = NULL;
+	CURVNET_SET(so->so_vnet);
+	error = (*so->so_proto->pr_usrreqs->pru_sockaddr)(so, &sa);
+	CURVNET_RESTORE();
+
+	return (error == 0 ? sa : NULL);
+}
+
+const struct sockaddr *
+khttpd_socket_peer_address(struct khttpd_socket *socket)
+{
+
+	return ((struct sockaddr *)&socket->peeraddr);
+}
+
+void
+khttpd_socket_set_smesg(struct khttpd_socket *sock, const char *smesg)
+{
+
+	sock->smesg = smesg;
+}
+
+static int
+khttpd_socket_did_connected_upcall(struct socket *so, void *arg, int flags)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, so, arg, flags);
+	SOCKBUF_LOCK_ASSERT(&so->so_snd);
+
+	socket = arg;
+
+	if (!khttpd_socket_is_writeable(so)) {
+		return (SU_OK);
+	}
+
+	KASSERT((so->so_snd.sb_flags & SB_UPCALL) != 0,
+	    ("so_snd.sb_flags %#x", so->so_snd.sb_flags));
+	soupcall_clear(so, SO_SND);
+
+	rm_rlock(&socket->migration_lock, &trk);
+	khttpd_socket_job_schedule(socket->worker, &socket->cnf_job, false);
+	rm_runlock(&socket->migration_lock, &trk);
+
+	return (SU_OK);
+}
+
+int
+khttpd_socket_connect(struct sockaddr *peeraddr, struct sockaddr *sockaddr,
+    khttpd_socket_config_fn_t fn, void *arg)
+{
+	struct khttpd_socket *socket;
+	struct socket *so;
+	struct thread *td;
+	const char *detail;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, peeraddr, sockaddr);
+
+	td = curthread;
+	detail = NULL;
+
+	if (sizeof(socket->peeraddr) < peeraddr->sa_len ||
+	    (sockaddr != NULL && sockaddr->sa_family != peeraddr->sa_family)) {
+		KHTTPD_NOTE("%s peeraddr EINVAL", __func__);
+		return (EINVAL);
+	}
+
+	error = socreate(peeraddr->sa_family, &so, SOCK_STREAM, 0, 
+	    td->td_ucred, td);
+	if (error != 0) {
+		KHTTPD_NOTE("%s socreate error %d", __func__, error);
+		return (error);
+	}
+
+	if (sockaddr != NULL) {
+		error = sobind(so, sockaddr, td);
 		if (error != 0) {
-			khttpd_socket_report_error(socket, LOG_WARNING, error,
-			    "setsockopt(TCP_NODELAY) failed");
+			KHTTPD_NOTE("%s sobind error %d", __func__, error);
 			soclose(so);
 			return (error);
 		}
 	}
 
-	mtx_lock(&port->lock);
-	KHTTPD_NOTE("%s so %p", __func__, so);
+	socket = uma_zalloc(khttpd_socket_zone, M_WAITOK);
+	socket->port = NULL;
 	socket->so = so;
-	socket->port = port;
-	socket->worker = khttpd_socket_worker_find();
-	LIST_INSERT_HEAD(&port->sockets, socket, link);
-	khttpd_port_acquire(port);
-	mtx_unlock(&port->lock);
+	socket->config_fn = fn;
+	socket->config_arg = arg;
+	socket->cnf_job.fn = khttpd_socket_do_config;
+	bcopy(peeraddr, &socket->peeraddr, peeraddr->sa_len);
+	socket->is_tcp = peeraddr->sa_family == AF_INET || 
+	    peeraddr->sa_family == AF_INET6;
 
-	return (0);
+	if (khttpd_socket_enter(socket)) {
+		KHTTPD_NOTE("%s !ready", __func__);
+		uma_zfree(khttpd_socket_zone, socket);
+		return (EISCONN);
+	}
+
+	SOCK_LOCK(so);
+	so->so_state |= SS_NBIO;
+	SOCK_UNLOCK(so);
+
+	SOCKBUF_LOCK(&so->so_snd);
+	soupcall_set(so, SO_SND, khttpd_socket_did_connected_upcall, socket);
+	SOCKBUF_UNLOCK(&so->so_snd);
+
+	error = soconnect(so, peeraddr, td);
+	if (error != 0 && error != EINPROGRESS) {
+		SOCKBUF_LOCK(&so->so_snd);
+		if ((so->so_snd.sb_flags & SB_UPCALL) != 0) {
+			soupcall_clear(so, SO_SND);
+		}
+		SOCKBUF_UNLOCK(&so->so_snd);
+		khttpd_socket_report_error(socket, LOG_WARNING, error,
+		    "connect() failed");
+	}
+
+	return (error);
 }
 
-const struct sockaddr *
-khttpd_port_address(struct khttpd_port *port)
+void
+khttpd_socket_reset(struct khttpd_socket *socket)
 {
+	struct linger linger;
+	struct sockopt sockopt;
+	struct socket *so;
+	int error;
 
-	return ((const struct sockaddr *)&port->addr);
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+
+	so = socket->so;
+	KASSERT(so != NULL, ("socket %p, no so", socket));
+	khttpd_socket_assert_curthread(socket);
+
+	sockopt.sopt_dir = SOPT_SET;
+	sockopt.sopt_level = SOL_SOCKET;
+	sockopt.sopt_name = SO_LINGER;
+	sockopt.sopt_val = &linger;
+	sockopt.sopt_valsize = sizeof(linger);
+	sockopt.sopt_td = NULL;
+	linger.l_onoff = 1;
+	linger.l_linger = 0;
+	error = sosetopt(so, &sockopt);
+	if (error != 0) {
+		KHTTPD_NOTE("sosetopt error %d", error);
+		khttpd_socket_report_error(socket, LOG_ERR, error,
+		    "setsockopt(SOL_SOCKET, SO_LINGER) failed");
+	}
+
+	error = soshutdown(so, SHUT_RDWR);
+	if (error != 0) {
+		KHTTPD_NOTE("shutdown error %d", error);
+		khttpd_socket_report_error(socket, LOG_ERR, error,
+		    "shutdown(SHUT_RD) failed");
+	}
+
+	khttpd_stream_reset(socket->stream);
+}
+
+void
+khttpd_socket_run_later(struct khttpd_socket *socket, void (*fn)(void *),
+    void *arg)
+{
+	struct rm_priotracker trk;
+	struct khttpd_socket_job *job;
+
+	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, fn, arg);
+
+	job = khttpd_malloc(sizeof(struct khttpd_socket_job));
+	bzero(job, sizeof(*job));
+	job->fn = fn;
+	job->arg = arg;
+	job->oneoff = true;
+
+	if (socket == NULL) {
+		khttpd_socket_job_schedule(khttpd_socket_worker_find(),
+		    job, false);
+
+	} else {
+		rm_rlock(&socket->migration_lock, &trk);
+		khttpd_socket_job_schedule(socket->worker, job, false);
+		rm_runlock(&socket->migration_lock, &trk);
+	}
 }
 
 static void
-khttpd_port_handle_arrival_event(void *arg)
+khttpd_socket_migrate(struct khttpd_socket *socket,
+    struct khttpd_socket_worker *curwkr, struct khttpd_socket_worker *newwkr,
+    bool notify)
+{
+	struct khttpd_socket_job *jobs[3], **jobp;
+	struct khttpd_socket_job *job, *prev;
+	int i, njobs;
+	bool need_wakeup;
+
+	KHTTPD_ENTRY("%s(%p,%p,%p,%d)",
+	    __func__, socket, curwkr, newwkr, notify);
+	rm_assert(&socket->migration_lock, RA_WLOCKED);
+	mtx_assert(&curwkr->lock, MA_OWNED);
+	KASSERT(!socket->cnf_job.inqueue, ("cnf_job.inqueue"));
+	KASSERT(STAILQ_FIRST(&curwkr->queue) != &socket->rcv_job.job,
+	    ("migrate is called by rcv_job"));
+	KASSERT(STAILQ_FIRST(&curwkr->queue) != &socket->snd_job.job,
+	    ("migrate is called by snd_job"));
+	KASSERT(STAILQ_FIRST(&curwkr->queue) != &socket->rst_job,
+	    ("migrate is called by rst_job"));
+
+	jobp = jobs;
+	prev = STAILQ_FIRST(&curwkr->queue);
+	for (job = STAILQ_NEXT(prev, stqe); job != NULL;
+	     job = STAILQ_NEXT(job, stqe)) {
+		if (job == &socket->rcv_job.job ||
+		    job == &socket->snd_job.job || job == &socket->rst_job) {
+			KASSERT(jobp - jobs < nitems(jobs), ("jobs overflow"));
+			STAILQ_REMOVE_AFTER(&curwkr->queue, prev, stqe);
+			job->inqueue = false;
+			*jobp++ = job;
+			job = prev;
+		}
+	}
+
+	mtx_unlock(&curwkr->lock);
+
+	socket->worker = newwkr;
+
+	mtx_lock(&newwkr->lock);
+
+	if (notify) {
+		khttpd_socket_job_schedule_locked(newwkr,
+		    &socket->ntf_job, true);
+	}
+
+	njobs = jobp - jobs;
+	need_wakeup = jobp != jobs && STAILQ_EMPTY(&newwkr->queue);
+	for (i = 0; i < njobs; ++i) {
+		khttpd_socket_job_schedule_locked(newwkr, jobs[i], false);
+	}
+
+	if (need_wakeup) {
+		wakeup(&newwkr->queue);
+	}
+
+	mtx_unlock(&newwkr->lock);
+	rm_wunlock(&socket->migration_lock);
+}
+
+static void
+khttpd_socket_do_migration_job(void *arg)
+{
+	struct khttpd_socket *socket;
+	struct khttpd_socket_worker *curwkr, *newwkr;
+	struct thread *td;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
+	td = curthread;
+	socket = arg;
+	newwkr = socket->mig_job.worker;
+
+	rm_wlock(&socket->migration_lock);
+
+	curwkr = socket->worker;
+	KASSERT(curwkr->thread == td, ("curwkr->thread %p", curwkr->thread));
+	KASSERT(newwkr->thread != td, ("newwkr->thread %p", newwkr->thread));
+
+	mtx_lock(&curwkr->lock);
+	khttpd_socket_migrate(socket, curwkr, newwkr, true);
+}
+
+int
+khttpd_socket_set_affinity(struct khttpd_socket *subject, 
+    struct khttpd_socket *source, void (*notify)(void *), void *arg)
+{
+	struct khttpd_socket_job *running;
+	struct khttpd_socket_worker *curwkr, *newwkr;
+	struct thread *td;
+	bool on_newwkr;
+
+	KHTTPD_ENTRY("%s(%p,%p,%p,%p)",
+	    __func__, subject, source, notify, arg);
+
+	rm_wlock(&subject->migration_lock);
+
+	KASSERT(!subject->mig_job.job.inqueue, ("mig_job.job.inqueue"));
+	KASSERT(!subject->ntf_job.inqueue, ("ntf_job.inqueue"));
+
+	td = curthread;
+	curwkr = subject->worker;
+	newwkr = source->worker;
+	on_newwkr = newwkr->thread == td;
+
+	if (curwkr == newwkr ||
+	    (!subject->rcv_job.job.inqueue && !subject->snd_job.job.inqueue &&
+	     !subject->cnf_job.inqueue && !subject->rst_job.inqueue)) {
+		KHTTPD_NOTE("%s no queued jobs", __func__);
+
+		/*
+		 * Member 'inqueue' is set only by
+		 * khttpd_socket_job_schedule_locked() and it requires the
+		 * caller to lock migration_lock.  Because we have the writer
+		 * lock of migration_lock, it's guaranteed that inqueue doesn't
+		 * change to true even if we don't have curwkr->lock.
+		 */
+
+		subject->worker = newwkr;
+
+		if (on_newwkr) {
+			rm_wunlock(&subject->migration_lock);
+			notify(arg);
+			return (0);
+		}
+
+		KHTTPD_NOTE("%s schedule notification", __func__);
+		subject->ntf_job.fn = notify;
+		subject->ntf_job.arg = arg;
+		khttpd_socket_job_schedule(newwkr, &subject->ntf_job, true);
+
+		rm_wunlock(&subject->migration_lock);
+
+		return (EINPROGRESS);
+	}
+
+	KHTTPD_NOTE("%s queued jobs", __func__);
+	mtx_lock(&curwkr->lock);
+
+	running = STAILQ_FIRST(&curwkr->queue);
+	if (running != &subject->rcv_job.job &&
+	    running != &subject->snd_job.job &&
+	    running != &subject->cnf_job && running != &subject->rst_job) {
+		KHTTPD_NOTE("%s migrate immediately", __func__);
+		if (on_newwkr) {
+			khttpd_socket_migrate(subject, curwkr, newwkr, false);
+		} else {
+			subject->ntf_job.fn = notify;
+			subject->ntf_job.arg = arg;
+			khttpd_socket_migrate(subject, curwkr, newwkr, true);
+		}
+		return (EINPROGRESS);
+	}
+
+	KHTTPD_NOTE("%s schedule migration", __func__);
+
+	subject->mig_job.worker = newwkr;
+	subject->ntf_job.fn = notify;
+	subject->ntf_job.arg = arg;
+	khttpd_socket_job_schedule_locked(curwkr, &subject->mig_job.job, true);
+
+	mtx_unlock(&curwkr->lock);
+	rm_wunlock(&subject->migration_lock);
+
+	return (EINPROGRESS);
+}
+
+static void
+khttpd_port_do_arrival_job(void *arg)
 {
 	struct khttpd_port *port;
-	struct socket *head;
+	struct khttpd_socket *socket;
+	struct socket *head, *so;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
@@ -1615,12 +1324,59 @@ khttpd_port_handle_arrival_event(void *arg)
 	head = port->so;
 
 	ACCEPT_LOCK();
-	while (!TAILQ_EMPTY(&head->so_comp)) {
+	while ((so = TAILQ_FIRST(&head->so_comp)) != NULL) {
+
+		if ((head->so_rcv.sb_state & SBS_CANTRCVMORE) != 0) {
+			KHTTPD_NOTE("%s sb_state %#x", __func__,
+			    head->so_rcv.sb_state);
+			break;
+		}
+
+		if (head->so_error != 0) {
+			KHTTPD_NOTE("%s so_error %d",
+			    __func__, head->so_error);
+			head->so_error = 0;
+		}
+
+		KHTTPD_NOTE("%s so %p", __func__, so);
+		SOCK_LOCK(so);
+		soref(so);
+
+		TAILQ_REMOVE(&head->so_comp, so, so_list);
+		--head->so_qlen;
+		so->so_state |= SS_NBIO;
+		so->so_qstate &= ~SQ_COMP;
+		so->so_head = NULL;
+
+		SOCK_UNLOCK(so);
 		ACCEPT_UNLOCK();
-		port->arrival_fn(port);
+
+		socket = uma_zalloc(khttpd_socket_zone, M_WAITOK);
+		socket->port = khttpd_port_acquire(port);
+		socket->so = so;
+		socket->config_fn = port->config_fn;
+		socket->config_arg = port->config_arg;
+		socket->cnf_job.fn = khttpd_socket_do_accept_and_config_job;
+
+		khttpd_socket_job_schedule(socket->worker, &socket->cnf_job,
+		    false);
+
 		ACCEPT_LOCK();
 	}
 	ACCEPT_UNLOCK();
+}
+
+static int
+khttpd_port_do_arrival_upcall(struct socket *head, void *arg, int flags)
+{
+	struct khttpd_port *port;
+
+	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, head, arg, flags);
+
+	port = arg;
+	khttpd_socket_job_schedule(port->worker, &port->arrival_job, false);
+
+	return (SU_OK);
 }
 
 int
@@ -1637,8 +1393,7 @@ khttpd_port_new(struct khttpd_port **port_out)
 	port = khttpd_malloc(khttpd_costruct_instance_size
 	    (khttpd_port_costruct_info));
 
-	mtx_init(&port->lock, "port", NULL, MTX_DEF | MTX_NEW);
-	LIST_INIT(&port->sockets);
+	sx_init_flags(&port->lock, "port", SX_NEW);
 	port->worker = khttpd_socket_worker_find();
 
 	bzero(&port->khttpd_port_zctor_begin,
@@ -1646,7 +1401,7 @@ khttpd_port_new(struct khttpd_port **port_out)
 	    offsetof(struct khttpd_port, khttpd_port_zctor_begin));
 	KHTTPD_REFCOUNT1_INIT(khttpd_port, port);
 
-	port->arrival_job.fn = khttpd_port_handle_arrival_event;
+	port->arrival_job.fn = khttpd_port_do_arrival_job;
 	port->arrival_job.arg = port;
 
 	error = khttpd_costruct_call_ctors(khttpd_port_costruct_info, port);
@@ -1658,87 +1413,20 @@ khttpd_port_new(struct khttpd_port **port_out)
 	port->costructs_ready = true;
 	*port_out = port;
 
-	mtx_lock(&khttpd_port_lock);
-	LIST_INSERT_HEAD(&khttpd_port_ports, port, liste);
-	mtx_unlock(&khttpd_port_lock);
-
 	return (error);
-}
-
-void
-khttpd_port_reset(struct khttpd_port *port)
-{
-	struct rm_priotracker trk;
-	struct khttpd_socket marker;
-	struct khttpd_socket *socket, *next;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, port);
-	KASSERT(port->costructs_ready, ("!costructs_ready"));
-
-	bzero(&marker, sizeof(marker));
-	marker.marker = true;
-
-	mtx_lock(&port->lock);
-
-	for (socket = LIST_FIRST(&port->sockets);
-	     socket != NULL; socket = next)
-		if (socket->marker) {
-			next = LIST_NEXT(socket, link);
-		} else {
-			LIST_INSERT_AFTER(socket, &marker, link);
-			mtx_unlock(&port->lock);
-
-			rm_rlock(&socket->migration_lock, &trk);
-			khttpd_socket_job_schedule(socket, socket->worker,
-			    &socket->rst_job);
-			rm_runlock(&socket->migration_lock, &trk);
-
-			mtx_lock(&port->lock);
-			next = LIST_NEXT(&marker, link);
-			LIST_REMOVE(&marker, link);
-			if (next == NULL && LIST_EMPTY(&port->sockets)) {
-				wakeup(&port->sockets);
-			}
-		}
-
-	while (!LIST_EMPTY(&port->sockets)) {
-		KHTTPD_NOTE("%s sockcls begin", __func__);
-		LIST_FOREACH(socket, &port->sockets, link) {
-			KHTTPD_NOTE("%s sockcls %p", __func__, socket);
-		}
-
-		mtx_sleep(&port->sockets, &port->lock, 0, "sockcls", 0);
-	}
-
-	mtx_unlock(&port->lock);
-}
-
-static int
-khttpd_port_do_arrival_upcall(struct socket *head, void *arg, int flags)
-{
-	struct khttpd_port *port;
-
-	KHTTPD_ENTRY("%s(%p,%p,%#x)", __func__, head, arg, flags);
-
-	port = arg;
-	khttpd_socket_job_schedule(NULL, port->worker, &port->arrival_job);
-
-	return (SU_OK);
 }
 
 int
 khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
-    khttpd_port_accept_fn_t accept_fn, const char **detail_out)
+    khttpd_socket_config_fn_t fn, void *arg, const char **detail_out)
 {
 	struct sockopt sockopt;
-	struct khttpd_socket_worker *worker;
 	struct socket *so;
 	struct thread *td;
 	const char *detail;
-	int dom, error, soptval;
-	bool is_tcp;
+	int error, soptval;
 
-	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, port, addr, accept_fn);
+	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, port, addr, fn);
 	KASSERT(port->costructs_ready, ("!costructs_ready"));
 
 	td = curthread;
@@ -1746,27 +1434,14 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 	detail = NULL;
 	error = 0;
 
-	if (sizeof(port->addr) < addr->sa_len)
-		goto invalid_address;
-
-	switch (addr->sa_family) {
-	case AF_INET:
-		dom = PF_INET;
-		is_tcp = true;
-		break;
-	case AF_INET6:
-		dom = PF_INET6;
-		is_tcp = true;
-		break;
-	case AF_UNIX:
-		dom = PF_UNIX;
-		is_tcp = false;
-		break;
-	default:
-		goto invalid_address;
+	if (sizeof(port->addr) < addr->sa_len) {
+		detail = "invalid address";
+		error = EINVAL;
+		goto error;
 	}
 
-	error = socreate(dom, &so, SOCK_STREAM, 0, td->td_ucred, td);
+	error = socreate(addr->sa_family, &so, SOCK_STREAM, 0, td->td_ucred,
+	    td);
 	if (error != 0) {
 		detail = "socket construction failed";
 		goto error;
@@ -1792,7 +1467,7 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 		detail = "getsockopt(SO_SNDBUF) failed";
 		goto error;
 	}
-	
+
 	soptval = MAX(PAGE_SIZE, soptval / 2);
 	sockopt.sopt_dir = SOPT_SET;
 	sockopt.sopt_name = SO_SNDLOWAT;
@@ -1814,41 +1489,45 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 		goto error;
 	}
 
-	worker = khttpd_socket_worker_find();
-
-	mtx_lock(&port->lock);
+	sx_xlock(&port->lock);
 
 	if (port->so != NULL) {
-		mtx_unlock(&port->lock);
+		sx_xunlock(&port->lock);
 		detail = "already started";
 		goto error;
 	}
 
-	bcopy(addr, &port->addr, addr->sa_len);
-	port->arrival_fn = accept_fn;
-	port->arrival_job.active = true;
-	port->is_tcp = is_tcp;
-	port->so = so;
-	port->worker = worker;
+	mtx_lock(&khttpd_port_lock);
+	if (khttpd_port_state != KHTTPD_PORT_STATE_READY) {
+		mtx_unlock(&khttpd_port_lock);
+		sx_xunlock(&port->lock);
+		detail = "server down";
+		error = EBUSY;
+		goto error;
+	}
+	LIST_INSERT_HEAD(&khttpd_ports_running, port, liste);
+	mtx_unlock(&khttpd_port_lock);
 
-	mtx_unlock(&port->lock);
+	bcopy(addr, &port->addr, addr->sa_len);
+	port->config_fn = fn;
+	port->config_arg = arg;
+	port->so = so;
 
 	SOCKBUF_LOCK(&so->so_rcv);
 	soupcall_set(so, SO_RCV, khttpd_port_do_arrival_upcall, port);
 	SOCKBUF_UNLOCK(&so->so_rcv);
 
-	khttpd_port_do_arrival_upcall(so, port, 0);
+	sx_xunlock(&port->lock);
+
+	khttpd_socket_job_schedule(port->worker, &port->arrival_job, false);
 
 	return (0);
 
- invalid_address:
-	detail = "invalid address";
-	error = EINVAL;
-
  error:
 	soclose(so);
-	if (detail_out != NULL)
+	if (detail_out != NULL) {
 		*detail_out = detail;
+	}
 
 	return (error);
 }
@@ -1856,190 +1535,426 @@ khttpd_port_start(struct khttpd_port *port, struct sockaddr *addr,
 void
 khttpd_port_stop(struct khttpd_port *port)
 {
-	struct khttpd_socket_worker *worker;
 	struct khttpd_socket_job *job;
+	struct khttpd_socket_worker *worker;
 	struct socket *so;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
-	worker = port->worker;
 	job = &port->arrival_job;
+	worker = port->worker;
 
- again:
-	mtx_lock(&port->lock);
+	sx_xlock(&port->lock);
+
 	if ((so = port->so) == NULL) {
-		mtx_unlock(&port->lock);
+		sx_xunlock(&port->lock);
 		return;
 	}
+	port->so = NULL;
 
 	SOCKBUF_LOCK(&so->so_rcv);
-	if ((so->so_snd.sb_flags & SB_UPCALL) != 0) {
+	if ((so->so_rcv.sb_flags & SB_UPCALL) != 0) {
 		soupcall_clear(so, SO_RCV);
 	}
 	SOCKBUF_UNLOCK(&so->so_rcv);
 
-	if (!khttpd_port_drain_job(port, job)) {
-		goto again;
+	mtx_lock(&khttpd_port_lock);
+	LIST_REMOVE(port, liste);
+	if (LIST_EMPTY(&khttpd_ports_running)) {
+		wakeup(&khttpd_ports_running);
 	}
+	mtx_unlock(&khttpd_port_lock);
 
-	port->so = NULL;
-	mtx_unlock(&port->lock);
+	for (;;) {
+		mtx_lock(&worker->lock);
+
+		if (!job->inqueue) {
+			break;
+		}
+
+		if (STAILQ_FIRST(&worker->queue) != job) {
+			KHTTPD_NOTE("%s inqueue", __func__);
+			STAILQ_REMOVE(&worker->queue, job, khttpd_socket_job,
+			    stqe);
+			job->inqueue = false;
+			break;
+		}
+
+		KHTTPD_NOTE("%s running", __func__);
+		KASSERT(curthread != worker->thread,
+		    ("accept handler calls khttpd_port_drain"));
+		job->waiting = true;
+		mtx_sleep(job, &worker->lock, PDROP, "portdrain", 0);
+	}
+	mtx_unlock(&worker->lock);
+	sx_xunlock(&port->lock);
 
 	soclose(so);
 }
 
-struct khttpd_socket *
-khttpd_socket_new(struct khttpd_stream *stream)
+static int
+khttpd_port_costruct_init(void)
 {
 
 	KHTTPD_ENTRY("%s()", __func__);
-	return (uma_zalloc_arg(khttpd_socket_zone, stream, M_WAITOK));
+	khttpd_costruct_info_new(&khttpd_port_costruct_info, 
+	    sizeof(struct khttpd_port));
+	return (0);
 }
 
-const struct sockaddr *
-khttpd_socket_peer_address(struct khttpd_socket *socket)
+static void
+khttpd_port_costruct_fini(void)
 {
 
-	return ((struct sockaddr *)&socket->peeraddr);
+	KHTTPD_ENTRY("%s()", __func__);
+	khttpd_costruct_info_destroy(khttpd_port_costruct_info);
 }
 
-int
-khttpd_socket_connect(struct khttpd_socket *socket, struct sockaddr *peeraddr,
-    struct sockaddr *sockaddr)
+KHTTPD_INIT(, khttpd_port_costruct_init, khttpd_port_costruct_fini,
+    KHTTPD_INIT_PHASE_REGISTER_COSTRUCTS - 1);
+
+static void
+khttpd_port_dtor(struct khttpd_port *port)
 {
-	struct sockopt sockopt;
-	struct socket *so;
-	struct thread *td;
-	const char *detail;
-	int dom, error, soptval;
-	bool is_tcp;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
-	td = curthread;
-	detail = NULL;
+	KASSERT(port->so == NULL, ("port is running"));
 
-	if (socket->so != NULL)
-		return (EISCONN);
-
-	if (sizeof(socket->peeraddr) < peeraddr->sa_len ||
-	    (sockaddr != NULL && sockaddr->sa_family != peeraddr->sa_family))
-		return (EINVAL);
-
-	switch (peeraddr->sa_family) {
-	case AF_INET:
-		dom = PF_INET;
-		is_tcp = true;
-		break;
-	case AF_INET6:
-		dom = PF_INET6;
-		is_tcp = true;
-		break;
-	case AF_UNIX:
-		dom = PF_UNIX;
-		is_tcp = false;
-		break;
-	default:
-		return (EINVAL);
+	if (port->costructs_ready) {
+		khttpd_costruct_call_dtors(khttpd_port_costruct_info, port);
 	}
 
-	error = socreate(dom, &socket->so, SOCK_STREAM, 0, td->td_ucred, td);
-	if (error != 0)
-		return (error);
+	sx_destroy(&port->lock);
+}
+
+static void
+khttpd_port_fini(struct khttpd_port *port)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, port);
+	khttpd_free(port);
+}
+
+static void
+khttpd_socket_do_rcv_job(void *arg)
+{
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
+	socket = arg;
+	khttpd_socket_assert_curthread(socket);
+
+	khttpd_stream_data_is_available(socket->stream);
+}
+
+static void
+khttpd_socket_do_snd_job(void *arg)
+{
+	struct khttpd_socket *socket;
+	struct socket *so;
+	long space;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+
+	socket = arg;
+	khttpd_socket_assert_curthread(socket);
+
+	if (socket->xmit_buf != NULL && khttpd_socket_send(socket)) {
+		return;
+	}
+
+	if (!socket->xmit_notification_requested) {
+		return;
+	}
+
 	so = socket->so;
-	KHTTPD_NOTE("%s so %p", __func__, so);
+	SOCKBUF_LOCK(&so->so_snd);
+	if (!khttpd_socket_is_writeable(so)) {
+		SOCKBUF_UNLOCK(&so->so_snd);
+		khttpd_socket_set_upcall(socket, SO_SND, 0);
+		return;
+	}
+	space = sbspace(&so->so_snd);
+	SOCKBUF_UNLOCK(&so->so_snd);
 
-	SOCK_LOCK(so);
-	so->so_state |= SS_NBIO;
-	SOCK_UNLOCK(so);
+	socket->xmit_notification_requested = false;
+	khttpd_stream_clear_to_send(socket->stream, space);
+}
 
-	soptval = 1;
-	sockopt.sopt_dir = SOPT_SET;
-	sockopt.sopt_level = SOL_SOCKET;
-	sockopt.sopt_name = SO_NOSIGPIPE;
-	sockopt.sopt_val = &soptval;
-	sockopt.sopt_valsize = sizeof(soptval);
-	sockopt.sopt_td = NULL;
-	error = sosetopt(so, &sockopt);
+static void
+khttpd_socket_do_reset_job(void *arg)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+	khttpd_socket_assert_curthread(arg);
+
+	khttpd_socket_reset(arg);
+}
+
+static int
+khttpd_socket_init(void *mem, int size, int flags)
+{
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
+
+	socket = mem;
+
+	bzero(&socket->rcv_job, sizeof(socket->rcv_job));
+	socket->rcv_job.job.fn = khttpd_socket_do_rcv_job;
+	socket->rcv_job.job.arg = socket;
+	callout_init(&socket->rcv_job.timeo_callout, 0);
+
+	bzero(&socket->snd_job, sizeof(socket->snd_job));
+	socket->snd_job.job.fn = khttpd_socket_do_snd_job;
+	socket->snd_job.job.arg = socket;
+	callout_init(&socket->snd_job.timeo_callout, 0);
+
+	bzero(&socket->cnf_job, sizeof(socket->cnf_job));
+	socket->cnf_job.arg = socket;
+
+	bzero(&socket->ntf_job, sizeof(socket->ntf_job));
+	socket->ntf_job.arg = socket;
+
+	bzero(&socket->rst_job, sizeof(socket->rst_job));
+	socket->rst_job.fn = khttpd_socket_do_reset_job;
+	socket->rst_job.arg = socket;
+
+	bzero(&socket->mig_job, sizeof(socket->mig_job));
+	socket->mig_job.job.fn = khttpd_socket_do_migration_job;
+	socket->mig_job.job.arg = socket;
+
+	rm_init_flags(&socket->migration_lock, "sock", RM_RECURSE);
+
+	socket->worker = khttpd_socket_worker_find();
+
+	return (0);
+}
+
+static void
+khttpd_socket_fini(void *mem, int size)
+{
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, mem, size);
+
+	socket = mem;
+	rm_destroy(&socket->migration_lock);
+}
+
+static int
+khttpd_socket_ctor(void *mem, int size, void *arg, int flags)
+{
+	struct khttpd_socket *socket;
+
+	KHTTPD_ENTRY("%s(%p,%d,%#x)", __func__, mem, size, flags);
+	KHTTPD_TR_ALLOC(mem, size);
+
+	socket = mem;
+
+	bzero(&socket->khttpd_socket_zero_begin, sizeof(*socket) -
+	    offsetof(struct khttpd_socket, khttpd_socket_zero_begin));
+
+	return (0);
+}
+
+static void
+khttpd_socket_dtor(void *mem, int size, void *arg)
+{
+	struct khttpd_socket *socket;
+	struct socket *so;
+
+	KHTTPD_ENTRY("%s(%p,%d,%p)", __func__, mem, size, arg);
+	KHTTPD_TR_FREE(mem);
+
+	socket = mem;
+
+	KASSERT(!socket->rcv_job.job.inqueue, ("rcv_job.job.inqueue"));
+	KASSERT(!socket->rcv_job.job.waiting, ("rcv_job.job.waiting"));
+	KASSERT(callout_drain(&socket->rcv_job.timeo_callout) == -1,
+	    ("rcv_job callout active"));
+	KASSERT(!socket->snd_job.job.inqueue, ("snd_job.job.inqueue"));
+	KASSERT(!socket->snd_job.job.waiting, ("snd_job.job.waiting"));
+	KASSERT(callout_drain(&socket->snd_job.timeo_callout) == -1,
+	    ("snd_job callout active"));
+	KASSERT(!socket->cnf_job.inqueue, ("cnf_job.inqueue"));
+	KASSERT(!socket->cnf_job.waiting, ("cnf_job.waiting"));
+	KASSERT(!socket->ntf_job.inqueue, ("ntf_job.inqueue"));
+	KASSERT(!socket->ntf_job.waiting, ("ntf_job.waiting"));
+	KASSERT(!socket->rst_job.inqueue, ("rst_job.inqueue"));
+	KASSERT(!socket->rst_job.waiting, ("rst_job.waiting"));
+	KASSERT(!socket->mig_job.job.inqueue, ("mig_job.job.inqueue"));
+	KASSERT(!socket->mig_job.job.waiting, ("mig_job.job.waiting"));
+
+#ifdef INVARIANTS
+	struct khttpd_socket *ptr;
+	LIST_FOREACH(ptr, &khttpd_port_sockets, liste) {
+		KASSERT(ptr != socket, ("in khttpd_port_sockets"));
+	}
+#endif
+
+	khttpd_port_release(socket->port);
+
+	m_freem(socket->xmit_buf);
+
+	if ((so = socket->so) != NULL) {
+		KHTTPD_NOTE("%s soclose", __func__);
+		soclose(so);
+	}
+}
+
+static void
+khttpd_port_shutdown(void *arg)
+{
+	struct khttpd_port marker;
+	struct khttpd_port *port, *nport;
+	struct khttpd_socket *socket;
+
+	bzero(&marker, sizeof(marker));
+	marker.marker = true;
+
+	mtx_lock(&khttpd_port_lock);
+
+	KASSERT(khttpd_port_state == KHTTPD_PORT_STATE_READY,
+	    ("khttpd_port_state %d", khttpd_port_state));
+	khttpd_port_state = KHTTPD_PORT_STATE_SHUTDOWN;
+
+	for (port = LIST_FIRST(&khttpd_ports_running); port != NULL; 
+	     port = nport) {
+		if (port->marker) {
+			nport = LIST_NEXT(port, liste);
+			continue;
+		}
+
+		LIST_INSERT_AFTER(port, &marker, liste);
+		khttpd_port_acquire(port);
+		mtx_unlock(&khttpd_port_lock);
+
+		khttpd_port_stop(port);
+
+		khttpd_port_release(port);
+		mtx_lock(&khttpd_port_lock);
+		nport = LIST_NEXT(&marker, liste);
+		LIST_REMOVE(&marker, liste);
+	}
+
+	while (!LIST_EMPTY(&khttpd_ports_running)) {
+		mtx_sleep(&khttpd_ports_running, &khttpd_port_lock, 0,
+		    "prtshtdwn", 0);
+	}
+
+	for (socket = LIST_FIRST(&khttpd_port_sockets); socket != NULL;
+	     socket = LIST_NEXT(socket, liste)) {
+		khttpd_socket_schedule_reset(socket);
+	}
+
+	while (!LIST_EMPTY(&khttpd_port_sockets)) {
+		mtx_sleep(&khttpd_port_sockets, &khttpd_port_lock, 0,
+		    "soshtdwn", 0);
+	}
+
+	mtx_unlock(&khttpd_port_lock);
+}
+
+static void
+khttpd_port_exit(void)
+{
+	struct khttpd_socket_worker *worker;
+	int i, n;
+
+	KHTTPD_ENTRY("%s()", __func__);
+
+	EVENTHANDLER_DEREGISTER(khttpd_main_shutdown,
+	    khttpd_port_shutdown_tag);
+
+	mtx_lock(&khttpd_port_lock);
+	KASSERT(LIST_EMPTY(&khttpd_ports_running),
+	    ("!LIST_EMPTY(&khttpd_ports_running)"));
+	KASSERT(LIST_EMPTY(&khttpd_port_sockets),
+	    ("!LIST_EMPTY(&khttpd_port_sockets)"));
+
+	khttpd_port_state = KHTTPD_PORT_STATE_EXITING;
+
+	n = khttpd_socket_worker_count;
+	for (i = 0; i < n; ++i) {
+		wakeup(&khttpd_socket_workers[i]->queue);
+	}
+
+	while (0 < khttpd_socket_worker_count) {
+		mtx_sleep(&khttpd_socket_worker_count, &khttpd_port_lock, 0,
+		    "portexit", 0);
+	}
+
+	mtx_unlock(&khttpd_port_lock);
+
+	for (i = 0; i < n; ++i) {
+		worker = khttpd_socket_workers[i];
+		KASSERT(STAILQ_EMPTY(&worker->queue),
+		    ("worker %d, queue is not empty", i));
+		KASSERT(SLIST_EMPTY(&worker->free),
+		    ("worker %d, free is not empty", i));
+		mtx_destroy(&worker->lock);
+		khttpd_free(worker);
+	}
+
+	khttpd_free(khttpd_socket_workers);
+
+	uma_zdestroy(khttpd_socket_zone);
+}
+
+static int
+khttpd_port_run(void)
+{
+	struct khttpd_socket_worker *worker;
+	size_t worker_size;
+	int error, i, n;
+
+	KHTTPD_ENTRY("%s()", __func__);
+
+	khttpd_port_state = KHTTPD_PORT_STATE_READY;
+
+	khttpd_socket_zone = uma_zcreate("socket",
+	    sizeof(struct khttpd_socket),
+	    khttpd_socket_ctor, khttpd_socket_dtor,
+	    khttpd_socket_init, khttpd_socket_fini,
+	    UMA_ALIGN_CACHE, 0);
+
+	n = mp_ncpus;
+	khttpd_socket_workers =
+	    khttpd_malloc(n * sizeof(struct khttpd_socket_worker *));
+	worker_size = roundup2(sizeof(struct khttpd_socket_worker),
+	    uma_align_cache + 1);
+
+	for (i = 0; i < n; ++i) {
+		khttpd_socket_workers[i] = worker = khttpd_malloc(worker_size);
+		STAILQ_INIT(&worker->queue);
+		SLIST_INIT(&worker->free);
+		mtx_init(&worker->lock, "prtwrkr", NULL, MTX_DEF | MTX_NEW);
+
+		error = kthread_add(khttpd_socket_worker_main, worker, curproc,
+		    &worker->thread, 0, 0, "prtwrkr%d", i);
+		if (error != 0) {
+			log(LOG_ERR, "khttpd: kthread_add() failed "
+			    "(error: %d, file: %s, line: %u)",
+			    error, __FILE__, __LINE__);
+			break;
+		}
+	}
+
+	khttpd_socket_worker_count = i;
+
+	khttpd_port_shutdown_tag =
+	    EVENTHANDLER_REGISTER(khttpd_main_shutdown,
+		khttpd_port_shutdown, NULL, EVENTHANDLER_PRI_ANY);
+
 	if (error != 0) {
-		khttpd_socket_report_error(socket, LOG_ERR, error,
-		    "setsockopt(SO_NOSIGPIPE) failed");
-		return (error);
+		khttpd_port_exit();
 	}
-
-	if (peeraddr->sa_family == PF_INET || 
-	    peeraddr->sa_family == PF_INET6) {
-		socket->is_tcp = true;
-
-		soptval = 1;
-		sockopt.sopt_level = IPPROTO_TCP;
-		sockopt.sopt_name = TCP_NODELAY;
-		error = sosetopt(so, &sockopt);
-		if (error != 0) {
-			khttpd_socket_report_error(socket, LOG_ERR, error,
-			    "setsockopt(TCP_NODELAY) failed");
-			return (error);
-		}
-	}
-
-	if (sockaddr != NULL) {
-		error = sobind(so, sockaddr, td);
-		if (error != 0) {
-			khttpd_socket_report_error(socket, LOG_ERR, error,
-			    "bind() failed");
-			return (error);
-		}
-	}
-
-	error = soconnect(so, peeraddr, td);
-	if (error != 0 && error != EINPROGRESS)
-		khttpd_socket_report_error(socket, LOG_WARNING, error,
-		    "connect() failed");
 
 	return (error);
 }
 
-int
-khttpd_socket_error(struct khttpd_socket *socket)
-{
-	struct socket *so;
-	int error;
-
-	so = socket->so;
-	SOCK_LOCK(so);
-	error = so->so_error;
-	so->so_error = 0;
-	SOCK_UNLOCK(so);
-
-	return (error);
-}
-
-const struct sockaddr *
-khttpd_socket_name(struct khttpd_socket *_sock)
-{
-	struct sockaddr *sa;
-	struct socket *so;
-	int error;
-
-	so = _sock->so;
-	sa = NULL;
-	CURVNET_SET(so->so_vnet);
-	error = (*so->so_proto->pr_usrreqs->pru_sockaddr)(so, &sa);
-	CURVNET_RESTORE();
-
-	return (error == 0 ? sa : NULL);
-}
-
-bool
-khttpd_socket_on_worker_thread(struct khttpd_socket *socket)
-{
-
-	return (socket->worker->thread == curthread);
-}
-
-struct khttpd_port *
-khttpd_socket_port(struct khttpd_socket *socket)
-{
-
-	return (socket->port);
-}
+KHTTPD_INIT(khttpd_port, khttpd_port_run, khttpd_port_exit,
+    KHTTPD_INIT_PHASE_RUN);

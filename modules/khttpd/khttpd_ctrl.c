@@ -182,8 +182,9 @@ static const char *khttpd_ctrl_protocol_table[] = {
 
 CTASSERT(nitems(khttpd_ctrl_protocol_table) == KHTTPD_CTRL_PROTOCOL_END);
 
-static void (*khttpd_ctrl_accept_fns[])
-    (struct khttpd_port *, struct khttpd_session_config *) = {
+static int (*khttpd_ctrl_accept_fns[])
+    (struct khttpd_port *, struct khttpd_socket *,
+     struct khttpd_session_config *, struct khttpd_socket_config *) = {
 	khttpd_http_accept_http_client,
 	khttpd_http_accept_https_client,
 };
@@ -536,8 +537,6 @@ khttpd_obj_type_new(struct khttpd_obj_type *type, const char *name,
 	    sizeof(struct khttpd_ctrl_leaf_slist));
 	type->show = show;
 	type->hide = hide;
-	type->acquire = acquire;
-	type->release = release;
 	type->acquire = acquire;
 	type->release = release;
 	type->create = create;
@@ -1725,14 +1724,18 @@ khttpd_ctrl_port_get(void *object, struct khttpd_mbuf_json *output)
 	return (KHTTPD_STATUS_OK);
 }
 
-static void
-khttpd_ctrl_accept(struct khttpd_port *port)
+static int
+khttpd_ctrl_accept(struct khttpd_socket *socket, void *arg, 
+    struct khttpd_socket_config *config)
 {
+	struct khttpd_port *port;
 	struct khttpd_ctrl_port_data *port_data;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, port);
+	KHTTPD_ENTRY("%s(%p)", __func__, arg);
+	port = arg;
 	port_data = khttpd_costruct_get(port, khttpd_ctrl_port_data_key);
-	khttpd_ctrl_accept_fns[port_data->protocol](port, &port_data->config);
+	return (khttpd_ctrl_accept_fns[port_data->protocol](port, socket, 
+		&port_data->config, config));
 }
 
 static int
@@ -1819,7 +1822,7 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	bcopy(&config, &port_data->config, sizeof(port_data->config));
 
 	error = khttpd_port_start(port, (struct sockaddr *)&port_data->addr,
-	    khttpd_ctrl_accept, &detail);
+	    khttpd_ctrl_accept, port, &detail);
 	if (error == EADDRNOTAVAIL || error == EADDRINUSE) {
 		khttpd_problem_response_begin(output, KHTTPD_STATUS_CONFLICT,
 		    NULL, NULL);

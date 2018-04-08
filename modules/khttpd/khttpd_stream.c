@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -65,3 +65,6 @@ khttpd_stream_clear_to_send(struct khttpd_stream *stream, ssize_t);
 
 extern void
 khttpd_stream_error(struct khttpd_stream *, struct khttpd_mbuf_json *);
+
+extern void
+khttpd_stream_on_configured(struct khttpd_stream *);

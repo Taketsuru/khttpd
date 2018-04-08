@@ -428,8 +428,9 @@ khttpd_loader(struct module *m, int what, void *arg)
 
 	case MOD_UNLOAD:
 	case MOD_SHUTDOWN:
-		if (khttpd_main_dev != NULL)
+		if (khttpd_main_dev != NULL) {
 			destroy_dev(khttpd_main_dev);
+		}
 
 		khttpd_init_unload(m);
 

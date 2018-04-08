@@ -747,7 +747,7 @@ namespace eval test {
 	    }
 	}
 	set idle_end [clock milliseconds]
-	test::assert {$timeout <= $idle_end - $idle_start && 
+	test::assert {$timeout <= $idle_end - $idle_start + 1 &&
 	    $idle_end - $idle_start < $timeout + $fudge}
     }
 }

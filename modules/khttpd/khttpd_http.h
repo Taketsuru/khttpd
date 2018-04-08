@@ -42,7 +42,8 @@ struct khttpd_log;
 struct khttpd_location;
 struct khttpd_mbuf_json;
 struct khttpd_port;
-enum khttpd_server_log_id;
+enum   khttpd_server_log_id;
+struct khttpd_socket_config;
 struct khttpd_stream;
 
 enum khttpd_http_log_id {
@@ -127,7 +128,11 @@ void	khttpd_exchange_reject(struct khttpd_exchange *_xchg);
 void	khttpd_exchange_reset(struct khttpd_exchange *_xchg);
 void	khttpd_exchange_continue_sending(struct khttpd_exchange *);
 void	khttpd_exchange_continue_receiving(struct khttpd_exchange *);
-void	khttpd_http_accept_http_client(struct khttpd_port *_port,
-	    struct khttpd_session_config *_config);
-void	khttpd_http_accept_https_client(struct khttpd_port *_port,
-	    struct khttpd_session_config *_config);
+int	khttpd_http_accept_http_client(struct khttpd_port *_port,
+	    struct khttpd_socket *_socket, 
+	    struct khttpd_session_config *_sess_conf,
+	    struct khttpd_socket_config *_sock_conf);
+int	khttpd_http_accept_https_client(struct khttpd_port *_port,
+	    struct khttpd_socket *_socket,
+	    struct khttpd_session_config *_sess_conf,
+	    struct khttpd_socket_config *_sock_conf);
