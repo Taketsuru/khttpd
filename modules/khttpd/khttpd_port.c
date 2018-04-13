@@ -252,8 +252,8 @@ khttpd_socket_job_schedule_locked(struct khttpd_socket_worker *worker,
 	struct khttpd_socket_job *first;
 	bool result;
 
-	KHTTPD_ENTRY("%s(%p,%d), inqueue %d",
-	    __func__, job, expedited, job->inqueue);
+	KHTTPD_ENTRY("%s(%p,%p,%d), inqueue %d",
+	    __func__, worker, job, expedited, job->inqueue);
 
 	first = STAILQ_FIRST(&worker->queue);
 	if (first == job) {
@@ -265,10 +265,10 @@ khttpd_socket_job_schedule_locked(struct khttpd_socket_worker *worker,
 	if ((result = !job->inqueue)) {
 		KHTTPD_NOTE("%s enqueue", __func__);
 		job->inqueue = true;
-		if (STAILQ_EMPTY(&worker->queue)) {
+		if (first == NULL) {
 			wakeup(&worker->queue);
 		}
-		if (expedited) {
+		if (expedited && first != NULL) {
 			STAILQ_INSERT_AFTER(&worker->queue, first, job, stqe);
 		} else {
 			STAILQ_INSERT_TAIL(&worker->queue, job, stqe);
