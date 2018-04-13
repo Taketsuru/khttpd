@@ -807,9 +807,7 @@ khttpd_socket_stream_notify_of_drain(struct khttpd_stream *stream)
 static void
 khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 {
-	struct rm_priotracker trk;
 	struct khttpd_socket *socket;
-	struct khttpd_socket_worker *worker;
 	struct socket *so;
 
 	KHTTPD_ENTRY("%s(%p), so %p",
@@ -860,12 +858,7 @@ khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 	}
 	mtx_unlock(&khttpd_port_lock);
 
-	rm_rlock(&socket->migration_lock, &trk);
-	worker = socket->worker;
-	mtx_lock(&worker->lock);
-	SLIST_INSERT_HEAD(&worker->free, socket, sliste);
-	mtx_unlock(&worker->lock);
-	rm_runlock(&socket->migration_lock, &trk);
+	SLIST_INSERT_HEAD(&socket->worker->free, socket, sliste);
 }
 
 static void
@@ -936,8 +929,7 @@ khttpd_socket_do_accept_and_config_job(void *arg)
 	error = soaccept(so, &name);
 	if (error != 0) {
 		KHTTPD_NOTE("%s soaccept error %d", __func__, error);
-		uma_zfree(khttpd_socket_zone, socket);
-		return;
+		goto free;
 	}
 
 	bcopy(name, &socket->peeraddr,
@@ -947,11 +939,15 @@ khttpd_socket_do_accept_and_config_job(void *arg)
 
 	if (khttpd_socket_enter(socket)) {
 		KHTTPD_NOTE("%s shutdown", __func__);
-		uma_zfree(khttpd_socket_zone, socket);
-		return;
+		goto free;
 	}
 
 	khttpd_socket_do_config(socket);
+	return;
+
+free:
+	SLIST_INSERT_HEAD(&socket->worker->free, socket, sliste);
+	return;
 }
 
 const struct sockaddr *
