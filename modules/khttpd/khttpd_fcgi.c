@@ -1331,8 +1331,11 @@ khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
 		upstream->state = KHTTPD_FCGI_UPSTREAM_AVAILABLE;
 	}
 
-	if (loc_data->nconnecting < loc_data->nwaiting)
+#if 0
+	if (loc_data->nconnecting < loc_data->nwaiting) {
 		khttpd_fcgi_connect(loc_data);
+	}
+#endif
 
 	mtx_unlock(&loc_data->lock);
 
