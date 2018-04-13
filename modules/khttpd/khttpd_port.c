@@ -1908,6 +1908,9 @@ khttpd_port_run(void)
 
 	KHTTPD_ENTRY("%s()", __func__);
 
+	arc4rand(khttpd_port_siphash_key, sizeof(khttpd_port_siphash_key),
+	    FALSE);
+
 	khttpd_port_state = KHTTPD_PORT_STATE_READY;
 
 	khttpd_socket_zone = uma_zcreate("socket",
