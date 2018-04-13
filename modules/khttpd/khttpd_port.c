@@ -332,6 +332,21 @@ khttpd_socket_worker_main(void *arg)
 
 	mtx_lock(&worker->lock);
 	for (;;) {
+		while (!SLIST_EMPTY(&worker->free)) {
+			KHTTPD_NOTE("%s free", __func__);
+			SLIST_SWAP(&worker->free, &deathrow, khttpd_socket);
+			mtx_unlock(&worker->lock);
+
+			SLIST_FOREACH_SAFE(socket, &deathrow, sliste,
+			    tmpsock) {
+				uma_zfree(khttpd_socket_zone, socket);
+			}
+
+			SLIST_INIT(&deathrow);
+
+			mtx_lock(&worker->lock);
+		}
+
 		if ((job = STAILQ_FIRST(&worker->queue)) == NULL) {
 			if (khttpd_port_state == KHTTPD_PORT_STATE_EXITING) {
 				break;
@@ -370,22 +385,11 @@ again:
 			khttpd_free(job);
 			mtx_lock(&worker->lock);
 		}
-
-		if (!SLIST_EMPTY(&worker->free)) {
-			KHTTPD_NOTE("%s free", __func__);
-			SLIST_SWAP(&worker->free, &deathrow, khttpd_socket);
-			mtx_unlock(&worker->lock);
-
-			SLIST_FOREACH_SAFE(socket, &deathrow, sliste,
-			    tmpsock) {
-				uma_zfree(khttpd_socket_zone, socket);
-			}
-
-			SLIST_INIT(&deathrow);
-
-			mtx_lock(&worker->lock);
-		}
 	}
+
+	KASSERT(SLIST_EMPTY(&worker->free), ("worker->free not empty"));
+	KASSERT(STAILQ_EMPTY(&worker->queue), ("worker->queue not empty"));
+
 	mtx_unlock(&worker->lock);
 
 	mtx_lock(&khttpd_port_lock);
