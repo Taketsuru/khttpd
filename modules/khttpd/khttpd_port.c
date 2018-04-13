@@ -81,6 +81,14 @@ struct khttpd_socket_job {
 	bool		inqueue;
 	bool		waiting;
 	bool		oneoff;
+	/*
+	 * When a stream attached to a socket is destroyed, all the jobs
+	 * refering the socket should be destroyed too.  This is
+	 * implemented by cancelling all the member jobs of the destroyed
+	 * socket.  Don't create an oneoff job that refers to a socket
+	 * unless enhancing the destruction code so that such a oneoff job
+	 * is also destroyed.
+	 */
 };
 
 STAILQ_HEAD(khttpd_socket_job_stq, khttpd_socket_job);
@@ -1118,29 +1126,18 @@ khttpd_socket_reset(struct khttpd_socket *socket)
 }
 
 void
-khttpd_socket_run_later(struct khttpd_socket *socket, void (*fn)(void *),
-    void *arg)
+khttpd_socket_run_later(void (*fn)(void *), void *arg)
 {
-	struct rm_priotracker trk;
 	struct khttpd_socket_job *job;
 
-	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, fn, arg);
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, fn, arg);
 
 	job = khttpd_malloc(sizeof(struct khttpd_socket_job));
 	bzero(job, sizeof(*job));
 	job->fn = fn;
 	job->arg = arg;
 	job->oneoff = true;
-
-	if (socket == NULL) {
-		khttpd_socket_job_schedule(khttpd_socket_worker_find(),
-		    job, false);
-
-	} else {
-		rm_rlock(&socket->migration_lock, &trk);
-		khttpd_socket_job_schedule(socket->worker, job, false);
-		rm_runlock(&socket->migration_lock, &trk);
-	}
+	khttpd_socket_job_schedule(khttpd_socket_worker_find(), job, false);
 }
 
 static void

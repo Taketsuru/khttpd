@@ -65,8 +65,7 @@ int	khttpd_socket_connect(struct sockaddr *_peeraddr,
 	    struct sockaddr *_bindaddr,
 	    khttpd_socket_config_fn_t _fn, void *_arg);
 void	khttpd_socket_reset(struct khttpd_socket *_sock);
-void	khttpd_socket_run_later(struct khttpd_socket *_sock,
-	    void (*_fn)(void *), void *_arg);
+void	khttpd_socket_run_later(void (*_fn)(void *), void *_arg);
 int	khttpd_socket_set_affinity(struct khttpd_socket *_target,
 	    struct khttpd_socket *_source,
 	    void (*_notify)(void *), void *_arg);

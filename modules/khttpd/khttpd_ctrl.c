@@ -2910,7 +2910,7 @@ khttpd_ctrl_start(void *arg)
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
 	cmd = arg;
-	khttpd_socket_run_later(NULL, khttpd_ctrl_start_helper, arg);
+	khttpd_socket_run_later(khttpd_ctrl_start_helper, arg);
 	sx_slock(&khttpd_ctrl_lock);
 	while (cmd->hdr.error < 0) {
 		sx_sleep(cmd, &khttpd_ctrl_lock, 0, "ctrlstart", 0);
