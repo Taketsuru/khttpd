@@ -728,9 +728,7 @@ khttpd_socket_stream_continue_receiving(struct khttpd_stream *stream,
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 
 	socket = stream->down;
-
 	KASSERT(socket != NULL, ("no socket"));
-	khttpd_socket_assert_curthread(socket);
 
 	khttpd_socket_set_upcall(socket, SO_RCV, timeout);
 }
