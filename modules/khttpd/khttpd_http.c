@@ -149,8 +149,11 @@ struct khttpd_session {
 	struct mbuf		*recv_ptr;
 	unsigned		recv_paused:1;
 	unsigned		xmit_waiting_for_drain:1;
+	unsigned		https:1;
+	unsigned		is_default_port:1;
 
-#define khttpd_session_zero_end host_buf
+#define khttpd_session_zero_end port_number
+	unsigned		port_number;
 	char			host_buf[32];
 };
 
@@ -1016,6 +1019,9 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 {
 	struct khttpd_exchange *exchange;
 	struct khttpd_server *server;
+	const char *colonp;
+	uintmax_t port_num;
+	int error;
 
 	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, session, begin, end);
 
@@ -1033,12 +1039,28 @@ khttpd_session_receive_host_field(struct khttpd_session *session,
 
 	if (end - begin != sbuf_len(&session->host) ||
 	    strncmp(begin, sbuf_data(&session->host), end - begin) != 0) {
+
+		colonp = memchr(begin, ':', end - begin);
+		if (colonp != NULL) {
+			error = khttpd_parse_digits(&port_num, begin, colonp);
+			if (error != 0 || port_num != session->port_number) {
+				KHTTPD_NOTE("reject %u", __LINE__);
+				khttpd_exchange_reject(exchange);
+				return;
+			}
+		} else if (!session->is_default_port) {
+			KHTTPD_NOTE("reject %u", __LINE__);
+			khttpd_exchange_reject(exchange);
+			return;
+		}
+
 		/* 
 		 * Find the server.  If the specified Host doesn't exist, send
 		 * a 'bad request' response.
 		 */
 
-		server = khttpd_vhost_find_server(session->port, begin, end);
+		server = khttpd_vhost_find_server(session->port, begin,
+		    colonp == NULL ? end : colonp);
 		if (server == NULL) {
 			KHTTPD_NOTE("reject %u", __LINE__);
 			khttpd_exchange_reject(exchange);
@@ -2272,6 +2294,8 @@ khttpd_http_accept_http_client(struct khttpd_port *port,
 	struct khttpd_http_client *client;
 	struct khttpd_session *session;
 	struct khttpd_stream *stream;
+	const struct sockaddr *addr;
+	unsigned port_num;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 
@@ -2283,6 +2307,20 @@ khttpd_http_accept_http_client(struct khttpd_port *port,
 	session->port = khttpd_port_acquire(port);
 	session->socket = socket;
 	khttpd_socket_set_smesg(session->socket, "request");
+
+	addr = khttpd_port_address(port);
+	switch (addr->sa_family) {
+	case AF_INET:
+		port_num = ntohs(((struct sockaddr_in *)addr)->sin_port);
+		break;
+	case AF_INET6:
+		port_num = ntohs(((struct sockaddr_in6 *)addr)->sin6_port);
+		break;
+	default:
+		port_num = 0;
+	}
+	session->port_number = port_num;
+	session->is_default_port = port_num == 80;
 
 	sock_conf->timeout = sess_conf->idle_timeout;
 	sock_conf->stream = stream;

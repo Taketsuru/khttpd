@@ -1648,6 +1648,13 @@ khttpd_port_stop(struct khttpd_port *port)
 	soclose(so);
 }
 
+const struct sockaddr *
+khttpd_port_address(struct khttpd_port *port)
+{
+
+	return ((struct sockaddr *)&port->addr);
+}
+
 static int
 khttpd_port_costruct_init(void)
 {

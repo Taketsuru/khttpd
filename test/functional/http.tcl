@@ -92,6 +92,22 @@ test::define http_no_host_field test::khttpd_1conn_testcase {
     test::assert_error_log_is_empty $khttpd
 }
 
+# Host: field specifies no port number and the server's port number is 80.
+test::define http_host_field_no_port_ok test::khttpd_1conn_testcase {
+}
+
+# Host: field specifies no port number and the server port number is 80.
+test::define http_host_field_no_port_reject test::khttpd_1conn_testcase {
+}
+
+# Host: field specifies a port number that matches the server's port.
+test::define http_host_field_with_port_ok test::khttpd_1conn_testcase {
+}
+
+# Host: field specifies a port number that doesn't match the server's port.
+test::define http_host_field_with_port_reject test::khttpd_1conn_testcase {
+}
+
 # From RFC 7231 section 4.3.4:
 #
 # "An origin server that allows PUT on a given target resource MUST send a

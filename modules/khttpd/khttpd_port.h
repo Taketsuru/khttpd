@@ -76,3 +76,5 @@ int	khttpd_port_start(struct khttpd_port *_port, struct sockaddr *_addr,
 	    khttpd_socket_config_fn_t _fn, void *_arg,
 	    const char **_detail_out);
 void	khttpd_port_stop(struct khttpd_port *_port);
+const struct sockaddr *
+	khttpd_port_address(struct khttpd_port *_port);
