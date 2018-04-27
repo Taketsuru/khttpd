@@ -113,10 +113,8 @@ RB_GENERATE_STATIC(khttpd_prefix_tree, khttpd_prefix, children_node,
 
 #pragma clang diagnostic pop
 
-KHTTPD_REFCOUNT1_GENERATE(khttpd_location, khttpd_location,
-    khttpd_location_dtor, khttpd_free);
-KHTTPD_REFCOUNT1_GENERATE(khttpd_server, khttpd_server,
-    khttpd_server_dtor, khttpd_free);
+KHTTPD_REFCOUNT1_GENERATE(khttpd_location, khttpd_location_dtor, khttpd_free);
+KHTTPD_REFCOUNT1_GENERATE(khttpd_server, khttpd_server_dtor, khttpd_free);
 
 static int
 khttpd_prefix_compare(struct khttpd_prefix *x, struct khttpd_prefix *y)

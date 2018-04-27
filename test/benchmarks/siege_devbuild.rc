@@ -270,7 +270,7 @@ concurrent = 25
 # ex: time = 50M
 #
 # time =
-time = 10S
+time = 1m
 
 #
 # Repetitions. The length of siege may be specified in client reps

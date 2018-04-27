@@ -54,7 +54,7 @@ typedef void (*khttpd_socket_error_fn_t)(void *, int);
 
 extern struct khttpd_costruct_info *khttpd_port_costruct_info;
 
-KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_port, khttpd_port);
+KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_port);
 
 const struct sockaddr *
 	khttpd_socket_name(struct khttpd_socket *_sock);

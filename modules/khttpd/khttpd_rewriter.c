@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -76,8 +76,7 @@ static void khttpd_rewriter_dtor(struct khttpd_rewriter *rewriter);
 
 struct khttpd_costruct_info *khttpd_rewriter_costruct_info;
 
-KHTTPD_REFCOUNT1_GENERATE(khttpd_rewriter, khttpd_rewriter,
-    khttpd_rewriter_dtor, khttpd_free);
+KHTTPD_REFCOUNT1_GENERATE(khttpd_rewriter, khttpd_rewriter_dtor, khttpd_free);
 
 int
 khttpd_rewriter_new(struct khttpd_rewriter **rewriter_out)

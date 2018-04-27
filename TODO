@@ -1,5 +1,3 @@
-- Does KHTTPD_REFCOUNT1_PROTOTYPE need two arguments?
-
 - More functional tests
 
 - Feature to redirect accesses

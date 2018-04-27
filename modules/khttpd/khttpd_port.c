@@ -218,8 +218,7 @@ static char khttpd_port_siphash_key[SIPHASH_KEY_LENGTH];
 
 MTX_SYSINIT(khttpd_port_lock, &khttpd_port_lock, "ports", MTX_DEF);
 
-KHTTPD_REFCOUNT1_GENERATE(khttpd_port, khttpd_port, khttpd_port_dtor,
-    khttpd_port_fini);
+KHTTPD_REFCOUNT1_GENERATE(khttpd_port, khttpd_port_dtor, khttpd_port_fini);
 
 static struct khttpd_socket_worker *
 khttpd_socket_worker_find(void)

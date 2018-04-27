@@ -65,7 +65,7 @@ struct khttpd_location_ops {
 extern struct khttpd_costruct_info *khttpd_server_costruct_info;
 extern struct khttpd_costruct_info *khttpd_location_costruct_info;
 
-KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_location, khttpd_location);
+KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_location);
 
 struct khttpd_location *khttpd_location_new(int *error_out, 
     struct khttpd_server *server, const char *path,
@@ -76,7 +76,7 @@ struct khttpd_location_ops *khttpd_location_get_ops(struct khttpd_location *);
 const char *khttpd_location_get_path(struct khttpd_location *);
 struct khttpd_server * khttpd_location_get_server(struct khttpd_location *);
 
-KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_server, khttpd_server);
+KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_server);
 
 struct khttpd_server *khttpd_server_new(int *error_out);
 struct khttpd_location *khttpd_server_route(struct khttpd_server *,

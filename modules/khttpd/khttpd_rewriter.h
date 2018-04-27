@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -66,6 +66,6 @@ void khttpd_rewriter_rule_inspect_suffix_rule
     (struct khttpd_rewriter_rule *rule, const char **pattern,
      const char **result);
 
-KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_rewriter, khttpd_rewriter);
+KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_rewriter);
 
 #endif
