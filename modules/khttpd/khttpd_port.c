@@ -142,7 +142,7 @@ struct khttpd_socket {
 	struct khttpd_stream	*stream;   /* (*) */
 	struct mbuf		*xmit_buf; /* (*) */
 	struct socket		*so;	   /* (a) */
-	const char		*smesg;	   /* (*) */
+	const char		*smesg;	   		       /* (*) */
 	khttpd_socket_config_fn_t config_fn;		       /* (-) */
 	khttpd_socket_error_fn_t error_fn;		       /* (-) */
 	void			*config_arg;		       /* (-) */
@@ -403,6 +403,7 @@ khttpd_socket_worker_main(void *arg)
 	}
 
 	KASSERT(STAILQ_EMPTY(&worker->queue), ("worker->queue not empty"));
+	KASSERT(SLIST_EMPTY(&worker->free), ("worker->free not empty"));
 
 	mtx_unlock(&worker->lock);
 
@@ -430,46 +431,6 @@ khttpd_socket_report_error(struct khttpd_socket *socket, int severity,
 	khttpd_stream_error(socket->stream, &entry);
 }
 
-static bool
-khttpd_socket_is_readable(struct socket *so)
-{
-
-	KHTTPD_ENTRY("%s(%p)", __func__, so);
-	SOCKBUF_LOCK_ASSERT(&so->so_rcv);
-
-	KHTTPD_NOTE("%s state %#x, sb_state %#x, error %d", __func__,
-	    so->so_state, so->so_rcv.sb_state, so->so_error);
-	KHTTPD_NOTE("%s sb_lowat %d, sbavail %d", __func__,
-	    so->so_rcv.sb_lowat, sbavail(&so->so_rcv));
-
-	return (so->so_rcv.sb_lowat <= sbavail(&so->so_rcv) ||
-	    so->so_error != 0 || so->so_rcv.sb_state & SBS_CANTRCVMORE);
-}
-
-static bool
-khttpd_socket_is_writeable(struct socket *so)
-{
-
-	KHTTPD_ENTRY("%s(%p)", __func__, so);
-	SOCKBUF_LOCK_ASSERT(&so->so_snd);
-
-	KHTTPD_NOTE("%s state %#x, sb_state %#x, error %d", __func__,
-	    so->so_state, so->so_snd.sb_state, so->so_error);
-	KHTTPD_NOTE("%s sb_lowat %d, sbspace %d", __func__,
-	    so->so_snd.sb_lowat, sbspace(&so->so_snd));
-
-	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0 ||
-	    so->so_error != 0) {
-		return (true);
-	}
-
-	if ((so->so_state & SS_ISCONNECTED) == 0) {
-		return (false);
-	}
-
-	return (so->so_snd.sb_lowat <= sbspace(&so->so_snd));
-}
-
 static void
 khttpd_socket_schedule_reset(void *arg)
 {
@@ -494,7 +455,7 @@ khttpd_socket_on_recv_upcall(struct socket *so, void *arg, int flags)
 
 	socket = arg;
 
-	if (!khttpd_socket_is_readable(so)) {
+	if (!soreadable(so)) {
 		return (SU_OK);
 	}
 
@@ -519,7 +480,7 @@ khttpd_socket_on_xmit_upcall(struct socket *so, void *arg, int flags)
 
 	socket = arg;
 
-	if (!khttpd_socket_is_writeable(so)) {
+	if (!sowriteable(so)) {
 		return (SU_OK);
 	}
 
@@ -567,8 +528,7 @@ khttpd_socket_set_upcall(struct khttpd_socket *socket, int side,
 	mtx_lock(&worker->lock);
 
 	kick_callout = false;
-	if ((side == SO_RCV ? khttpd_socket_is_readable(so) :
-		khttpd_socket_is_writeable(so))) {
+	if ((side == SO_RCV ? soreadable(so) : sowriteable(so))) {
 		khttpd_socket_job_schedule_locked(worker, &job->job, false);
 
 	} else {
@@ -920,7 +880,7 @@ khttpd_socket_do_config(void *arg)
 	khttpd_stream_on_configured(stream);
 
 	SOCKBUF_LOCK(&so->so_rcv);
-	is_readable = khttpd_socket_is_readable(so);
+	is_readable = soreadable(so);
 	SOCKBUF_UNLOCK(&so->so_rcv);
 
 	if (is_readable) {
@@ -1043,7 +1003,7 @@ khttpd_socket_did_connected_upcall(struct socket *so, void *arg, int flags)
 
 	socket = arg;
 
-	if (!khttpd_socket_is_writeable(so)) {
+	if (!sowriteable(so)) {
 		return (SU_OK);
 	}
 
@@ -1746,7 +1706,7 @@ khttpd_socket_do_snd_job(void *arg)
 
 	so = socket->so;
 	SOCKBUF_LOCK(&so->so_snd);
-	if (!khttpd_socket_is_writeable(so)) {
+	if (!sowriteable(so)) {
 		SOCKBUF_UNLOCK(&so->so_snd);
 		khttpd_socket_set_upcall(socket, SO_SND, 0);
 		return;
