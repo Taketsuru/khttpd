@@ -1393,12 +1393,31 @@ khttpd_fcgi_did_connected(struct khttpd_socket *socket, void *arg,
 	return (0);
 }
 
+static void
+khttpd_fcgi_handle_connection_failure(void *arg, int error)
+{
+	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_upstream *upstream;
+	struct khttpd_fcgi_location_data *loc_data;
+
+	conn = arg;
+	upstream = conn->upstream;
+	loc_data = upstream->location_data;
+
+	mtx_lock(&loc_data->lock);
+	--loc_data->nconnecting;
+	mtx_unlock(&loc_data->lock);
+
+	khttpd_fcgi_upstream_fail(upstream);
+	khttpd_fcgi_conn_destroy(conn);
+	khttpd_fcgi_report_connection_error(upstream, error);
+}
+
 static int
 khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
     struct khttpd_fcgi_upstream *upstream)
 {
 	struct khttpd_fcgi_conn *conn;
-	int error;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, upstream);
 
@@ -1419,14 +1438,9 @@ khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
 	}
 	mtx_unlock(&loc_data->lock);
 
-	error = khttpd_socket_connect((struct sockaddr *)&upstream->sockaddr,
-	    NULL, khttpd_fcgi_did_connected, conn);
-	if (error != 0 && error != EINPROGRESS) {
-		KHTTPD_NOTE("%s error %d", __func__, error);
-		khttpd_fcgi_upstream_fail(upstream);
-		khttpd_fcgi_conn_destroy(conn);
-		khttpd_fcgi_report_connection_error(upstream, error);
-	}
+	khttpd_socket_connect((struct sockaddr *)&upstream->sockaddr,
+	    NULL, khttpd_fcgi_did_connected, conn,
+	    khttpd_fcgi_handle_connection_failure);
 
 	return (0);
 }

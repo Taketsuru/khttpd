@@ -50,6 +50,7 @@ struct khttpd_socket_config {
 
 typedef int (*khttpd_socket_config_fn_t)(struct khttpd_socket *, void *,
     struct khttpd_socket_config *);
+typedef void (*khttpd_socket_error_fn_t)(void *, int);
 
 extern struct khttpd_costruct_info *khttpd_port_costruct_info;
 
@@ -61,9 +62,10 @@ const struct sockaddr *
 	khttpd_socket_peer_address(struct khttpd_socket *_sock);
 void	khttpd_socket_set_smesg(struct khttpd_socket *_sock,
 	    const char *_smesg);
-int	khttpd_socket_connect(struct sockaddr *_peeraddr,
+void	khttpd_socket_connect(struct sockaddr *_peeraddr,
 	    struct sockaddr *_bindaddr,
-	    khttpd_socket_config_fn_t _fn, void *_arg);
+	    khttpd_socket_config_fn_t _fn, void *_arg,
+	    khttpd_socket_error_fn_t _error);
 void	khttpd_socket_reset(struct khttpd_socket *_sock);
 void	khttpd_socket_run_later(void (*_fn)(void *), void *_arg);
 int	khttpd_socket_set_affinity(struct khttpd_socket *_target,
