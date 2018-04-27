@@ -899,8 +899,27 @@ khttpd_socket_do_config(void *arg)
 }
 
 static bool
+khttpd_socket_enter_locked(struct khttpd_socket *socket)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
+	mtx_assert(&khttpd_port_lock, MA_OWNED);
+
+	if (khttpd_port_state != KHTTPD_PORT_STATE_READY) {
+		return (true);
+	}
+
+	LIST_INSERT_HEAD(&khttpd_port_sockets, socket, liste);
+	++khttpd_socket_count;
+
+	return (false);
+}
+
+static bool
 khttpd_socket_enter(struct khttpd_socket *socket)
 {
+
+	KHTTPD_ENTRY("%s(%p)", __func__, socket);
 
 	mtx_lock(&khttpd_port_lock);
 
@@ -1384,14 +1403,17 @@ khttpd_port_do_arrival_job(void *arg)
 		 * job runs earlier than reset job enqueued by
 		 * khttpd_port_shutdown().
 		 */
+		mtx_lock(&khttpd_port_lock);
 		mtx_lock(&worker->lock);
-		if (khttpd_socket_enter(socket)) {
+		if (khttpd_socket_enter_locked(socket)) {
 			mtx_unlock(&worker->lock);
+			mtx_unlock(&khttpd_port_lock);
 			uma_zfree(khttpd_socket_zone, socket);
 		} else {
 			khttpd_socket_job_schedule_locked(worker,
 			    &socket->cnf_job, false);
 			mtx_unlock(&worker->lock);
+			mtx_unlock(&khttpd_port_lock);
 		}
 
 		ACCEPT_LOCK();
