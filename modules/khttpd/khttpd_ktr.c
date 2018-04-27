@@ -214,9 +214,17 @@ khttpd_ktr_flush(void)
 static void
 khttpd_ktr_main(void *arg)
 {
+	int end, n;
 
-	while (!khttpd_ktr_shutdown && khttpd_ktr_flush() == 0)
-		pause("ktrflush", hz / 10);
+	while (!khttpd_ktr_shutdown) {
+		end = ktr_idx;
+		n = end < khttpd_ktr_idx ? end + ktr_entries - khttpd_ktr_idx :
+		    end - khttpd_ktr_idx;
+		if ((ktr_entries >> 1) <= n && khttpd_ktr_flush() != 0) {
+			break;
+		}
+		pause("ktrflush", 1);
+	}
 
 	khttpd_ktr_thread = NULL;
 	kthread_exit();
