@@ -43,6 +43,8 @@
 #include "khttpd_ktr.h"
 #include "khttpd_malloc.h"
 
+#ifdef KHTTPD_COVERAGE_ENABLE
+
 #define KHTTPD_GCOV_BUFSIZ	PAGE_SIZE
 
 struct khttpd_gcov_fn_node {
@@ -573,3 +575,17 @@ khttpd_gcov_fini(void)
 	}
 	STAILQ_INIT(&khttpd_gcov_flush_list);
 }
+
+#else  /* !KHTTPD_COVERAGE_ENABLE */
+
+void
+khttpd_gcov_init(void)
+{
+}
+
+void
+khttpd_gcov_fini(void)
+{
+}
+
+#endif  /* KHTTPD_COVERAGE_ENABLE */

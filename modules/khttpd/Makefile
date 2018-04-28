@@ -23,7 +23,8 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-SRCS = khttpd_ktr.c khttpd_test.c khttpd_malloc.c khttpd_init.c khttpd_main.c
+SRCS = khttpd_ktr.c khttpd_test.c khttpd_malloc.c khttpd_gcov.c khttpd_init.c
+SRCS += khttpd_main.c
 SRCS +=	khttpd_string.c khttpd_mbuf.c khttpd_problem.c khttpd_json.c
 SRCS += khttpd_costruct.c
 SRCS += khttpd_uuid.c khttpd_strtab.c
@@ -36,10 +37,6 @@ SRCS += khttpd_ctrl.c
 SRCS += khttpd_file.c
 SRCS += khttpd_sysctl.c
 SRCS += khttpd_fcgi.c
-
-.if defined(COVERAGE)
-SRCS += khttpd_gcov.c
-.endif
 
 KMOD = khttpd
 
@@ -74,7 +71,7 @@ CFLAGS += -DKHTTPD_TRACE_FN -DKHTTPD_TRACE_BRANCH -DKHTTPD_TRACE_NOTE
 CFLAGS += -DKHTTPD_TEST_ENABLE
 
 .if defined(COVERAGE)
-CFLAGS += --coverage
+CFLAGS += --coverage -DKHTTPD_COVERAGE_ENABLE
 LDFLAGS += --script khttpd_gcov.lds
 .endif
 
