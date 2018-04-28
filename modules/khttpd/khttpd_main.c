@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,6 +48,7 @@
 #include <sys/conf.h>
 
 #include "khttpd.h"
+#include "khttpd_gcov.h"
 #include "khttpd_init.h"
 #include "khttpd_test.h"
 #include "khttpd_ktr.h"
@@ -377,7 +378,8 @@ khttpd_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 
 #ifdef KHTTPD_TEST_ENABLE
 	case KHTTPD_IOC_TEST:
-		error = khttpd_main_test((struct khttpd_ioctl_test_args *)data);
+		error = khttpd_main_test
+		    ((struct khttpd_ioctl_test_args *)data);
 		break;
 #endif
 	default:
@@ -408,6 +410,8 @@ khttpd_loader(struct module *m, int what, void *arg)
 	switch (what) {
 
 	case MOD_LOAD:
+		khttpd_gcov_init();
+
 		khttpd_main_module_self = m;
 
 		khttpd_main_shutdown_tag = 
@@ -436,6 +440,8 @@ khttpd_loader(struct module *m, int what, void *arg)
 
 		EVENTHANDLER_DEREGISTER(khttpd_init_shutdown, 
 		    khttpd_main_shutdown_tag);
+
+		khttpd_gcov_fini();
 
 		return (0);
 

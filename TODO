@@ -1,3 +1,7 @@
+- Implement tests http_host_field_no_port_ok,
+  http_host_field_no_port_reject, http_host_field_with_port_ok, and
+  http_host_field_with_port_reject.
+
 - More functional tests
 
 - Feature to redirect accesses

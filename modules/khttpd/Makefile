@@ -37,6 +37,10 @@ SRCS += khttpd_file.c
 SRCS += khttpd_sysctl.c
 SRCS += khttpd_fcgi.c
 
+.if defined(COVERAGE)
+SRCS += khttpd_gcov.c
+.endif
+
 KMOD = khttpd
 
 .if !defined(KERNBUILDDIR)
@@ -68,6 +72,11 @@ CFLAGS += -DKHTTPD_KTR_LOGGING \
 CFLAGS += -DKHTTPD_TRACE_MALLOC
 CFLAGS += -DKHTTPD_TRACE_FN -DKHTTPD_TRACE_BRANCH -DKHTTPD_TRACE_NOTE
 CFLAGS += -DKHTTPD_TEST_ENABLE
+
+.if defined(COVERAGE)
+CFLAGS += --coverage
+LDFLAGS += --script khttpd_gcov.lds
+.endif
 
 .endif
 

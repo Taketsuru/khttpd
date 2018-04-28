@@ -32,6 +32,9 @@
 *.dSYM/
 
 # Others
+*.gcno
+*.gcda
+*.gcov
 .dir-locals.el
 cscope.files
 cscope.out
@@ -51,6 +54,7 @@ modules/khttpd/ddb
 test/log/
 test/docroot/test.php
 test/docroot/wordpress/
+test/report.xml
 usr.sbin/khttpdctl/khttpdctl
 usr.sbin/khttpdctl/khttpdctl.debug
 usr.sbin/khttpdctl/khttpdctl.full
