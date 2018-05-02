@@ -180,7 +180,8 @@ khttpd_file_get_exchange_data_ctor(void *mem, int size, void *arg, int flags)
 
 	data = mem;
 	bzero(&data->khttpd_file_get_exchange_data_zctor_begin,
-	    sizeof(struct khttpd_file_get_exchange_data) -
+	    offsetof(struct khttpd_file_get_exchange_data,
+		khttpd_file_get_exchange_data_zctor_end) -
 	    offsetof(struct khttpd_file_get_exchange_data,
 		khttpd_file_get_exchange_data_zctor_begin));
 
