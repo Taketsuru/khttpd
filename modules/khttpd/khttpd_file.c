@@ -102,14 +102,14 @@ struct khttpd_file_get_exchange_data {
 	struct khttpd_job *io_job;		     /* (o) */
 
 #define khttpd_file_get_exchange_data_zctor_begin fp
-	struct file	*fp;	     /* (o) */
-	struct vm_object *object;    /* (o) */
-	struct vm_page	**pages;     /* (p) */
-	unsigned	io_size;     /* (p) */
-	int		npages;	     /* (p) */
-	int		in_progress; /* (l) */
-	unsigned	paused:1;    /* (l) */
-	unsigned	orphaned:1;  /* (l) */
+	struct file	*fp;	 		     /* (o) */
+	struct vm_object *object;    		     /* (o) */
+	struct vm_page	*pages[MAXPHYS / PAGE_SIZE]; /* (p) */
+	unsigned	io_size;		     /* (p) */
+	int		npages;			     /* (p) */
+	int		in_progress;		     /* (l) */
+	unsigned	paused:1;		     /* (l) */
+	unsigned	orphaned:1;		     /* (l) */
 
 #define khttpd_file_get_exchange_data_zctor_end error
 	int		error;		/* (l) */
@@ -197,10 +197,10 @@ khttpd_file_get_exchange_data_dtor(void *mem, int size, void *arg)
 
 	td = curthread;
 	data = mem;
-	khttpd_free(data->pages);
 	vm_object_deallocate(data->object);
-	if (data->fp != NULL)
+	if (data->fp != NULL) {
 		fdrop(data->fp, td);
+	}
 	sbuf_clear(&data->path);
 }
 
@@ -420,11 +420,10 @@ khttpd_file_read_file(void *arg)
 		data->error = 0;
 		data->in_progress = 1;
 		npages = howmany(pageoff + io_size, PAGE_SIZE);
-		if (data->npages != npages) {
-			data->pages = pages = khttpd_realloc(pages,
-			    npages * sizeof(struct vm_page *));
-			data->npages = npages;
-		}
+		KASSERT(npages <  nitems(data->pages),
+		    ("npages %d, nitems(data->pages) %zd",
+			npages, nitems(data->pages)));
+		data->npages = npages;
 		bzero(pages, npages * sizeof(struct vm_page *));
 	}
 
@@ -605,7 +604,8 @@ retry:
 		m_length(hd, NULL), len));
 
 	if (data->io_offset < data->end_offset) {
-		data->io_size = MIN(space, data->end_offset - data->io_offset);
+		data->io_size = MIN(nitems(data->pages) * PAGE_SIZE,
+		    MIN(space, data->end_offset - data->io_offset));
 		khttpd_file_read_file(data);
 	}
 
