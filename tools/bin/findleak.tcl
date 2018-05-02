@@ -50,13 +50,19 @@ while {[gets $ktrfile line] >= 0} {
 	continue
     }
 
-    if {[regexp -line -- {^#([[:digit:]]+) (.*)$} $desc match depth caller] &&
-	[dict exist $lastAlloc $thread] &&
-	$depth == [dict get $heap [dict get $lastAlloc $thread] depth]} {
-	set mem [dict get $lastAlloc $thread]
-	dict set heap $mem "stack$depth" $caller
-	dict set heap $mem depth [expr {[dict get $heap $mem depth] + 1}]
-	continue
+    if {![regexp -line -- {^#([[:digit:]]+) (.*)$} $desc match depth caller]} {
+    } elseif {![dict exist $lastAlloc $thread]} {
+    } else {
+	set alloc [dict get $lastAlloc $thread]
+	if {![dict exist $heap $alloc]} {
+	    error "no alloc at $timestamp"
+	}
+	if {$depth == [dict get $heap $alloc depth]} {
+	    set mem [dict get $lastAlloc $thread]
+	    dict set heap $mem "stack$depth" $caller
+	    dict set heap $mem depth [expr {[dict get $heap $mem depth] + 1}]
+	    continue
+	}
     }
 
     dict unset lastAlloc $thread
