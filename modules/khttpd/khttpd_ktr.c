@@ -160,9 +160,11 @@ khttpd_ktr_flush(void)
 
 	n = end < khttpd_ktr_idx ? end + ktr_entries - khttpd_ktr_idx :
 	    end - khttpd_ktr_idx;
-	if (0 < n)
+	if (0 < n) {
 		sbuf_printf(&khttpd_ktr_sbuf,
-		    "# index: %d, entries: %d\n", khttpd_ktr_idx, n);
+		    "# index: %d, end: %d, entries: %d\n",
+		    khttpd_ktr_idx, end, n);
+	}
 
 	load_ts = khttpd_ktr_load_ts;
 	n = ktr_entries;
@@ -197,34 +199,56 @@ khttpd_ktr_flush(void)
 	auio.uio_resid = aiov.iov_len;
 	auio.uio_segflg = UIO_SYSSPACE;
 	error = kern_writev(td, khttpd_ktr_fd, &auio);
-	if (error != 0)
+	if (error != 0) {
 		log(LOG_WARNING, "khttpd: write(\"" KHTTPD_KTR_FILE
 		    "\") failed (error: %d)", error);
+	}
 
 	error = kern_fsync(td, khttpd_ktr_fd, FALSE);
-	if (error != 0)
+	if (error != 0) {
 		log(LOG_WARNING, "khttpd: fdatasync(\"" KHTTPD_KTR_FILE
 		    "\") failed (error: %d)", error);
+	}
 
 	sbuf_clear(&khttpd_ktr_sbuf);
 
 	return (error);
 }
 
+static bool
+khttpd_ktr_expired(struct bintime *last_flush)
+{
+	struct bintime exp_time;
+	struct bintime cur_time;
+
+	bintime(&cur_time);
+	exp_time = *last_flush;
+	exp_time.sec += 1;
+	return (bintime_cmp(&cur_time, &exp_time, <=));
+}
+
 static void
 khttpd_ktr_main(void *arg)
 {
 	int end, n;
+	struct bintime last_flush;
 
+	bintime(&last_flush);
 	while (!khttpd_ktr_shutdown) {
 		end = ktr_idx;
 		n = end < khttpd_ktr_idx ? end + ktr_entries - khttpd_ktr_idx :
 		    end - khttpd_ktr_idx;
-		if ((ktr_entries >> 1) <= n && khttpd_ktr_flush() != 0) {
+		if (0 == n || (n < (ktr_entries >> 1) &&
+		    !khttpd_ktr_expired(&last_flush))) {
+			pause("ktrflush", 1);
+		} else if (khttpd_ktr_flush() == 0) {
+			bintime(&last_flush);
+		} else {
 			break;
 		}
-		pause("ktrflush", 1);
 	}
+
+	khttpd_ktr_flush();
 
 	khttpd_ktr_thread = NULL;
 	kthread_exit();
@@ -279,8 +303,6 @@ khttpd_ktr_local_fini(void)
 	khttpd_ktr_shutdown = TRUE;
 	while (khttpd_ktr_thread != NULL)
 		pause("ktrstop", hz);
-
-	khttpd_ktr_flush();
 
 	sbuf_delete(&khttpd_ktr_sbuf);
 	kern_close(curthread, khttpd_ktr_fd);
