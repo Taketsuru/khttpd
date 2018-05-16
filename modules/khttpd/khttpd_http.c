@@ -126,7 +126,7 @@ typedef int (*khttpd_session_fn_t)(struct khttpd_session *);
 
 struct khttpd_session {
 	/*
-	 * khttpd_exchange_get_session assumes member 'exchange' is the first
+	 * khttpd_exchange_session assumes member 'exchange' is the first
 	 * member of struct khttpd_session.
 	 */
 	struct khttpd_exchange  exchange;
@@ -199,7 +199,7 @@ khttpd_http_log(int chan, struct khttpd_mbuf_json *entry)
 }
 
 static struct khttpd_session *
-khttpd_exchange_get_session(struct khttpd_exchange *exchange)
+khttpd_exchange_session(struct khttpd_exchange *exchange)
 {
 
 	return ((struct khttpd_session *)exchange);
@@ -417,7 +417,7 @@ khttpd_exchange_send_response(struct khttpd_exchange *exchange)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
 
-	session = khttpd_exchange_get_session(exchange);
+	session = khttpd_exchange_session(exchange);
 	status = exchange->status;
 	khttpd_socket_set_smesg(session->socket, "send");
 
@@ -480,7 +480,7 @@ khttpd_exchange_bailout(struct khttpd_exchange *exchange, int status)
 
 	if (exchange->responding) {
 		exchange->close = true;
-		session = khttpd_exchange_get_session(exchange);
+		session = khttpd_exchange_session(exchange);
 		khttpd_session_transmit_finish(session, NULL);
 		khttpd_socket_reset(session->socket);
 		return;
@@ -1835,7 +1835,7 @@ struct khttpd_socket *
 khttpd_exchange_socket(struct khttpd_exchange *exchange)
 {
 
-	return (khttpd_exchange_get_session(exchange)->socket);
+	return (khttpd_exchange_session(exchange)->socket);
 }
 
 const struct sockaddr *
@@ -1843,7 +1843,7 @@ khttpd_exchange_client_address(struct khttpd_exchange *exchange)
 {
 
 	return (khttpd_socket_peer_address
-	    (khttpd_exchange_get_session(exchange)->socket));
+	    (khttpd_exchange_session(exchange)->socket));
 }
 
 const struct sockaddr *
@@ -1851,7 +1851,7 @@ khttpd_exchange_server_address(struct khttpd_exchange *exchange)
 {
 
 	return (khttpd_socket_name
-	    (khttpd_exchange_get_session(exchange)->socket));
+	    (khttpd_exchange_session(exchange)->socket));
 }
 
 int
@@ -1886,14 +1886,14 @@ const char *
 khttpd_exchange_host(struct khttpd_exchange *exchange)
 {
 
-	return (sbuf_data(&khttpd_exchange_get_session(exchange)->host));
+	return (sbuf_data(&khttpd_exchange_session(exchange)->host));
 }
 
 size_t
 khttpd_exchange_host_length(struct khttpd_exchange *exchange)
 {
 
-	return (sbuf_len(&khttpd_exchange_get_session(exchange)->host));
+	return (sbuf_len(&khttpd_exchange_session(exchange)->host));
 }
 
 void *
@@ -2229,7 +2229,7 @@ khttpd_exchange_respond(struct khttpd_exchange *exchange, int status)
 	khttpd_mbuf_json_property(&exchange->log_entry, "status");
 	khttpd_mbuf_json_format(&exchange->log_entry, false, "%d", status);
 
-	if (khttpd_exchange_get_session(exchange)->receive != NULL) {
+	if (khttpd_exchange_session(exchange)->receive != NULL) {
 		KHTTPD_NOTE("postponed");
 		exchange->response_pending = true;
 		return;
@@ -2246,7 +2246,7 @@ khttpd_exchange_respond_immediately(struct khttpd_exchange *exchange,
 
 	khttpd_exchange_close(exchange);
 
-	session = khttpd_exchange_get_session(exchange);
+	session = khttpd_exchange_session(exchange);
 	session->receive = NULL;
 	khttpd_socket_set_smesg(session->socket, "stall");
 
@@ -2272,7 +2272,7 @@ khttpd_exchange_continue_sending(struct khttpd_exchange *exchange)
 {
 	struct khttpd_session *session;
 
-	session = khttpd_exchange_get_session(exchange);
+	session = khttpd_exchange_session(exchange);
 	khttpd_stream_notify_of_drain(&session->stream);
 }
 
@@ -2281,7 +2281,7 @@ khttpd_exchange_continue_receiving(struct khttpd_exchange *exchange)
 {
 	struct khttpd_session *session;
 
-	session = khttpd_exchange_get_session(exchange);
+	session = khttpd_exchange_session(exchange);
 	khttpd_stream_continue_receiving(&session->stream,
 	    session->config.busy_timeout);
 }
