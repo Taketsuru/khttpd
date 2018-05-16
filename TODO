@@ -2,6 +2,8 @@
   http_host_field_no_port_reject, http_host_field_with_port_ok, and
   http_host_field_with_port_reject.
 
+- BUG: specifing invalid path to errorLog crashes the kernel
+
 - More functional tests
 
 - Feature to redirect accesses

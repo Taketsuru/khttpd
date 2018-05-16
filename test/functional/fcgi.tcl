@@ -290,6 +290,12 @@ test::define fcgi_premature_upstream_close test::fastcgi::testcase -setup {
 
 # HEAD method
 
+# local redirect
+
+# client redirect
+
+# client redirect with document
+
 # property 'scriptSuffix'
 
 # property 'fsPath'
