@@ -1,0 +1,47 @@
+{
+    "accessLog" : {
+        "type" : "file",
+        "path" : "/home/taketsuru/work/khttpd/test/log/access.log"
+    },
+    "errorLog"  : {
+        "type" : "file",
+        "path" : "/home/taketsuru/work/khttpd/test/log/error.log"
+    },
+    "rewriters" : [],
+    "ports"     : [{
+        "id"          : "aa35c368-9c2e-4112-bdee-0218e6490144",
+        "protocol"    : "http",
+        "address"     : {
+            "family" : "inet",
+            "port"   : 80
+        },
+        "idleTimeout" : 10,
+        "busyTimeout" : 10
+    }],
+    "servers"   : [{
+        "id"    : "2d305f6c-6504-4e78-98c3-9f8cf099eca6",
+        "name"  : "192.168.56.3",
+        "ports" : ["aa35c368-9c2e-4112-bdee-0218e6490144"]
+    }],
+    "locations" : [{
+        "id"           : "08672ee5-9dbd-42b2-8e0c-e0f4686b7652",
+        "type"         : "khttpd_fastcgi",
+        "server"       : "2d305f6c-6504-4e78-98c3-9f8cf099eca6",
+        "path"         : "/",
+        "scriptSuffix" : ".php",
+        "fsPath"       : "/home/taketsuru/work/khttpd/test/docroot/wordpress",
+        "upstreams"    : [{
+            "address" : {
+                "family"  : "inet",
+                "address" : "192.168.56.2",
+                "port"    : 9000
+            }
+        }]
+    },{
+        "id"     : "5527fbf5-8292-4ab7-8f93-06576d8a667c",
+        "type"   : "khttpd_file",
+        "server" : "2d305f6c-6504-4e78-98c3-9f8cf099eca6",
+        "path"   : "/",
+        "fsPath" : "/home/taketsuru/work/khttpd/test/docroot/wordpress"
+    }]
+}

@@ -52,7 +52,6 @@ modules/khttpd/commit
 modules/khttpd/crypto
 modules/khttpd/ddb
 test/log/
-test/docroot/test.php
 test/docroot/wordpress/
 test/report.xml
 usr.sbin/khttpdctl/khttpdctl

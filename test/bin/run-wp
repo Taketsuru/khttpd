@@ -1,0 +1,15 @@
+#!/bin/sh
+
+case "$0" in
+     /*) proj_dir=`dirname $0`/../..;;
+     *) proj_dir=`pwd`/`dirname $0`/../..;;
+esac
+
+if kldstat -q -m khttpd; then
+    kldunload khttpd.ko
+fi
+
+rm -f $proj_dir/test/log/{ktr,access,error}.log
+
+kldload $proj_dir/modules/khttpd/khttpd.ko
+$proj_dir/usr.sbin/khttpdctl/khttpdctl start $proj_dir/test/lib/wordpress.json
