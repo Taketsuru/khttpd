@@ -103,6 +103,7 @@ struct khttpd_exchange {
 	struct mbuf		*response_buffer;
 	unsigned		request_header_size;
 	unsigned		request_content_type_len;
+	unsigned		redirect_count;
 	unsigned		status:16;
 	unsigned		version_minor:4;
 	unsigned		close:1;
@@ -1242,6 +1243,84 @@ khttpd_exchange_put_request_line(struct khttpd_mbuf_json *entry,
 	    (int)(eolp != NULL ? eolp - begin : end - begin), begin);
 }
 
+static void
+khttpd_exchange_dispatch(struct khttpd_exchange *exchange)
+{
+	struct khttpd_location *location;
+	struct khttpd_location_ops *ops;
+	khttpd_method_fn_t handler;
+	int method, status;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+
+	method = exchange->method;
+
+	if (exchange->status != 0) {
+		/* already found an error in the request */
+
+	} else if (method == KHTTPD_METHOD_UNKNOWN) {
+		status = KHTTPD_STATUS_NOT_IMPLEMENTED;
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    NULL);
+		khttpd_exchange_respond(exchange, status);
+
+	} else if ((location = exchange->location) != NULL) {
+		ops = khttpd_location_get_ops(location);
+
+		if ((handler = ops->method[method]) == NULL) {
+			switch (method) {
+			case KHTTPD_METHOD_OPTIONS:
+				handler = khttpd_exchange_options;
+				break;
+			case KHTTPD_METHOD_HEAD:
+				handler = ops->method[KHTTPD_METHOD_GET];
+				break;
+			default:
+				;	/* nothing */
+			}
+		}
+
+		if (handler == NULL) {
+			handler = ops->catch_all;
+		}
+
+		if (handler == NULL) {
+			khttpd_exchange_method_not_allowed(exchange);
+
+		} else if (exchange->request_has_content_range &&
+		    method == KHTTPD_METHOD_PUT) {
+			KHTTPD_NOTE("%u bad request", __LINE__);
+			status = KHTTPD_STATUS_BAD_REQUEST;
+			khttpd_exchange_set_error_response_body(exchange,
+			    status, NULL);
+			khttpd_exchange_respond(exchange, status);
+
+		} else {
+			(*handler)(exchange);
+		}
+
+	} else if (exchange->method == KHTTPD_METHOD_OPTIONS &&
+	    strcmp(sbuf_data(&exchange->target), "*") == 0) {
+		/*
+		 * If the request method is OPTIONS and the target is "*", send
+		 * OPTIONS response.
+		 */
+		khttpd_exchange_set_allow_field(exchange);
+		khttpd_exchange_set_response_content_length(exchange, 0);
+		khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
+
+	} else {
+		/*
+		 * If the request doesn't have matching location, send a 'Not
+		 * Found' response.
+		 */
+		status = KHTTPD_STATUS_NOT_FOUND;
+		khttpd_exchange_set_error_response_body(exchange, status, 
+		    NULL);
+		khttpd_exchange_respond(exchange, status);
+	}
+}
+
 static int
 khttpd_session_receive_request(struct khttpd_session *session)
 {
@@ -1249,10 +1328,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 	const char *begin, *end;
 	const char *bolp, *eolp;
 	const char *cp, *reqend;
-	khttpd_method_fn_t handler;
 	struct khttpd_exchange *exchange;
-	struct khttpd_location *location;
-	struct khttpd_location_ops *ops;
 	struct mbuf *m;
 	int field, method, query_off, minlen;
 	int ch, error, status;
@@ -1476,70 +1552,7 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		return (0);
 	}
 
-	if (exchange->status != 0) {
-		/* already found an error in the request */
-
-	} else if (method == KHTTPD_METHOD_UNKNOWN) {
-		status = KHTTPD_STATUS_NOT_IMPLEMENTED;
-		khttpd_exchange_set_error_response_body(exchange, status,
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
-
-	} else if ((location = exchange->location) != NULL) {
-		ops = khttpd_location_get_ops(location);
-
-		if ((handler = ops->method[method]) == NULL) {
-			switch (method) {
-			case KHTTPD_METHOD_OPTIONS:
-				handler = khttpd_exchange_options;
-				break;
-			case KHTTPD_METHOD_HEAD:
-				handler = ops->method[KHTTPD_METHOD_GET];
-				break;
-			default:
-				;	/* nothing */
-			}
-		}
-
-		if (handler == NULL) {
-			handler = ops->catch_all;
-		}
-
-		if (handler == NULL) {
-			khttpd_exchange_method_not_allowed(exchange);
-
-		} else if (exchange->request_has_content_range &&
-		    method == KHTTPD_METHOD_PUT) {
-			KHTTPD_NOTE("%u bad request", __LINE__);
-			status = KHTTPD_STATUS_BAD_REQUEST;
-			khttpd_exchange_set_error_response_body(exchange,
-			    status, NULL);
-			khttpd_exchange_respond(exchange, status);
-
-		} else {
-			(*handler)(exchange);
-		}
-
-	} else if (exchange->method == KHTTPD_METHOD_OPTIONS &&
-	    strcmp(sbuf_data(&exchange->target), "*") == 0) {
-		/*
-		 * If the request method is OPTIONS and the target is "*", send
-		 * OPTIONS response.
-		 */
-		khttpd_exchange_set_allow_field(exchange);
-		khttpd_exchange_set_response_content_length(exchange, 0);
-		khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
-
-	} else {
-		/*
-		 * If the request doesn't have matching location, send a 'Not
-		 * Found' response.
-		 */
-		status = KHTTPD_STATUS_NOT_FOUND;
-		khttpd_exchange_set_error_response_body(exchange, status, 
-		    NULL);
-		khttpd_exchange_respond(exchange, status);
-	}
+	khttpd_exchange_dispatch(exchange);
 
 	/*
 	 * Send a continue response if it has been requested.  Note that the
@@ -2251,6 +2264,82 @@ khttpd_exchange_respond_immediately(struct khttpd_exchange *exchange,
 	khttpd_socket_set_smesg(session->socket, "stall");
 
 	khttpd_exchange_respond(exchange, status);
+}
+
+void
+khttpd_exchange_redirect(struct khttpd_exchange *exchange, const char *target,
+    size_t len)
+{
+	struct khttpd_mbuf_json problem;
+	struct khttpd_session *session;
+	const char *cp, *ep;
+	int status, query_off;
+	bool pause;
+
+	KHTTPD_ENTRY("%s(%p,%s)", exchange, khttpd_ktr_printf("%s", target));
+
+	session = khttpd_exchange_session(exchange);
+	if (session->config.redirect_max == ++exchange->redirect_count) {
+		KHTTPD_NOTE("loop");
+		khttpd_mbuf_json_copy(&problem, &exchange->log_entry);
+		khttpd_problem_set_internal_error(&problem);
+		khttpd_problem_set_detail(&problem, "too many redirects");
+		khttpd_http_error(&problem);
+
+		status = KHTTPD_STATUS_INTERNAL_SERVER_ERROR;
+		khttpd_exchange_set_error_response_body(exchange, status, 
+		    NULL);
+		khttpd_exchange_respond(exchange, status);
+
+		return;
+	}
+
+	ep = target + len;
+	sbuf_clear(&exchange->target);
+	cp = khttpd_string_normalize_request_target(&exchange->target,
+	    target, ep, &query_off);
+	if (cp != ep) {
+		KHTTPD_NOTE("wrong location");
+		khttpd_mbuf_json_copy(&problem, &exchange->log_entry);
+		khttpd_problem_set_internal_error(&problem);
+		khttpd_problem_set_detail(&problem, "wrong redirect location");
+		khttpd_mbuf_json_property(&problem, "location");
+		khttpd_mbuf_json_bytes(&problem, true, target, ep);
+		khttpd_http_error(&problem);
+
+		status = KHTTPD_STATUS_NOT_FOUND;
+		khttpd_exchange_set_error_response_body(exchange, status,
+		    NULL);
+		khttpd_exchange_respond(exchange, status);
+
+		return;
+	}
+
+	sbuf_finish(&exchange->target); /* always succeeds */
+	exchange->query = query_off == -1 ? NULL :
+	    sbuf_data(&exchange->target) + query_off;
+
+	if (exchange->ops->dtor != NULL) {
+		exchange->ops->dtor(exchange, exchange->arg);
+	}
+	exchange->ops = &khttpd_exchange_null_ops;
+
+	khttpd_location_release(exchange->location);
+
+	session = khttpd_exchange_session(exchange);
+	exchange->location =
+	    khttpd_server_route(session->server, &exchange->target, exchange,
+		&exchange->suffix, NULL);
+
+	khttpd_exchange_dispatch(exchange);
+
+	if (exchange->ops->put != NULL) {
+		exchange->ops->put(exchange, exchange->arg, NULL, &pause);
+	}
+
+	if (exchange->response_pending) {
+		khttpd_exchange_send_response(exchange);
+	}
 }
 
 void

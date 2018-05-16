@@ -62,6 +62,7 @@ struct khttpd_exchange_ops {
 struct khttpd_session_config {
 	sbintime_t	idle_timeout;
 	sbintime_t	busy_timeout;
+	unsigned	redirect_max;
 };
 
 void	khttpd_http_error(struct khttpd_mbuf_json *);
@@ -121,6 +122,8 @@ bool	khttpd_exchange_set_response_body_problem_json
 	    struct khttpd_mbuf_json *_info);
 void	khttpd_exchange_set_error_response_body(struct khttpd_exchange *, int,
 	    struct khttpd_mbuf_json *);
+void	khttpd_exchange_redirect(struct khttpd_exchange *_xchg,
+	    const char *_target, size_t _len);
 void	khttpd_exchange_respond(struct khttpd_exchange *_xchg, int _status);
 void	khttpd_exchange_respond_immediately(struct khttpd_exchange *_xchg,
 	    int _status);

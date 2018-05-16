@@ -1810,6 +1810,19 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	}
 	config.busy_timeout = intval << 32;
 
+	prop_spec.name = "redirectMax";
+	status = khttpd_webapi_get_integer_property(&intval, prop_spec.name,
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+	}
+	if (intval < 0) {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		return (KHTTPD_STATUS_BAD_REQUEST);
+	}
+	config.redirect_max = intval;
+
 	if (protocol_id != port_data->protocol ||
 	    addr.ss_len != port_data->addr.ss_len ||
 	    memcmp(&addr, &port_data->addr, addr.ss_len) != 0) {
