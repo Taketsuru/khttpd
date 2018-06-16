@@ -85,6 +85,7 @@ void khttpd_ktr_unlock(void);
 char *khttpd_ktr_newbuf(int *);
 const char *khttpd_ktr_printf(const char *fmt, ...) __printflike(1, 2);
 const char *khttpd_ktr_vprintf(const char *fmt, __va_list) __printflike(1, 0);
+const char *khttpd_ktr_printsym(void *addr);
 
 #define KHTTPD_TR_MACRO(_0, _1, _2, _3, _4, _5, _6, N, ...) TR ## N
 #define KHTTPD_TR_(__fmt, __macro, ...) __macro(__fmt, ##__VA_ARGS__)

@@ -39,6 +39,7 @@
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/kernel.h>
+#include <sys/linker.h>
 #include <sys/systm.h>
 #include <sys/fcntl.h>
 #include <sys/syslog.h>
@@ -139,6 +140,39 @@ khttpd_ktr_printf(const char *fmt, ...)
 	va_end(ap);
 
 	return (result);
+}
+
+const char *
+khttpd_ktr_printsym(void *arg)
+{
+	linker_symval_t symval;
+	c_linker_sym_t sym;
+	vm_offset_t addr;
+	long offset;
+	char *buf;
+
+	if (arg == NULL) {
+		return ("NULL");
+	}
+
+	buf = khttpd_ktr_newbuf(NULL);
+	if (buf == NULL) {
+		return ("<buffer full>");
+	}
+
+	addr = (vm_offset_t)arg;
+	if (linker_ddb_search_symbol((caddr_t)addr, &sym, &offset) != 0 ||
+	    linker_ddb_symbol_values(sym, &symval) != 0 ||
+	    symval.name == NULL) {
+		snprintf(buf, KHTTPD_KTR_STRING_SIZE, "%#lx", addr);
+	} else if (offset == 0) {
+		snprintf(buf, KHTTPD_KTR_STRING_SIZE, "%s", symval.name);
+	} else {
+		snprintf(buf, KHTTPD_KTR_STRING_SIZE, "%s+%#lx", symval.name,
+		    offset);
+	}
+
+	return (buf);
 }
 
 static int

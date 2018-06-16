@@ -59,6 +59,7 @@
 #include "khttpd_server.h"
 #include "khttpd_status_code.h"
 #include "khttpd_string.h"
+#include "khttpd_task.h"
 #include "khttpd_uuid.h"
 #include "khttpd_vhost.h"
 #include "khttpd_webapi.h"
@@ -1747,10 +1748,10 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_ctrl_port_data *port_data;
 	struct khttpd_port *port;
-	const char *detail, *protocol;
+	const char *protocol;
 	int64_t intval;
 	int protocol_id;
-	int error, status;
+	int status;
 
 	sx_assert(&khttpd_ctrl_lock, SA_XLOCKED);
 	KASSERT(khttpd_json_type(input) == KHTTPD_JSON_OBJECT,
@@ -1834,23 +1835,10 @@ khttpd_ctrl_port_put(void *object, struct khttpd_mbuf_json *output,
 
 	bcopy(&config, &port_data->config, sizeof(port_data->config));
 
-	error = khttpd_port_start(port, (struct sockaddr *)&port_data->addr,
-	    khttpd_ctrl_accept, port, &detail);
-	if (error == EADDRNOTAVAIL || error == EADDRINUSE) {
-		khttpd_problem_response_begin(output, KHTTPD_STATUS_CONFLICT,
-		    NULL, NULL);
-		khttpd_problem_set_property(output, input_prop_spec);
-		khttpd_problem_set_errno(output, error);
-		if (detail != NULL)
-			khttpd_problem_set_detail(output, detail);
-
-	} else if (error != 0) {
-		khttpd_problem_response_begin(output, 
-		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL);
-		khttpd_problem_set_errno(output, error);
-		if (detail != NULL)
-			khttpd_problem_set_detail(output, detail);
-	}
+	khttpd_port_start(port, (struct sockaddr *)&port_data->addr,
+	    khttpd_ctrl_accept, NULL, port);
+	/* no error handling */
+	status = KHTTPD_STATUS_OK;
 
 	return (status);
 }
@@ -2919,16 +2907,19 @@ static void
 khttpd_ctrl_start(void *arg)
 {
 	struct khttpd_main_start_command *cmd;
+	struct khttpd_task_queue *queue;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
 	cmd = arg;
-	khttpd_socket_run_later(khttpd_ctrl_start_helper, arg);
+	queue = khttpd_task_queue_new("ctrlstart");
+	khttpd_task_queue_run(queue, khttpd_ctrl_start_helper, arg);
 	sx_slock(&khttpd_ctrl_lock);
 	while (cmd->hdr.error < 0) {
 		sx_sleep(cmd, &khttpd_ctrl_lock, 0, "ctrlstart", 0);
 	}
 	sx_sunlock(&khttpd_ctrl_lock);
+	khttpd_task_queue_delete(queue);
 }
 
 static int

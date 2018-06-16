@@ -31,50 +31,32 @@
 #error This file is not for userland code.
 #endif
 
-#include <sys/param.h>
-#include <sys/socket.h>
+#include <sys/types.h>
 
-#include "khttpd_refcount.h"
-
-struct mbuf;
-struct khttpd_costruct_info;
-struct khttpd_mbuf_json;
-struct khttpd_port;
-struct khttpd_socket;
-struct khttpd_stream;
-struct khttpd_stream_down_ops;
+struct khttpd_task;
 struct khttpd_task_queue;
 
-struct khttpd_socket_config {
-	struct khttpd_stream	*stream;
-	sbintime_t		timeout;
-};
+typedef void (*khttpd_task_fn_t)(void *arg);
 
-typedef int (*khttpd_socket_config_fn_t)(struct khttpd_socket *, void *,
-    struct khttpd_socket_config *);
-typedef void (*khttpd_socket_error_fn_t)(void *, struct khttpd_mbuf_json *);
-
-extern struct khttpd_costruct_info *khttpd_port_costruct_info;
-
-KHTTPD_REFCOUNT1_PROTOTYPE(khttpd_port);
-
-const struct sockaddr *
-	khttpd_socket_name(struct khttpd_socket *_sock);
-const struct sockaddr *
-	khttpd_socket_peer_address(struct khttpd_socket *_sock);
+struct khttpd_task *
+	khttpd_task_new(struct khttpd_task_queue *_queue,
+	    khttpd_task_fn_t _fn, void *_arg, const char *name_fmt, ...);
+void	khttpd_task_delete(struct khttpd_task *_task);
+bool	khttpd_task_is_active(struct khttpd_task *_task);
+bool	khttpd_task_schedule(struct khttpd_task *_task);
+bool	khttpd_task_cancel(struct khttpd_task *_task);
+bool	khttpd_task_queue_on_worker_thread(struct khttpd_task_queue *_queue);
 struct khttpd_task_queue *
-	khttpd_socket_task_queue(struct khttpd_socket *_sock);
-void	khttpd_socket_set_smesg(struct khttpd_socket *_sock,
-	    const char *_smesg);
-void	khttpd_socket_connect(struct sockaddr *_peeraddr,
-	    struct sockaddr *_bindaddr,
-	    khttpd_socket_config_fn_t _fn, void *_arg,
-	    khttpd_socket_error_fn_t _error);
-void	khttpd_socket_reset(struct khttpd_socket *_sock);
-int	khttpd_port_new(struct khttpd_port **_port_out);
-const struct sockaddr *
-	khttpd_port_address(struct khttpd_port *_port);
-void	khttpd_port_start(struct khttpd_port *_port, struct sockaddr *_addr,
-	    khttpd_socket_config_fn_t _config_fn,
-	    khttpd_socket_error_fn_t _error_fn, void *_arg);
-void	khttpd_port_stop(struct khttpd_port *_port);
+	khttpd_task_queue_current(void);
+struct khttpd_task_queue *
+	khttpd_task_queue_new(const char *name_fmt, ...);
+void	khttpd_task_queue_delete(struct khttpd_task_queue *_queue);
+bool	khttpd_task_queue_is_active(struct khttpd_task_queue *_queue);
+void	khttpd_task_queue_assign_random_worker
+	(struct khttpd_task_queue *_queue);
+void	khttpd_task_queue_run(struct khttpd_task_queue *_queue,
+	    khttpd_task_fn_t _fn, void *_arg);
+void	khttpd_task_queue_hand_over(struct khttpd_task_queue *_subject,
+	    struct khttpd_task_queue *_destination);
+void	khttpd_task_queue_take_over(struct khttpd_task_queue *_source,
+	    khttpd_task_fn_t _notify, void *_arg);
