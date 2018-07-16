@@ -925,6 +925,7 @@ khttpd_fcgi_attach_conn(void *arg)
 
 	if ((xchg_data = conn->xchg_data) == NULL) {
 		/* exchange has gone */
+		KHTTPD_NOTE("%s exchange has gone", __func__);
 		khttpd_task_schedule(conn->release_task);
 		return;
 	}
@@ -933,6 +934,7 @@ khttpd_fcgi_attach_conn(void *arg)
 	    ("xchg_data wrong thread"));
 
 	if (conn->recv_eof) {
+		KHTTPD_NOTE("%s eof", __func__);
 		conn->xchg_data = NULL;
 		xchg_data->conn = NULL;
 		khttpd_task_schedule(conn->release_task);
@@ -973,9 +975,18 @@ khttpd_fcgi_conn_release_locked
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, conn);
 	mtx_assert(&loc_data->lock, MA_OWNED);
-	KASSERT(!conn->active, ("active"));
 	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
+	KASSERT(!conn->active, ("active"));
+	KASSERT(!conn->waiting_end, ("waiting_end"));
+	KASSERT(!conn->recv_eof, ("recv_eof"));
 	KASSERT(conn->xchg_data == NULL, ("xchg_data %p", conn->xchg_data));
+
+	if (conn->recv_suspended) {
+		KHTTPD_NOTE("%s recv_suspended %p", __func__);
+		conn->recv_suspended = false;
+		khttpd_stream_continue_receiving(&conn->stream,
+		    conn->upstream->idle_timeout);
+	}
 
 	if ((xchg_data = STAILQ_FIRST(&loc_data->queue)) == NULL) {
 		LIST_INSERT_HEAD(&loc_data->idle_conn, conn, idleliste);
@@ -1088,13 +1099,6 @@ khttpd_fcgi_detach_conn(struct khttpd_fcgi_xchg_data *xchg_data,
 		conn->waiting_end = true;
 		callout_reset_sbt_curcpu(&conn->end_request_co, SBT_1S,
 		    SBT_1S, khttpd_fcgi_end_request_timeout_expired, conn, 0);
-	}
-
-	if (conn->recv_suspended) {
-		KHTTPD_NOTE("%s recv_suspended", __func__);
-		conn->recv_suspended = false;
-		khttpd_stream_continue_receiving(&conn->stream,
-		    conn->upstream->busy_timeout);
 	}
 
 	khttpd_task_schedule(conn->release_task);
