@@ -1,3 +1,10 @@
+- Examine escaping/unescaping of URI if redirect was done internally.
+
+- khttpd_webapi_get_string_property
+  There should be khttpd_webapi_get_cstr_property and 
+  khttpd_webapi_get_bytes_property.  The former should detect a NUL character
+  in the given string.
+
 - Implement tests http_host_field_no_port_ok,
   http_host_field_no_port_reject, http_host_field_with_port_ok, and
   http_host_field_with_port_reject.

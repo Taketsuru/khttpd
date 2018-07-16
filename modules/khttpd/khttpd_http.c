@@ -1976,7 +1976,8 @@ size_t
 khttpd_exchange_target_length(struct khttpd_exchange *exchange)
 {
 
-	return (sbuf_len(&exchange->target));
+	return (exchange->query == NULL ? sbuf_len(&exchange->target) :
+	    exchange->query - sbuf_data(&exchange->target));
 }
 
 bool
@@ -2316,7 +2317,8 @@ khttpd_exchange_redirect(struct khttpd_exchange *exchange, const char *target,
 	int status, query_off;
 	bool pause;
 
-	KHTTPD_ENTRY("%s(%p,%s)", exchange, khttpd_ktr_printf("%s", target));
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, exchange,
+	    khttpd_ktr_printf("%.*s", (int)len, target));
 
 	session = khttpd_exchange_session(exchange);
 	if (session->config.redirect_max == ++exchange->redirect_count) {
