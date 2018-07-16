@@ -2127,25 +2127,20 @@ khttpd_fcgi_exchange_get(struct khttpd_exchange *exchange, void *arg,
 		return (ECONNABORTED);
 	}
 
-	if (!xchg_data->active) {
-		KHTTPD_NOTE("%s !active", __func__);
+	if ((hd = xchg_data->get_buf) == NULL) {
+		if (xchg_data->get_finished) {
+			*data_out = NULL;
+			return (0);
+		}
+
+		KHTTPD_NOTE("%s get_suspend", __func__);
 		xchg_data->get_suspended = true;
+
 		return (EWOULDBLOCK);
 	}
 
-	conn = xchg_data->conn;
-
-	if ((hd = xchg_data->get_buf) == NULL) {
-		if (!xchg_data->get_finished && !conn->recv_eof) {
-			xchg_data->get_suspended = true;
-			return (EWOULDBLOCK);
-		}
-		*data_out = NULL;
-		return (0);
-	}
-
 	if ((xchg_data->get_buf = m_split(hd, space, M_WAITOK)) == NULL &&
-	    conn->recv_suspended) {
+	    (conn = xchg_data->conn) != NULL && conn->recv_suspended) {
 		conn->recv_suspended = false;
 		khttpd_stream_continue_receiving(&conn->stream,
 		    conn->upstream->busy_timeout);
