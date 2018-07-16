@@ -363,26 +363,27 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 
 		case '?':
 			if (query_off_out == NULL) {
-				return (cp);
+				goto quit;
 			}
 			sbuf_putc(dst, '\0');
 			query_off = sbuf_len(dst);
+			++cp;
 			goto query_part;
 
 		case '%':
 			if (end < cp + 2) {
-				return (cp);
+				goto quit;
 			}
 
 			digit = khttpd_decode_hexdigit(cp[1]);
 			if (digit == -1) {
-				return (cp);
+				goto quit;
 			}
 			code = digit << 4;
 
 			digit = khttpd_decode_hexdigit(cp[2]);
 			if (digit == -1) {
-				return (cp);
+				goto quit;
 			}
 			code = digit | (code << 4);
 
@@ -408,7 +409,7 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 
 		default:
 			if (!isalpha(ch) && !isdigit(ch)) {
-				return (cp);
+				goto quit;
 			}
 		}
 
@@ -425,17 +426,17 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 
 		case '%':
 			if (end < cp + 2) {
-				return (cp);
+				goto quit;
 			}
 
 			digit = khttpd_decode_hexdigit(cp[1]);
 			if (digit == -1) {
-				return (cp);
+				goto quit;
 			}
 
 			digit = khttpd_decode_hexdigit(cp[2]);
 			if (digit == -1) {
-				return (cp);
+				goto quit;
 			}
 
 			break;
@@ -452,7 +453,7 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 
 		default:
 			if (!isalpha(ch) && !isdigit(ch)) {
-				return (cp);
+				goto quit;
 			}
 		}
 
@@ -460,6 +461,7 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 		++cp;
 	}
 
+ quit:
 	if (query_off_out != NULL) {
 		*query_off_out = query_off;
 	}
