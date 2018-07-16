@@ -128,6 +128,7 @@ do_start_command(int argc, char **argv)
 	sbuf_delete(&sbuf);
 
 	fwrite(ioctl_args.buf, ioctl_args.buf_size, 1, stdout);
+	fprintf(stdout, "\n");
 	fflush(stdout);
 
 	free(ioctl_args.buf);
