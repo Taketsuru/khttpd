@@ -348,6 +348,9 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 	const char *cp;
 	int ch, code, digit, query_off;
 
+	KHTTPD_ENTRY("%s(,%s,)", __func__,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
+
 	/* The request target must start with '/'. */
 	if (end <= begin || *begin != '/') {
 		if (query_off_out != NULL) {
@@ -357,18 +360,63 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 	}
 	sbuf_putc(dst, '/');
 
+	query_off = -1;
 	for (cp = begin + 1; cp < end; ) {
 		ch = *cp;
 		switch (ch) {
 
 		case '?':
+			khttpd_string_normalize_request_at_segend(dst);
+
 			if (query_off_out == NULL) {
 				goto quit;
 			}
+
 			sbuf_putc(dst, '\0');
 			query_off = sbuf_len(dst);
 			++cp;
-			goto query_part;
+
+			while (cp < end) {
+				ch = *cp;
+				switch (ch) {
+
+				case '%':
+					if (end < cp + 2) {
+						goto quit;
+					}
+
+					digit = khttpd_decode_hexdigit(cp[1]);
+					if (digit == -1) {
+						goto quit;
+					}
+
+					digit = khttpd_decode_hexdigit(cp[2]);
+					if (digit == -1) {
+						goto quit;
+					}
+
+					break;
+
+					/* pchar */
+				case '-': case '.': case '_': case '~':
+				case '!': case '$': case '&': case '\'':
+				case '(': case ')': case '*': case '+':
+				case ',': case ';': case '=':
+				case ':': case '@':
+
+				case '/': case '?':
+					break;
+
+				default:
+					if (!isalpha(ch) && !isdigit(ch)) {
+						goto quit;
+					}
+				}
+
+				sbuf_putc(dst, ch);
+				++cp;
+			}
+			goto quit;
 
 		case '%':
 			if (end < cp + 2) {
@@ -405,50 +453,6 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 		case '(': case ')': case '*': case '+':
 		case ',': case ';': case '=':
 		case ':': case '@':
-			break;
-
-		default:
-			if (!isalpha(ch) && !isdigit(ch)) {
-				goto quit;
-			}
-		}
-
-		sbuf_putc(dst, ch);
-		++cp;
-	}
-
- query_part:
-	khttpd_string_normalize_request_at_segend(dst);
-
-	while (cp < end) {
-		ch = *cp;
-		switch (ch) {
-
-		case '%':
-			if (end < cp + 2) {
-				goto quit;
-			}
-
-			digit = khttpd_decode_hexdigit(cp[1]);
-			if (digit == -1) {
-				goto quit;
-			}
-
-			digit = khttpd_decode_hexdigit(cp[2]);
-			if (digit == -1) {
-				goto quit;
-			}
-
-			break;
-
-		/* pchar */
-		case '-': case '.': case '_': case '~':
-		case '!': case '$': case '&': case '\'':
-		case '(': case ')': case '*': case '+':
-		case ',': case ';': case '=':
-		case ':': case '@':
-
-		case '/': case '?':
 			break;
 
 		default:
