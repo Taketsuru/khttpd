@@ -69,10 +69,12 @@
 #include "khttpd_webapi.h"
 
 struct khttpd_file_location_data {
+	struct sbuf	index_file;
 	struct khttpd_rewriter *charset_rewriter;
 	struct khttpd_rewriter *mime_type_rewriter;
 	char		*docroot;
 	int		docroot_fd;
+	char		index_file_buf[16];
 };
 
 /*
@@ -617,8 +619,8 @@ retry:
 static void
 khttpd_file_get(struct khttpd_exchange *exchange)
 {
-	char type_buf[32], charset_buf[32];
-	struct sbuf type_sbuf, charset_sbuf;
+	char path_buf[128], type_buf[32], charset_buf[32];
+	struct sbuf path_sbuf, type_sbuf, charset_sbuf;
 	struct khttpd_file_get_exchange_data *data;
 	struct khttpd_file_location_data *location_data;
 	struct khttpd_location *location;
@@ -627,8 +629,10 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	int error, status;
 	boolean_t mime_type_specified, charset_specified;
 
-	KHTTPD_ENTRY("khttpd_file_get(%p), target=\"%s\"", exchange,
-	    khttpd_ktr_printf("%s", khttpd_exchange_target(exchange)));
+	KHTTPD_ENTRY("khttpd_file_get(%p), %s", exchange,
+	    khttpd_ktr_printf("target=\"%s\", query=\"%s\"",
+		khttpd_exchange_target(exchange),
+		khttpd_exchange_query(exchange)));
 
 	td = curthread;
 
@@ -649,13 +653,44 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	end = khttpd_string_normalize_request_target(&data->path,
 	    target, target + strlen(target), NULL);
-	if (*end != '\0')
+	if (*end != '\0') {
 		goto not_found;
+	}
 	sbuf_finish(&data->path);
 
 	error = khttpd_file_open_for_read(location_data->docroot_fd, data);
-	if (error != 0)
+
+	if (error == EISDIR && sbuf_len(&location_data->index_file) != 0) {
+		sbuf_new(&path_sbuf, path_buf, sizeof(path_buf),
+		    SBUF_AUTOEXTEND);
+
+		target = khttpd_exchange_target(exchange);
+		end = target + strlen(target);
+		sbuf_cpy(&path_sbuf, target);
+
+		if (target < end && end[-1] != '/') {
+			sbuf_putc(&path_sbuf, '/');
+		}
+
+		sbuf_bcat(&path_sbuf, sbuf_data(&location_data->index_file),
+		    sbuf_len(&location_data->index_file));
+
+		if (khttpd_exchange_query(exchange) != NULL) {
+			sbuf_putc(&path_sbuf, '?');
+			sbuf_cat(&path_sbuf, khttpd_exchange_query(exchange));
+		}
+
+		sbuf_finish(&path_sbuf);
+		khttpd_exchange_redirect(exchange, sbuf_data(&path_sbuf),
+		    sbuf_len(&path_sbuf));
+		sbuf_delete(&path_sbuf);
+
+		return;
+	}
+
+	if (error != 0) {
 		goto not_found;
+	}
 
 	data->io_offset = 0;
 
@@ -665,29 +700,32 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 
 	mime_type_specified = charset_specified = FALSE;
 
-	if (location_data->mime_type_rewriter != NULL)
+	if (location_data->mime_type_rewriter != NULL) {
 		mime_type_specified = khttpd_rewriter_rewrite
 		    (location_data->mime_type_rewriter, &type_sbuf,
 			sbuf_data(&data->path));
+	}
 
-	if (mime_type_specified && location_data->charset_rewriter != NULL)
+	if (mime_type_specified && location_data->charset_rewriter != NULL) {
 		charset_specified = khttpd_rewriter_rewrite
 		    (location_data->charset_rewriter, &charset_sbuf,
 			sbuf_data(&data->path));
+	}
 
 	sbuf_finish(&type_sbuf);
 	sbuf_finish(&charset_sbuf);
 
-	if (!mime_type_specified)
-		; /* nothing */
-	else if (!charset_specified)
+	if (!mime_type_specified) {
+
+	} else if (!charset_specified) {
 		khttpd_exchange_add_response_field(exchange, 
 		    "Content-Type", "%s", 
 		    sbuf_data(&type_sbuf));
-	else
+	} else {
 		khttpd_exchange_add_response_field(exchange,
 		    "Content-Type", "%s; charset=%s",
 		    sbuf_data(&type_sbuf), sbuf_data(&charset_sbuf));
+	}
 
 	sbuf_delete(&type_sbuf);
 	sbuf_delete(&charset_sbuf);
@@ -748,7 +786,7 @@ khttpd_file_location_data_new
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_file_location_data *location_data;
 	struct thread *td;
-	const char *docroot_str;
+	const char *docroot_str, *index_file;
 	char *docroot_buf;
 	void *charset_rewriter, *mime_type_rewriter;
 	size_t docroot_len;
@@ -760,19 +798,44 @@ khttpd_file_location_data_new
 	charset_rewriter = NULL;
 	mime_type_rewriter = NULL;
 	location_data = NULL;
+	index_file = NULL;
 	docroot_fd = -1;
 
 	status = khttpd_obj_type_get_obj_from_property(&khttpd_ctrl_rewriters,
 	    &charset_rewriter, "charsetRules", output,
 	    input_prop_spec, input, TRUE);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		goto quit;
+	}
 
 	status = khttpd_obj_type_get_obj_from_property(&khttpd_ctrl_rewriters,
 	    &mime_type_rewriter, "mimeTypeRules", output,
 	    input_prop_spec, input, TRUE);
-	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status))
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
 		goto quit;
+	}
+
+	status = khttpd_webapi_get_string_property(&index_file,
+	    "indexFile", input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		goto quit;
+
+	} else if (status == KHTTPD_STATUS_NO_CONTENT || 
+	    index_file[0] == '\0') {
+		index_file = NULL;
+
+	} else if (index_file[0] == '/') {
+		prop_spec.link = input_prop_spec;
+		prop_spec.name = "indexFile";
+
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		khttpd_problem_set_detail(output,
+		    "absolute path name is not acceptable.");
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto quit;
+
+	}
 
 	status = khttpd_webapi_get_string_property(&docroot_str,
 	    "fsPath", input_prop_spec, input, output, FALSE);
@@ -821,6 +884,12 @@ khttpd_file_location_data_new
 
 	location_data = 
 	    khttpd_malloc(sizeof(struct khttpd_file_location_data));
+	sbuf_new(&location_data->index_file, location_data->index_file_buf,
+	    sizeof(location_data->index_file_buf), SBUF_AUTOEXTEND);
+	if (index_file != NULL) {
+		sbuf_cpy(&location_data->index_file, index_file);
+	}
+	sbuf_finish(&location_data->index_file);
 	location_data->charset_rewriter =
 	    khttpd_rewriter_acquire(charset_rewriter);
 	location_data->mime_type_rewriter =
@@ -844,6 +913,7 @@ khttpd_file_location_data_destroy(struct khttpd_file_location_data *data)
 {
 	KHTTPD_ENTRY("khttpd_file_location_data_destroy(%p)", data);
 
+	sbuf_delete(&data->index_file);
 	khttpd_rewriter_release(data->charset_rewriter);
 	khttpd_rewriter_release(data->mime_type_rewriter);
 	khttpd_free(data->docroot);
@@ -920,6 +990,14 @@ khttpd_file_location_get(struct khttpd_location *location,
 		sbuf_finish(&sbuf);
 		khttpd_mbuf_json_property(output, "mimeTypeRules");
 		khttpd_mbuf_json_cstr(output, TRUE, sbuf_data(&sbuf));
+	}
+
+	if (sbuf_len(&location_data->index_file) != 0) {
+		khttpd_mbuf_json_property(output, "indexFile");
+		khttpd_mbuf_json_bytes(output, true, 
+		    sbuf_data(&location_data->index_file),
+		    sbuf_data(&location_data->index_file) +
+		    sbuf_len(&location_data->index_file));
 	}
 
 	khttpd_mbuf_json_property(output, "fsPath");

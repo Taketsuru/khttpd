@@ -42,6 +42,7 @@
         "type"   : "khttpd_file",
         "server" : "2d305f6c-6504-4e78-98c3-9f8cf099eca6",
         "path"   : "/",
+	"indexFile": "index.php",
         "fsPath" : "/home/taketsuru/work/khttpd/test/docroot/wordpress"
     }]
 }
