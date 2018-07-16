@@ -111,6 +111,8 @@ static char khttpd_task_siphash_key[SIPHASH_KEY_LENGTH];
 
 MTX_SYSINIT(task_mtx, &khttpd_task_lock, "task", MTX_DEF);
 
+#ifdef KHTTPD_KTR_LOGGING
+
 static const char *
 khttpd_task_queue_ktr_print(struct khttpd_task_queue *queue)
 {
@@ -134,6 +136,8 @@ khttpd_task_ktr_print(struct khttpd_task *task)
 	return (task == NULL ? "NULL" :
 	    khttpd_ktr_printf("%p(%s)", task, task->name));
 }
+
+#endif /* KHTTPD_KTR_LOGGING */
 
 static void
 khttpd_task_worker_main(void *arg)

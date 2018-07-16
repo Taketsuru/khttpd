@@ -278,8 +278,12 @@ namespace eval test {
 	    set findleak [test::local_file tools/bin/findleak.tcl]
 	    set logs_dict [dict create {*}[my logs]]
 	    set ktr_log [test::local_file [dict get $logs_dict ktr-log]]
-	    set leaks [exec -- $findleak $ktr_log]
 
+	    if {![file readable $ktr_log]} {
+		return
+	    }
+
+	    set leaks [exec -- $findleak $ktr_log]
 	    if {$leaks != ""} {
 		throw [list KHTTPD TEST fail] "memory leak is detected\n$leaks"
 	    }

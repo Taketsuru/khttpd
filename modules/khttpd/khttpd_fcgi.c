@@ -346,6 +346,8 @@ MTX_SYSINIT(khttpd_fcgi_lock, &khttpd_fcgi_lock, "fcgi", MTX_DEF);
 #define KHTTPD_FCGI_LONGEST_VALUE_NAME \
 	(MAX(sizeof(khttpd_fcgi_max_conns), sizeof(khttpd_fcgi_max_reqs)) - 1)
 
+#ifdef INVARIANTS
+
 static bool
 khttpd_fcgi_conn_on_worker_thread(struct khttpd_fcgi_conn *conn)
 {
@@ -361,6 +363,8 @@ khttpd_fcgi_xchg_data_on_worker_thread(struct khttpd_fcgi_xchg_data *xchg_data)
 
 	return (khttpd_exchange_on_worker_thread(xchg_data->exchange));
 }
+
+#endif /* INVARIANTS */
 
 static void
 khttpd_fcgi_report_error(struct khttpd_fcgi_upstream *upstream,
