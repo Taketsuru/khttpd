@@ -29,6 +29,7 @@
 #include <sys/ctype.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
+#include <sys/callout.h>
 #include <sys/fcntl.h>
 #include <sys/mbuf.h>
 #include <sys/sbuf.h>
@@ -62,9 +63,16 @@
 #include "khttpd_test.h"
 #include "khttpd_webapi.h"
 
+/*
+ * (a) - guarded by khttpd_fcgi_lock
+ * (b) - guarded by khttpd_fcgi_location_data->lock
+ * (c) - guarded by khttpd_fcgi_location_data->lock while the instance is
+ * 	 not active.  Otherwise, only the worker thread accesses it.
+ */
+
 #define KHTTPD_FCGI_LOCATION_TYPE		"khttpd_fastcgi"
 #define KHTTPD_FCGI_MAX_FIELD_LEN		16384
-#define KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH	USHRT_MAX
+#define KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH	0xffff
 #define KHTTPD_FCGI_RECORD_ALIGN		8
 
 CTASSERT(KHTTPD_FCGI_RECORD_ALIGN < 0xff);
@@ -103,74 +111,131 @@ struct khttpd_fcgi_hdr {
 
 CTASSERT(sizeof(struct khttpd_fcgi_hdr) % KHTTPD_FCGI_RECORD_ALIGN == 0);
 
+struct khttpd_fcgi_begin_request_record {
+	struct khttpd_fcgi_hdr hdr;
+	uint16_t	role;
+	uint8_t		flags;
+	uint8_t		reserved[5];
+} __attribute__ ((packed));
+
+struct khttpd_fcgi_end_request_body {
+	uint32_t	app_status;
+	uint8_t		protocol_status;
+	uint8_t		reserved[3];
+} __attribute__ ((packed));
+
 /*
- * (a) - guarded by khttpd_fcgi_lock
- * (b) - guarded by khttpd_fcgi_location_data->lock
- * (c) - guarded by khttpd_fcgi_location_data->lock while the instance is
- * 	 waiting.  Otherwise, only the socket worker thread access it.
+ * State of khttpd_fcgi_xchg_data
+ * 
+ * dormant
+ *	xchg_data->conn is NULL
+ *	xchg_data->active is false
+ *	xchg_data->waiting is false
+ *	not in location_data->queue
+ * waiting
+ *	xchg_data->conn is NULL
+ *	xchg_data->active is false
+ *	xchg_data->waiting is true
+ *	in location_data->queue
+ * attaching
+ *	xchg_data->conn is not NULL
+ *	xchg_data->active is false
+ *	xchg_data->waiting is false
+ *	not in location_data->queue
+ * active
+ *	xchg_data->conn is not NULL
+ *	xchg_data->active is true
+ *	xchg_data->waiting is false
+ *	not in location_data->queue
  */
 
 struct khttpd_fcgi_xchg_data {
 	STAILQ_ENTRY(khttpd_fcgi_xchg_data) link;
 	struct sbuf	path_info;
 	struct sbuf	script_name;
+	struct sbuf	line;
+	struct sbuf	location;
 	struct khttpd_exchange *exchange;
 
 #define khttpd_fcgi_xchg_data_zctor_begin conn
 	struct khttpd_fcgi_conn *conn; /* (c) */
 	struct mbuf	*put_buf;
-	bool		aborted;
-	bool		connected;
-	bool		send_eof;
-	bool		suspend_get;
-	bool		waiting; /* (b) */
+	struct mbuf	*get_buf;
+	unsigned	status:16;
+	unsigned	waiting:1;
+	unsigned	active:1;
+	unsigned	aborted:1;
+	unsigned	responded:1;
+	unsigned	header_finished:1;
+	unsigned	put_busy:1;
+	unsigned	put_eof:1;
+	unsigned	put_suspended:1;
+	unsigned	put_finished:1;
+	unsigned	get_suspended:1;
+	unsigned	get_finished:1;
 
 #define khttpd_fcgi_xchg_data_zctor_end path_info_buf
 	char		path_info_buf[64];
 	char		script_name_buf[64];
+	char		line_buf[256];
+	char		location_buf[256];
 };
 
 STAILQ_HEAD(khttpd_fcgi_xchg_data_stailq, khttpd_fcgi_xchg_data);
 
+/*
+ * State of khttpd_fcgi_conn
+ *
+ * connecting
+ *	conn->xchg_data is NULL
+ *	conn->active is false
+ *	conn->waiting_end is false
+ *	conn is not in loc_data->idle_conn
+ *	transit to idle by 'on_configured' callback
+ *	may be destructed by 'khttpd_fcgi_handle_connection_failure'
+ * idle
+ *	conn->xchg_data is NULL
+ *	conn->active is false
+ *	conn->waiting_end is false
+ *	conn is in loc_data->idle_conn
+ *	transit asynchronously to 'attaching' when it's chosen
+ *	    by exchange handling thread
+ * attaching
+ *	conn->xchg_data is not NULL
+ *	conn->active is false
+ *	conn->waiting_end is false
+ *	transit to 'active' when attach task runs and it have not seen EOF
+ * active
+ *	conn->xchg_data is not NULL
+ *	conn->active is true
+ *	conn->waiting_end is false
+ *	transit to 'waiting_end' when khttpd_fcgi_detach_conn is called.
+ *	may be destructed by 'data_is_available' callback
+ * waiting_end
+ *	conn->xchg_data is NULL
+ *	conn->active is false
+ *	conn->waiting_end is true
+ *	transit to 'idle' when timeout period has passed or end_request is
+ *	    received.
+ *	may be destructed by 'data_is_available' callback
+ */
+
 struct khttpd_fcgi_conn {
-	LIST_ENTRY(khttpd_fcgi_conn) allliste;
-	LIST_ENTRY(khttpd_fcgi_conn) liste;
 	LIST_ENTRY(khttpd_fcgi_conn) idleliste;
-	struct sbuf	line;
-	struct sbuf	location;
-	struct khttpd_stream stream;
+	struct khttpd_stream	stream;
+	struct callout		end_request_co;
 	struct khttpd_fcgi_upstream *upstream;
-	struct khttpd_fcgi_xchg_data *xchg_data;
-	struct khttpd_fcgi_xchg_data *attaching; /* (b) */
-	struct khttpd_task *attach_task;
+	struct khttpd_fcgi_xchg_data *xchg_data; /* (c) */
+	struct khttpd_task	*attach_task;
+	struct khttpd_task	*release_task;
+	struct khttpd_task	*abort_req_task;
 
 #define khttpd_fcgi_conn_zctor_begin recv_buf
-	struct mbuf	*recv_buf;
-	bool		connecting;
-	bool		idle;		/* (b) */
-	bool		hold;		/* (a) */
-	bool		free_on_unhold;	/* (a) */
-#define khttpd_fcgi_conn_zctor_end khttpd_fcgi_conn_xchg_state_begin
-
-#define khttpd_fcgi_conn_xchg_state_begin stdin
-	struct mbuf	*stdin;
-	struct mbuf	*stdout;
-	unsigned	status:16;
-	unsigned	send_busy:1;
-	unsigned	stdin_send_eof:1;
-	unsigned	stdin_end:1;
-	unsigned	stdout_end:1;
-	unsigned	suspend_put:1;
-	unsigned	suspend_get:1;
-	unsigned	suspend_recv:1;
-	unsigned	recv_eof:1;
-	unsigned	active:1;
-	unsigned	header_finished:1;
-	unsigned	responded:1;
-#define khttpd_fcgi_conn_xchg_state_end line_buf
-
-	char		line_buf[256];
-	char		location_buf[256];
+	struct mbuf		*recv_buf;
+	unsigned		active:1;
+	unsigned		waiting_end:1;
+	unsigned		recv_suspended:1;
+	unsigned		recv_eof:1;
 };
 
 LIST_HEAD(khttpd_fcgi_conn_list, khttpd_fcgi_conn);
@@ -202,7 +267,6 @@ TAILQ_HEAD(khttpd_fcgi_upstream_tailq, khttpd_fcgi_upstream);
 LIST_HEAD(khttpd_fcgi_upstream_list, khttpd_fcgi_upstream);
 
 struct khttpd_fcgi_location_data {
-	LIST_ENTRY(khttpd_fcgi_location_data) liste;	 /* (a) */
 	struct mtx	lock;
 	struct khttpd_fcgi_conn_list idle_conn;		 /* (b) */
 	struct khttpd_fcgi_upstream_list upstreams;	 /* (b) */
@@ -215,6 +279,8 @@ struct khttpd_fcgi_location_data {
 	char		*script_suffix;
 	int		nconnecting;
 	int		nwaiting;
+
+	/* goal: minimize nconnecting satisfying nwaiting <= nconnecting */
 
 #define khttpd_fcgi_location_data_zctor_end fs_path_fd
 	int		fs_path_fd;
@@ -237,18 +303,17 @@ static void khttpd_fcgi_conn_reset(struct khttpd_stream *);
 static void khttpd_fcgi_conn_error(struct khttpd_stream *,
     struct khttpd_mbuf_json *);
 static void khttpd_fcgi_conn_on_configured(struct khttpd_stream *);
-static void khttpd_fcgi_conn_release_locked
-    (struct khttpd_fcgi_location_data *, struct khttpd_fcgi_conn *);
 static void khttpd_fcgi_conn_release(struct khttpd_fcgi_conn *);
 static void khttpd_fcgi_exchange_dtor(struct khttpd_exchange *, void *);
 static int  khttpd_fcgi_exchange_get(struct khttpd_exchange *, void *,
     ssize_t, struct mbuf **);
 static void khttpd_fcgi_exchange_put(struct khttpd_exchange *, void *, 
     struct mbuf *, bool *);
-static void khttpd_fcgi_do_method(struct khttpd_exchange *);
-static void khttpd_fcgi_location_dtor(struct khttpd_location *);
+static void khttpd_fcgi_choose_conn(struct khttpd_exchange *);
 static bool khttpd_fcgi_filter(struct khttpd_location *, 
     struct khttpd_exchange *, const char *, struct sbuf *);
+static void khttpd_fcgi_do_method(struct khttpd_exchange *);
+static void khttpd_fcgi_location_dtor(struct khttpd_location *);
 
 static struct khttpd_stream_up_ops khttpd_fcgi_conn_ops = {
 	.data_is_available = khttpd_fcgi_conn_data_is_available,
@@ -271,58 +336,30 @@ static struct khttpd_location_ops khttpd_fcgi_ops = {
 };
 
 static struct mtx khttpd_fcgi_lock;
-static struct khttpd_fcgi_conn_list khttpd_fcgi_conns =
-    LIST_HEAD_INITIALIZER(khttpd_fcgi_conns); /* (a) */
-static struct khttpd_fcgi_location_data_list khttpd_fcgi_locations =
-    LIST_HEAD_INITIALIZER(khttpd_fcgi_locations); /* (a) */
 static uma_zone_t khttpd_fcgi_xchg_data_zone;
 static uma_zone_t khttpd_fcgi_conn_zone;
 static eventhandler_tag khttpd_fcgi_shutdown_tag;
+static unsigned khttpd_fcgi_conn_count; /* (a) */
 
 MTX_SYSINIT(khttpd_fcgi_lock, &khttpd_fcgi_lock, "fcgi", MTX_DEF);
 
 #define KHTTPD_FCGI_LONGEST_VALUE_NAME \
 	(MAX(sizeof(khttpd_fcgi_max_conns), sizeof(khttpd_fcgi_max_reqs)) - 1)
 
-static void
-khttpd_fcgi_init_record_header(struct khttpd_fcgi_hdr *header,
-    int type, int cntlen)
+static bool
+khttpd_fcgi_conn_on_worker_thread(struct khttpd_fcgi_conn *conn)
 {
 
-	KHTTPD_ENTRY("%s(%p,%d,%#x,%d)", __func__, header, type, cntlen);
-
-	KASSERT(cntlen <= USHRT_MAX, ("cntlen %d", cntlen));
-
-	header->version = 1;
-	header->type = type;
-
-	switch (type) {
-
-	case KHTTPD_FCGI_TYPE_GET_VALUES:
-	case KHTTPD_FCGI_TYPE_GET_VALUES_RESULT:
-	case KHTTPD_FCGI_TYPE_UNKNOWN_TYPE:
-		header->request_id = 0;
-		break;
-
-	default:
-		header->request_id = htons(1);
-	}
-
-	header->content_length = htons(cntlen);
-	header->padding_length = (0 - cntlen) & (KHTTPD_FCGI_RECORD_ALIGN - 1);
-	header->reserved = 0;
+	return (conn->stream.down == NULL ||
+	    khttpd_task_queue_on_worker_thread
+	    (khttpd_socket_task_queue(conn->stream.down)));
 }
 
-static u_int
-khttpd_fcgi_add_padding(struct mbuf *m, u_int cntlen)
+static bool
+khttpd_fcgi_xchg_data_on_worker_thread(struct khttpd_fcgi_xchg_data *xchg_data)
 {
-	static const char pad[KHTTPD_FCGI_RECORD_ALIGN];
-	u_int padlen;
 
-	KHTTPD_ENTRY("%s(%p,%#x)", __func__, cntlen);
-	padlen = (0 - cntlen) & (KHTTPD_FCGI_RECORD_ALIGN - 1);
-	khttpd_mbuf_append(m, pad, pad + padlen);
-	return (padlen);
+	return (khttpd_exchange_on_worker_thread(xchg_data->exchange));
 }
 
 static void
@@ -362,455 +399,45 @@ khttpd_fcgi_protocol_error_new(struct khttpd_mbuf_json *entry)
 }
 
 static void
-khttpd_fcgi_abort_exchange(struct khttpd_fcgi_conn *conn)
-{
-	struct khttpd_fcgi_xchg_data *xchg_data;
-	struct khttpd_exchange *exchange;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, conn);
-
-	xchg_data = conn->xchg_data;
-	exchange = xchg_data->exchange;
-	xchg_data->aborted = true;
-
-	if (conn->suspend_put) {
-		khttpd_exchange_continue_receiving(exchange);
-	} else if (conn->suspend_get) {
-		khttpd_exchange_continue_sending(exchange);
-	}
-
-	if (conn->responded) {
-		khttpd_exchange_reset(exchange);
-
-	} else {
-		conn->responded = true;
-		khttpd_exchange_clear_response_header(exchange);
-		khttpd_exchange_set_error_response_body(exchange,
-		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL);
-		khttpd_exchange_respond(exchange,
-		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR);
-	}
-}
-
-static bool
-khttpd_fcgi_send_stdout(struct khttpd_fcgi_conn *conn, struct mbuf *data)
-{
-	struct mbuf *stdout;
-	bool suspend_recv;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, conn, data);
-
-	suspend_recv = false;
-
-	if (conn->stdout_end) {
-		m_freem(data);
-	} else if (data == NULL) {
-		conn->stdout_end = true;
-	} else if ((stdout = conn->stdout) == NULL) {
-		conn->stdout = data;
-	} else {
-		m_cat(stdout, data);
-		conn->suspend_recv = suspend_recv = true;
-	}
-
-	if (conn->suspend_get) {
-		conn->suspend_get = false;
-		khttpd_exchange_continue_sending(conn->xchg_data->exchange);
-	}
-
-	return (suspend_recv);
-}
-
-static void
-khttpd_fcgi_hdr_error(struct khttpd_fcgi_conn *conn,
-    const char *detail_fmt, ...)
-{
-	struct khttpd_mbuf_json logent;
-	va_list va;
-
-	KHTTPD_ENTRY("%s(%p,%s)", __func__, conn, detail_fmt);
-	KASSERT(sbuf_done(&conn->line),
-	    ("sbuf_finish is not called yet for conn->line"));
-
-	khttpd_fcgi_protocol_error_new(&logent);
-
-	if (detail_fmt != NULL) {
-		va_start(va, detail_fmt);
-		khttpd_problem_set_vdetail(&logent, detail_fmt, va);
-		va_end(va);
-	}
-
-	khttpd_mbuf_json_property(&logent, "line");
-	khttpd_mbuf_json_bytes(&logent, true, sbuf_data(&conn->line),
-	    sbuf_data(&conn->line) + sbuf_len(&conn->line));
-	khttpd_fcgi_report_error(conn->upstream, &logent);
-
-	khttpd_fcgi_abort_exchange(conn);
-}
-
-static bool
-khttpd_fcgi_process_content_length_field(struct khttpd_fcgi_conn *conn,
-    const char *begin, const char *end)
-{
-	struct khttpd_exchange *exchange;
-	uintmax_t value;
-	int error;
-
-	KHTTPD_ENTRY("%s(%p,%s)", __func__, conn,
-	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
-
-	exchange = conn->xchg_data->exchange;
-
-	if (khttpd_exchange_response_is_chunked(exchange)) {
-		return (false);
-	}
-
-	if (begin == end) {
-		return (false);
-	}
-
-	error = khttpd_parse_digits(&value, begin, end);
-	if (error == ERANGE || (error == 0 && OFF_MAX < value)) {
-		khttpd_fcgi_hdr_error(conn, "out of range");
-		return (false);
-	}
-	if (error != 0) {
-		khttpd_fcgi_hdr_error(conn, "invalid value");
-		return (false);
-	}
-
-	khttpd_exchange_set_response_content_length(exchange, value);
-
-	return (false);
-}
-
-static bool
-khttpd_fcgi_process_location_field(struct khttpd_fcgi_conn *conn,
-    const char *begin, const char *end)
+khttpd_fcgi_init_record_header(struct khttpd_fcgi_hdr *header, int type,
+    int cntlen)
 {
 
-	KHTTPD_ENTRY("%s(%p,%s)", __func__, conn,
-	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
+	KHTTPD_ENTRY("%s(%p,%d,%#x,%d)", __func__, header, type, cntlen);
+	KASSERT(cntlen <= USHRT_MAX, ("cntlen %d", cntlen));
 
-	if (begin < end && *begin == '/') {
-		if (sbuf_done(&conn->location)) {
-			khttpd_fcgi_hdr_error(conn,
-			    "duplicated Location: field");
-			return (false);
-		}
-		sbuf_bcpy(&conn->location, begin, end - begin);
-		sbuf_finish(&conn->location);
-		return (false);
-	}
+	header->version = 1;
+	header->type = type;
 
-	if (conn->status == 0) {
-		conn->status = KHTTPD_STATUS_FOUND;
-	}
+	switch (type) {
 
-	return (true);
-}
-
-static bool
-khttpd_fcgi_process_status_field(struct khttpd_fcgi_conn *conn,
-    const char *begin, const char *end)
-{
-	int status;
-
-	KHTTPD_ENTRY("%s(%p,%s)", __func__, conn,
-	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
-
-	if (!isdigit(begin[0]) || !isdigit(begin[1]) || !isdigit(begin[2]) ||
-	    begin[3] != ' ') {
-		khttpd_fcgi_hdr_error(conn, "malformed status field");
-	} else {
-		sscanf(begin, "%d", &status);
-		conn->status = status;
-	}
-
-	return (false);
-}
-
-static void
-khttpd_fcgi_process_response_header_line(struct khttpd_fcgi_conn *conn)
-{
-	char *begin, *name_end, *value_begin, *end;
-	bool append_header;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, conn);
-
-	begin = sbuf_data(&conn->line);
-	end = begin + sbuf_len(&conn->line);
-	if (begin < end && end[-1] == '\r') {
-		--end;
-	}
-	while (begin < end && end[-1] == ' ') {
-		--end;
-	}
-
-	name_end = memchr(begin, ':', end - begin);
-	if (name_end == NULL || name_end[-1] == ' ') {
-		khttpd_fcgi_hdr_error(conn, "malformed response field");
-		return;
-	}
-
-	if (name_end == end - 1) {
-		return;
-	}
-
-	for (value_begin = name_end + 1; *value_begin == ' '; ++value_begin) {
-		KASSERT(value_begin < end, ("empty field"));
-	}
-
-	append_header = false;
-
-	switch (khttpd_field_find(begin, name_end)) {
-
-	case KHTTPD_FIELD_CONTENT_LENGTH:
-		append_header = khttpd_fcgi_process_content_length_field(conn,
-		    value_begin, end);
-		break;
-
-	case KHTTPD_FIELD_LOCATION:
-		append_header = khttpd_fcgi_process_location_field(conn,
-		    value_begin, end);
-		break;
-
-	case KHTTPD_FIELD_STATUS:
-		khttpd_fcgi_process_status_field(conn, value_begin, end);
-		break;
-
-	case KHTTPD_FIELD_CONNECTION:
-	case KHTTPD_FIELD_TRANSFER_ENCODING:
-	case KHTTPD_FIELD_HOST:
+	case KHTTPD_FCGI_TYPE_GET_VALUES:
+	case KHTTPD_FCGI_TYPE_GET_VALUES_RESULT:
+	case KHTTPD_FCGI_TYPE_UNKNOWN_TYPE:
+		header->request_id = 0;
 		break;
 
 	default:
-		append_header = true;
-		break;
+		header->request_id = htons(1);
 	}
 
-	if (append_header && !sbuf_done(&conn->location)) {
-		khttpd_exchange_add_response_field_line
-		    (conn->xchg_data->exchange, begin, end);
-	}
+	header->content_length = htons(cntlen);
+	header->padding_length = (0 - cntlen) & (KHTTPD_FCGI_RECORD_ALIGN - 1);
+	header->reserved = 0;
 }
 
-static bool
-khttpd_fcgi_process_response_header(struct khttpd_fcgi_conn *conn,
-    struct mbuf *data)
+static u_int
+khttpd_fcgi_add_padding(struct mbuf *m, u_int cntlen)
 {
-	struct khttpd_exchange *exchange;
-	struct khttpd_mbuf_json logent;
-	struct mbuf *ptr, *next;
-	char *begin, *cp, *bolp, *eolp;
-	u_int len, off;
-	int status;
-	bool result;
+	static const char pad[KHTTPD_FCGI_RECORD_ALIGN];
+	u_int padlen;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, conn, data);
+	KHTTPD_ENTRY("%s(%p,%#x)", __func__, cntlen);
 
-	if (data == NULL) {
-		khttpd_mbuf_json_copy(&logent,
-		    khttpd_exchange_log_entry(conn->xchg_data->exchange));
-		khttpd_fcgi_set_protocol_error(&logent);
-		khttpd_problem_set_detail(&logent,
-		    "stdout is closed prematurely");
-		khttpd_fcgi_report_error(conn->upstream, &logent);
-		khttpd_fcgi_abort_exchange(conn);
-		return (false);
-	}
+	padlen = (0 - cntlen) & (KHTTPD_FCGI_RECORD_ALIGN - 1);
+	khttpd_mbuf_append(m, pad, pad + padlen);
 
-	ptr = data;
-	off = 0;
-	for (;;) {
-		/* Find the first NL in the mbuf pointed by ptr. */
-		begin = mtod(ptr, char *) + off;
-		len = ptr->m_len - off;
-		cp = memchr(begin, '\n', len);
-
-		if (cp != NULL) {
-			len = cp - begin;
-			off += len + 1;
-		}
-
-		if (KHTTPD_FCGI_MAX_FIELD_LEN < sbuf_len(&conn->line) + len) {
-			goto too_long;
-		}
-		sbuf_bcat(&conn->line, begin, len);
-
-		if (cp == NULL) {
-			if ((next = ptr->m_next) == NULL) {
-				break;
-			}
-
-			m_free(ptr);
-			ptr = next;
-			off = 0;
-			continue;
-		}
-
-		sbuf_finish(&conn->line);
-
-		bolp = sbuf_data(&conn->line);
-		eolp = bolp + sbuf_len(&conn->line);
-		if (bolp < eolp && eolp[-1] == '\r')
-			--eolp;
-		if (bolp == eolp) {
-			exchange = conn->xchg_data->exchange;
-
-			if (!khttpd_exchange_has_response_content_length
-			    (exchange)) {
-				khttpd_exchange_enable_chunked_response
-				    (exchange);
-			}
-
-			conn->header_finished = true;
-
-			if (sbuf_done(&conn->location)) {
-				/* It was a local redirect response. */
-				khttpd_fcgi_conn_release(conn);
-				khttpd_exchange_redirect(exchange,
-				    sbuf_data(&conn->location),
-				    sbuf_len(&conn->location));
-				return (false);
-			}
-
-			m_adj(ptr, off);
-			result = khttpd_fcgi_send_stdout(conn, ptr);
-
-			status = conn->status;
-			if (status == 0) {
-				status = KHTTPD_STATUS_OK;
-			}
-			conn->responded = true;
-			khttpd_exchange_respond(conn->xchg_data->exchange,
-			    status);
-
-			return (result);
-		}
-
-		khttpd_fcgi_process_response_header_line(conn);
-		sbuf_clear(&conn->line);
-	}
-
-	return (false);
-
-too_long:
-	sbuf_finish(&conn->line);
-	khttpd_fcgi_hdr_error(conn, "response header line too long");
-	return (false);
-}
-
-static bool
-khttpd_fcgi_process_stdout_record(struct khttpd_fcgi_conn *conn,
-    struct mbuf *data)
-{
-	bool suspend_recv;
-
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, conn, data);
-
-	if (conn->xchg_data == NULL) {
-		m_freem(data);
-		return (false);
-	}
-
-	suspend_recv = conn->header_finished ?
-	    khttpd_fcgi_send_stdout(conn, data) :
-	    khttpd_fcgi_process_response_header(conn, data);
-
-	return (suspend_recv);
-}
-
-static void
-khttpd_fcgi_send_stdin(struct khttpd_fcgi_conn *conn, long space)
-{
-	struct khttpd_fcgi_hdr *hdr;
-	struct khttpd_stream *stream;
-	struct mbuf *head, *m, *stdin, *stdin_tail;
-	u_int stdin_len;
-	int max_stdin_len;
-
-	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn, space);
-	KASSERT(conn->xchg_data->connected, ("not connected"));
-	KASSERT(conn->send_busy, ("send_busy should be set before "
-		"khttpd_fcgi_send_stdin is called"));
-
-	stream = &conn->stream;
-
-	KHTTPD_NOTE("%s space %#x, stdin %p(%#x), stdin_send_eof %d",
-	    __func__, space, conn->stdin, m_length(conn->stdin, NULL),
-	    conn->stdin_send_eof);
-	while (sizeof(struct khttpd_fcgi_hdr) < space &&
-	    ((stdin = conn->stdin) != NULL || conn->stdin_send_eof)) {
-		KASSERT(!conn->stdin_end, ("stdin_end"));
-
-		if (stdin == NULL) {
-			stdin_len = 0;
-			space -= sizeof(struct khttpd_fcgi_hdr);
-
-		} else {
-			stdin_len = m_length(stdin, NULL);
-			max_stdin_len = MIN
-			    (KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH,
-			    rounddown2(space - sizeof(struct khttpd_fcgi_hdr),
-			    KHTTPD_FCGI_RECORD_ALIGN));
-
-			if (max_stdin_len < stdin_len) {
-				stdin_len = rounddown2(max_stdin_len,
-				    KHTTPD_FCGI_RECORD_ALIGN);
-				conn->stdin = m_split(stdin, stdin_len,
-				    M_WAITOK);
-			}
-
-			space -= sizeof(struct khttpd_fcgi_hdr) + stdin_len +
-			    khttpd_fcgi_add_padding(stdin, stdin_len);
-		}
-
-		head = m_gethdr(M_WAITOK, MT_DATA);
-		head->m_len = sizeof(struct khttpd_fcgi_hdr);
-		hdr = mtod(head, struct khttpd_fcgi_hdr *);
-		khttpd_fcgi_init_record_header(hdr, KHTTPD_FCGI_TYPE_STDIN,
-		    stdin_len);
-		head->m_next = stdin;
-
-		if (conn->stdin_send_eof) {
-			conn->stdin_send_eof = false;
-			conn->stdin_end = true;
-			if (0 < stdin_len) {
-				m_length(stdin, &stdin_tail);
-				stdin_tail->m_next = m = 
-				    m_get(M_WAITOK, MT_DATA);
-				m->m_len = sizeof(struct khttpd_fcgi_hdr);
-				hdr = mtod(m, struct khttpd_fcgi_hdr *);
-				khttpd_fcgi_init_record_header(hdr, 
-				    KHTTPD_FCGI_TYPE_STDIN, 0);
-				space -= sizeof(struct khttpd_fcgi_hdr);
-			}
-			khttpd_stream_send(stream, head, KHTTPD_STREAM_FLUSH);
-		} else {
-			khttpd_stream_send(stream, head, 0);
-		}
-	}
-
-	if (space < 0 || conn->stdin != NULL || conn->stdin_send_eof) {
-		KHTTPD_NOTE("%s full, stdin %p(%#x), stdin_send_eof %d",
-		    __func__, space, conn->stdin, m_length(conn->stdin, NULL),
-		    conn->stdin_send_eof);
-		khttpd_stream_notify_of_drain(stream);
-		return;
-	}
-
-	KHTTPD_NOTE("%s ready, stdin %p(%#x), stdin_send_eof %d",
-	    __func__, space, conn->stdin, m_length(conn->stdin, NULL),
-	    conn->stdin_send_eof);
-
-	conn->send_busy = false;
-
-	if (conn->suspend_put) {
-		conn->suspend_put = false;
-		khttpd_exchange_continue_receiving(conn->xchg_data->exchange);
-		KHTTPD_NOTE("%s continue", __func__);
-	}
+	return (padlen);
 }
 
 static struct mbuf *
@@ -940,6 +567,7 @@ khttpd_fcgi_convert_request_header_field(struct khttpd_exchange *exchange,
 	int ch;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+	KASSERT(khttpd_exchange_on_worker_thread(exchange), ("wrong thread"));
 
 	bolp = khttpd_exchange_request_header(exchange, &header_size);
 	hdrend = bolp + header_size;
@@ -989,25 +617,29 @@ khttpd_fcgi_convert_request_header_field(struct khttpd_exchange *exchange,
 }
 
 static void
-khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
-    struct khttpd_fcgi_xchg_data *xchg_data, struct mbuf *m)
+khttpd_fcgi_append_params(struct khttpd_fcgi_xchg_data *xchg_data,
+    struct mbuf *m)
 {
 	char buf[1024];
 	struct sbuf sbuf;
 	const char *query, *method_name;
-	struct khttpd_exchange *exchange;
+	struct khttpd_exchange *exchange = xchg_data->exchange;
 	struct khttpd_location *location, *tmploc;
 	struct khttpd_server *server;
 	struct khttpd_fcgi_hdr *hdr;
+	struct khttpd_fcgi_location_data *loc_data;
 	struct mbuf *head, *tail;
 	const struct sockaddr *addr;
 	int method;
 	u_int len;
 
 	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, xchg_data, m);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+	KASSERT(xchg_data->active, ("!active"));
 
-	exchange = xchg_data->exchange;
 	location = khttpd_exchange_location(exchange);
+	loc_data = khttpd_location_data(location);
 	query = khttpd_exchange_query(exchange);
 	sbuf_new(&sbuf, buf, sizeof(buf), SBUF_AUTOEXTEND);
 
@@ -1136,129 +768,235 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_location_data *loc_data,
 		tail->m_next = head = m_get(M_WAITOK, MT_DATA);
 		head->m_len = sizeof(*hdr);
 		hdr = mtod(head, struct khttpd_fcgi_hdr *);
-		khttpd_fcgi_init_record_header(hdr, KHTTPD_FCGI_TYPE_PARAMS, 0);
+		khttpd_fcgi_init_record_header(hdr,
+		    KHTTPD_FCGI_TYPE_PARAMS, 0);
 	}
 }
 
 static void
-khttpd_fcgi_begin_request(struct khttpd_fcgi_location_data *loc_data,
-    struct khttpd_fcgi_xchg_data *xchg_data,
-    struct khttpd_fcgi_conn *conn, long space)
+khttpd_fcgi_send_stdin(struct khttpd_fcgi_xchg_data *xchg_data, long space)
 {
-	struct record {
-		struct khttpd_fcgi_hdr hdr;
-		uint16_t	role;
-		uint8_t		flags;
-		uint8_t		reserved[5];
-	} __attribute__ ((packed)) *record;
-	struct mbuf *m;
+	struct khttpd_fcgi_conn *conn = xchg_data->conn;
+	struct khttpd_fcgi_hdr *hdr;
+	struct khttpd_stream *stream = &conn->stream;
+	struct mbuf *head, *m, *stdin, *stdin_tail;
+	u_int stdin_len;
+	int max_stdin_len;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, xchg_data, conn);
-	KASSERT(conn->send_busy, ("send_busy is false"));
+	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, xchg_data, space);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+	KASSERT(xchg_data->active, ("!active"));
+	KASSERT(xchg_data->put_busy, ("!put_busy"));
 
-	m = m_get(M_WAITOK, MT_DATA);
-	m->m_len = sizeof(struct record);
-	record = mtod(m, struct record *);
+	while (sizeof(struct khttpd_fcgi_hdr) < space &&
+	    ((stdin = xchg_data->put_buf) != NULL || xchg_data->put_eof)) {
 
-	CTASSERT(sizeof(*record) % KHTTPD_FCGI_RECORD_ALIGN == 0);
-	khttpd_fcgi_init_record_header(&record->hdr, 
-	    KHTTPD_FCGI_TYPE_BEGIN_REQUEST,
-	    sizeof(struct record) - offsetof(struct record, role));
+		if (stdin == NULL) {
+			stdin_len = 0;
+			space -= sizeof(struct khttpd_fcgi_hdr);
 
-	record->role = htons(KHTTPD_FCGI_ROLE_RESPONDER);
-	record->flags = KHTTPD_FCGI_FLAGS_KEEP_CONN;
-	bzero(record->reserved, sizeof(record->reserved));
+		} else {
+			stdin_len = m_length(stdin, NULL);
+			max_stdin_len = MIN
+			    (KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH,
+			    rounddown2(space - sizeof(struct khttpd_fcgi_hdr),
+			    KHTTPD_FCGI_RECORD_ALIGN));
 
-	khttpd_fcgi_append_params(loc_data, xchg_data, m);
+			if (max_stdin_len < stdin_len) {
+				stdin_len = rounddown2(max_stdin_len,
+				    KHTTPD_FCGI_RECORD_ALIGN);
+				xchg_data->put_buf = m_split(stdin, stdin_len,
+				    M_WAITOK);
+			}
 
-	space -= m_length(m, NULL);
-	khttpd_stream_send(&conn->stream, m, 0);
-	khttpd_fcgi_send_stdin(conn, space);
+			space -= sizeof(struct khttpd_fcgi_hdr) + stdin_len +
+			    khttpd_fcgi_add_padding(stdin, stdin_len);
+		}
+
+		head = m_gethdr(M_WAITOK, MT_DATA);
+		head->m_len = sizeof(struct khttpd_fcgi_hdr);
+		hdr = mtod(head, struct khttpd_fcgi_hdr *);
+		khttpd_fcgi_init_record_header(hdr, KHTTPD_FCGI_TYPE_STDIN,
+		    stdin_len);
+		head->m_next = stdin;
+
+		if (xchg_data->put_buf != NULL || !xchg_data->put_eof) {
+			khttpd_stream_send(stream, head, 0);
+
+		} else {
+			if (0 < stdin_len) {
+				stdin_tail = m_last(stdin);
+				stdin_tail->m_next = m = 
+				    m_get(M_WAITOK, MT_DATA);
+				m->m_len = sizeof(struct khttpd_fcgi_hdr);
+				hdr = mtod(m, struct khttpd_fcgi_hdr *);
+				khttpd_fcgi_init_record_header(hdr, 
+				    KHTTPD_FCGI_TYPE_STDIN, 0);
+				space -= sizeof(struct khttpd_fcgi_hdr);
+			}
+			khttpd_stream_send(stream, head, KHTTPD_STREAM_FLUSH);
+			xchg_data->put_eof = false;
+		}
+	}
+
+	if (space < 0 || xchg_data->put_buf != NULL || xchg_data->put_eof) {
+		khttpd_stream_notify_of_drain(stream);
+		return;
+	}
+
+	xchg_data->put_busy = false;
+
+	if (xchg_data->put_suspended) {
+		xchg_data->put_suspended = false;
+		khttpd_exchange_continue_receiving(xchg_data->exchange);
+	}
+}
+
+static void
+khttpd_fcgi_conn_destroy_locked(struct khttpd_fcgi_conn *conn,
+    struct khttpd_fcgi_upstream *upstream,
+    struct khttpd_fcgi_location_data *loc_data)
+{
+
+	KHTTPD_ENTRY("%s(%p)", __func__, conn);
+	KASSERT(conn->xchg_data == NULL,
+	    ("conn->xchg_data %p", conn->xchg_data));
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn),
+	    ("not on the worker thread"));
+
+	mtx_unlock(&loc_data->lock);
+
+	khttpd_stream_destroy(&conn->stream);
+
+	mtx_lock(&loc_data->lock);
+
+	if (--upstream->nconn < upstream->max_conns &&
+	    upstream->state == KHTTPD_FCGI_UPSTREAM_FULL) {
+		TAILQ_INSERT_TAIL(&loc_data->avl_upstreams, upstream, tailqe);
+		upstream->state = KHTTPD_FCGI_UPSTREAM_AVAILABLE;
+		khttpd_fcgi_connect(loc_data);
+	}
+
+	mtx_unlock(&loc_data->lock);
+
+	uma_zfree(khttpd_fcgi_conn_zone, conn);
+
+	mtx_lock(&khttpd_fcgi_lock);
+	if (--khttpd_fcgi_conn_count == 0) {
+		wakeup(&khttpd_fcgi_conn_count);
+	}
+	mtx_unlock(&khttpd_fcgi_lock);
+}
+
+static void
+khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
+{
+	struct khttpd_fcgi_location_data *loc_data;
+	struct khttpd_fcgi_upstream *upstream;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, conn);
+
+	callout_drain(&conn->end_request_co);
+	khttpd_task_cancel(conn->abort_req_task);
+
+	upstream = conn->upstream;
+	loc_data = upstream->location_data;
+	mtx_lock(&loc_data->lock);
+	khttpd_fcgi_conn_destroy_locked(conn, upstream, loc_data);
 }
 
 static void
 khttpd_fcgi_attach_conn(void *arg)
 {
-	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_location_data *loc_data;
+	struct khttpd_fcgi_begin_request_record *record;
+	struct khttpd_fcgi_conn *conn = arg;
 	struct khttpd_fcgi_xchg_data *xchg_data;
+	struct mbuf *m;
 	long space;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, arg);
-	conn = arg;
+	KHTTPD_ENTRY("%s(%p)", __func__, conn);
+	KASSERT(!conn->active, ("active"));
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn),
+	    ("conn wrong thread"));
 
-	loc_data = conn->upstream->location_data;
-
-	mtx_lock(&loc_data->lock);
-	if ((xchg_data = conn->attaching) == NULL) {
-		khttpd_fcgi_conn_release_locked(loc_data, conn);
+	if ((xchg_data = conn->xchg_data) == NULL) {
+		/* exchange has gone */
+		khttpd_task_schedule(conn->release_task);
 		return;
 	}
-	conn->attaching = NULL;
-	mtx_unlock(&loc_data->lock);
 
-	sbuf_clear(&conn->line);
-	m_freem(conn->stdin);
-	m_freem(conn->stdout);
-	bzero(&conn->khttpd_fcgi_conn_xchg_state_begin,
-	    offsetof(struct khttpd_fcgi_conn,
-		khttpd_fcgi_conn_xchg_state_end) -
-	    offsetof(struct khttpd_fcgi_conn,
-		khttpd_fcgi_conn_xchg_state_begin));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("xchg_data wrong thread"));
 
-	conn->xchg_data = xchg_data;
-	conn->send_busy = conn->active = true;
-	conn->suspend_get = xchg_data->suspend_get;
-	conn->suspend_put = xchg_data->put_buf != NULL;
-	conn->stdin = xchg_data->put_buf;
-	conn->stdin_send_eof = xchg_data->send_eof;
+	if (conn->recv_eof) {
+		conn->xchg_data = NULL;
+		xchg_data->conn = NULL;
+		khttpd_task_schedule(conn->release_task);
+		khttpd_fcgi_choose_conn(xchg_data->exchange);
+		return;
+	}
 
-	xchg_data->put_buf = NULL;
-	xchg_data->suspend_get = false;
-	xchg_data->connected = true;
+	xchg_data->active = conn->active = true;
+
+	m = m_get(M_WAITOK, MT_DATA);
+	m->m_len = sizeof(*record);
+	record = mtod(m, struct khttpd_fcgi_begin_request_record *);
+
+	CTASSERT(sizeof(*record) % KHTTPD_FCGI_RECORD_ALIGN == 0);
+	khttpd_fcgi_init_record_header(&record->hdr, 
+	    KHTTPD_FCGI_TYPE_BEGIN_REQUEST,
+	    sizeof(struct khttpd_fcgi_begin_request_record) -
+	    offsetof(struct khttpd_fcgi_begin_request_record, role));
+	record->role = htons(KHTTPD_FCGI_ROLE_RESPONDER);
+	record->flags = KHTTPD_FCGI_FLAGS_KEEP_CONN;
+	bzero(record->reserved, sizeof(record->reserved));
+
+	khttpd_fcgi_append_params(xchg_data, m);
 
 	khttpd_stream_send_bufstat(&conn->stream, NULL, NULL, &space);
-	khttpd_fcgi_begin_request(conn->upstream->location_data,
-	    xchg_data, conn, space);
+	space -= m_length(m, NULL);
+	khttpd_stream_send(&conn->stream, m, 0);
+
+	xchg_data->put_busy = true;
+	khttpd_fcgi_send_stdin(xchg_data, space);
 }
 
 static void
 khttpd_fcgi_conn_release_locked
 (struct khttpd_fcgi_location_data *loc_data, struct khttpd_fcgi_conn *conn)
 {
-	struct khttpd_socket *socket;
 	struct khttpd_fcgi_xchg_data *xchg_data;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, conn);
 	mtx_assert(&loc_data->lock, MA_OWNED);
-	KASSERT(conn->attaching == NULL, ("attaching %p", conn->attaching));
-	KASSERT(!conn->connecting, ("connecting"));
-
-	if (conn->idle) {
-		mtx_unlock(&loc_data->lock);
-		return;
-	}
+	KASSERT(!conn->active, ("active"));
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
+	KASSERT(conn->xchg_data == NULL, ("xchg_data %p", conn->xchg_data));
 
 	if ((xchg_data = STAILQ_FIRST(&loc_data->queue)) == NULL) {
-		conn->xchg_data = NULL;
-		conn->idle = true;
 		LIST_INSERT_HEAD(&loc_data->idle_conn, conn, idleliste);
 		mtx_unlock(&loc_data->lock);
 		return;
 	}
 
+	KASSERT(xchg_data->waiting, ("!waiting"));
+	xchg_data->waiting = false;
+
 	STAILQ_REMOVE_HEAD(&loc_data->queue, link);
 	--loc_data->nwaiting;
 
-	conn->attaching = xchg_data;
+	conn->xchg_data = xchg_data;
 	xchg_data->conn = conn;
-	socket = khttpd_exchange_socket(xchg_data->exchange);
-	khttpd_task_queue_hand_over(khttpd_socket_task_queue(conn->stream.down),
-	    khttpd_socket_task_queue(socket));
 
-	mtx_unlock(&loc_data->lock);
+	khttpd_task_queue_hand_over
+	    (khttpd_socket_task_queue(conn->stream.down),
+	     khttpd_socket_task_queue
+		(khttpd_exchange_socket(xchg_data->exchange)));
 
 	khttpd_task_schedule(conn->attach_task);
+
+	mtx_unlock(&loc_data->lock);
 }
 
 static void
@@ -1268,9 +1006,470 @@ khttpd_fcgi_conn_release(struct khttpd_fcgi_conn *conn)
 
 	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
 
+	callout_drain(&conn->end_request_co);
+	khttpd_task_cancel(conn->abort_req_task);
+
 	loc_data = conn->upstream->location_data;
 	mtx_lock(&loc_data->lock);
 	khttpd_fcgi_conn_release_locked(loc_data, conn);
+}
+
+static void
+khttpd_fcgi_do_conn_release(void *arg)
+{
+	struct khttpd_fcgi_conn *conn = arg;
+
+	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
+
+	if (conn->recv_eof) {
+		khttpd_fcgi_conn_destroy(conn);
+	} else {
+		khttpd_fcgi_conn_release(conn);
+	}
+}
+
+static void
+khttpd_fcgi_conn_do_abort_request(void *arg)
+{
+	struct khttpd_fcgi_conn *conn = arg;
+	struct khttpd_fcgi_hdr *hdr;
+	struct mbuf *m;
+
+	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
+	KASSERT(conn->waiting_end, ("!waiting_end"));
+
+	m = m_get(M_WAITOK, MT_DATA);
+	m->m_len = sizeof(struct khttpd_fcgi_hdr);
+	hdr = mtod(m, struct khttpd_fcgi_hdr *);
+	khttpd_fcgi_init_record_header(hdr, KHTTPD_FCGI_TYPE_ABORT_REQUEST, 0);
+	khttpd_stream_send(&conn->stream, m, KHTTPD_STREAM_FLUSH);
+
+	conn->waiting_end = false;
+
+	khttpd_fcgi_conn_release(conn);
+}
+
+static void
+khttpd_fcgi_end_request_timeout_expired(void *arg)
+{
+	struct khttpd_fcgi_conn *conn = arg;
+
+	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
+	khttpd_task_schedule(conn->abort_req_task);
+}
+
+static void
+khttpd_fcgi_detach_conn(struct khttpd_fcgi_xchg_data *xchg_data,
+    bool wait_for_end_request)
+{
+	struct khttpd_fcgi_conn *conn = xchg_data->conn;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, xchg_data);
+	KASSERT(xchg_data->active, ("!active"));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	xchg_data->conn = NULL;
+	xchg_data->active = false;
+
+	conn->xchg_data = NULL;
+	conn->active = false;
+
+	if (conn->recv_eof) {
+		khttpd_task_schedule(conn->release_task);
+		return;
+	}
+
+	if (wait_for_end_request) {
+		KHTTPD_NOTE("%s wait for end_request", __func__);
+		conn->waiting_end = true;
+		callout_reset_sbt_curcpu(&conn->end_request_co, SBT_1S,
+		    SBT_1S, khttpd_fcgi_end_request_timeout_expired, conn, 0);
+	}
+
+	if (conn->recv_suspended) {
+		KHTTPD_NOTE("%s recv_suspended", __func__);
+		conn->recv_suspended = false;
+		khttpd_stream_continue_receiving(&conn->stream,
+		    conn->upstream->busy_timeout);
+	}
+
+	khttpd_task_schedule(conn->release_task);
+}
+
+static void
+khttpd_fcgi_abort_exchange(struct khttpd_fcgi_xchg_data *xchg_data)
+{
+	struct khttpd_exchange *exchange;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, xchg_data);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	khttpd_fcgi_detach_conn(xchg_data, true);
+
+	xchg_data->aborted = true;
+	exchange = xchg_data->exchange;
+
+	if (!xchg_data->responded) {
+		xchg_data->responded = true;
+		khttpd_exchange_clear_response_header(exchange);
+		khttpd_exchange_set_error_response_body(exchange,
+		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR, NULL);
+		khttpd_exchange_respond(exchange,
+		    KHTTPD_STATUS_INTERNAL_SERVER_ERROR);
+	}
+}
+
+static bool
+khttpd_fcgi_append_response_body(struct khttpd_fcgi_xchg_data *xchg_data,
+    struct mbuf *data)
+{
+	struct mbuf *buf;
+	bool recv_suspended;
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, xchg_data, data);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	recv_suspended = false;
+
+	if (xchg_data->get_finished) {
+		m_freem(data);
+
+	} else if (data == NULL) {
+		xchg_data->get_finished = true;
+
+	} else if ((buf = xchg_data->get_buf) == NULL) {
+		xchg_data->get_buf = data;
+
+	} else {
+		m_cat(buf, data);
+		recv_suspended = true;
+	}
+
+	if (xchg_data->get_suspended) {
+		xchg_data->get_suspended = false;
+		khttpd_exchange_continue_sending(xchg_data->exchange);
+	}
+
+	return (recv_suspended);
+}
+
+static void
+khttpd_fcgi_hdr_error(struct khttpd_fcgi_xchg_data *xchg_data,
+    const char *detail_fmt, ...)
+{
+	struct khttpd_mbuf_json logent;
+	va_list va;
+
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, xchg_data, detail_fmt);
+	KASSERT(sbuf_done(&xchg_data->line), ("!sbuf_done(&xchg_data->line)"));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	khttpd_fcgi_protocol_error_new(&logent);
+
+	if (detail_fmt != NULL) {
+		va_start(va, detail_fmt);
+		khttpd_problem_set_vdetail(&logent, detail_fmt, va);
+		va_end(va);
+	}
+
+	khttpd_mbuf_json_property(&logent, "line");
+	khttpd_mbuf_json_bytes(&logent, true, sbuf_data(&xchg_data->line),
+	    sbuf_data(&xchg_data->line) + sbuf_len(&xchg_data->line));
+	khttpd_fcgi_report_error(xchg_data->conn->upstream, &logent);
+
+	khttpd_fcgi_abort_exchange(xchg_data);
+}
+
+static bool
+khttpd_fcgi_process_content_length_field
+(struct khttpd_fcgi_xchg_data *xchg_data, const char *begin, const char *end)
+{
+	struct khttpd_exchange *exchange;
+	uintmax_t value;
+	int error;
+
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, xchg_data,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	exchange = xchg_data->exchange;
+
+	if (khttpd_exchange_response_is_chunked(exchange)) {
+		return (false);
+	}
+
+	if (begin == end) {
+		return (false);
+	}
+
+	error = khttpd_parse_digits(&value, begin, end);
+	if (error == ERANGE || (error == 0 && OFF_MAX < value)) {
+		khttpd_fcgi_hdr_error(xchg_data, "out of range");
+		return (false);
+	}
+	if (error != 0) {
+		khttpd_fcgi_hdr_error(xchg_data, "invalid value");
+		return (false);
+	}
+
+	khttpd_exchange_set_response_content_length(exchange, value);
+
+	return (false);
+}
+
+static bool
+khttpd_fcgi_process_location_field(struct khttpd_fcgi_xchg_data *xchg_data,
+    const char *begin, const char *end)
+{
+	
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, xchg_data,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	if (begin < end && *begin == '/') {
+		if (sbuf_done(&xchg_data->location)) {
+			khttpd_fcgi_hdr_error(xchg_data,
+			    "duplicated Location: field");
+			return (false);
+		}
+		sbuf_bcpy(&xchg_data->location, begin, end - begin);
+		sbuf_finish(&xchg_data->location);
+		return (false);
+	}
+
+	if (xchg_data->status == 0) {
+		xchg_data->status = KHTTPD_STATUS_FOUND;
+	}
+
+	return (true);
+}
+
+static bool
+khttpd_fcgi_process_status_field(struct khttpd_fcgi_xchg_data *xchg_data,
+    const char *begin, const char *end)
+{
+	int status;
+
+	KHTTPD_ENTRY("%s(%p,%s)", __func__, xchg_data,
+	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	if (!isdigit(begin[0]) || !isdigit(begin[1]) || !isdigit(begin[2]) ||
+	    begin[3] != ' ') {
+		khttpd_fcgi_hdr_error(xchg_data, "malformed status field");
+	} else {
+		sscanf(begin, "%d", &status);
+		xchg_data->status = status;
+	}
+
+	return (false);
+}
+
+static void
+khttpd_fcgi_process_response_header_line
+(struct khttpd_fcgi_xchg_data *xchg_data)
+{
+	char *begin, *name_end, *value_begin, *end;
+	bool append_header;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, xchg_data);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	begin = sbuf_data(&xchg_data->line);
+	end = begin + sbuf_len(&xchg_data->line);
+	if (begin < end && end[-1] == '\r') {
+		--end;
+	}
+	while (begin < end && end[-1] == ' ') {
+		--end;
+	}
+
+	name_end = memchr(begin, ':', end - begin);
+	if (name_end == NULL || name_end[-1] == ' ') {
+		khttpd_fcgi_hdr_error(xchg_data, "malformed response field");
+		return;
+	}
+
+	if (name_end == end - 1) {
+		return;
+	}
+
+	for (value_begin = name_end + 1; *value_begin == ' '; ++value_begin) {
+		KASSERT(value_begin < end, ("empty field"));
+	}
+
+	append_header = false;
+
+	switch (khttpd_field_find(begin, name_end)) {
+
+	case KHTTPD_FIELD_CONTENT_LENGTH:
+		append_header = khttpd_fcgi_process_content_length_field
+		    (xchg_data, value_begin, end);
+		break;
+
+	case KHTTPD_FIELD_LOCATION:
+		append_header = khttpd_fcgi_process_location_field(xchg_data,
+		    value_begin, end);
+		break;
+
+	case KHTTPD_FIELD_STATUS:
+		khttpd_fcgi_process_status_field(xchg_data, value_begin, end);
+		break;
+
+	case KHTTPD_FIELD_CONNECTION:
+	case KHTTPD_FIELD_TRANSFER_ENCODING:
+	case KHTTPD_FIELD_HOST:
+		break;
+
+	default:
+		append_header = true;
+		break;
+	}
+
+	if (append_header && !sbuf_done(&xchg_data->location)) {
+		khttpd_exchange_add_response_field_line(xchg_data->exchange,
+		    begin, end);
+	}
+}
+
+static bool
+khttpd_fcgi_process_response_header(struct khttpd_fcgi_xchg_data *xchg_data,
+    struct mbuf *data)
+{
+	struct khttpd_exchange *exchange;
+	struct khttpd_mbuf_json logent;
+	struct mbuf *ptr, *next;
+	char *begin, *cp, *bolp, *eolp;
+	u_int len, off;
+	int status;
+	bool result;
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, xchg_data, data);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+	if (data == NULL) {
+		khttpd_mbuf_json_copy(&logent,
+		    khttpd_exchange_log_entry(xchg_data->exchange));
+		khttpd_fcgi_set_protocol_error(&logent);
+		khttpd_problem_set_detail(&logent,
+		    "stdout is closed prematurely");
+		khttpd_fcgi_report_error(xchg_data->conn->upstream, &logent);
+		khttpd_fcgi_abort_exchange(xchg_data);
+		return (false);
+	}
+
+	ptr = data;
+	off = 0;
+	for (;;) {
+		/* Find the first NL in the mbuf pointed by ptr. */
+		begin = mtod(ptr, char *) + off;
+		len = ptr->m_len - off;
+		cp = memchr(begin, '\n', len);
+
+		if (cp != NULL) {
+			len = cp - begin;
+			off += len + 1;
+		}
+
+		if (KHTTPD_FCGI_MAX_FIELD_LEN <
+		    sbuf_len(&xchg_data->line) + len) {
+			goto too_long;
+		}
+		sbuf_bcat(&xchg_data->line, begin, len);
+
+		if (cp == NULL) {
+			if ((next = ptr->m_next) == NULL) {
+				break;
+			}
+
+			m_free(ptr);
+			ptr = next;
+			off = 0;
+			continue;
+		}
+
+		sbuf_finish(&xchg_data->line);
+
+		bolp = sbuf_data(&xchg_data->line);
+		eolp = bolp + sbuf_len(&xchg_data->line);
+		if (bolp < eolp && eolp[-1] == '\r')
+			--eolp;
+		if (bolp == eolp) {
+			exchange = xchg_data->exchange;
+
+			if (!khttpd_exchange_has_response_content_length
+			    (exchange)) {
+				khttpd_exchange_enable_chunked_response
+				    (exchange);
+			}
+
+			xchg_data->header_finished = true;
+
+			if (sbuf_done(&xchg_data->location)) {
+				/* It was a local redirect response. */
+				khttpd_fcgi_detach_conn(xchg_data, true);
+				khttpd_exchange_redirect(exchange,
+				    sbuf_data(&xchg_data->location),
+				    sbuf_len(&xchg_data->location));
+				return (false);
+			}
+
+			m_adj(ptr, off);
+			result = 
+			    khttpd_fcgi_append_response_body(xchg_data, ptr);
+
+			status = xchg_data->status;
+			if (status == 0) {
+				status = KHTTPD_STATUS_OK;
+			}
+			xchg_data->responded = true;
+			khttpd_exchange_respond(xchg_data->exchange, status);
+
+			return (result);
+		}
+
+		khttpd_fcgi_process_response_header_line(xchg_data);
+		sbuf_clear(&xchg_data->line);
+	}
+
+	return (false);
+
+too_long:
+	sbuf_finish(&xchg_data->line);
+	khttpd_fcgi_hdr_error(xchg_data, "response header line too long");
+	return (false);
+}
+
+static bool
+khttpd_fcgi_process_stdout_record(struct khttpd_fcgi_conn *conn,
+    struct mbuf *data)
+{
+	struct khttpd_fcgi_xchg_data *xchg_data;
+	bool recv_suspended;
+
+	KHTTPD_ENTRY("%s(%p,%p)", __func__, conn, data);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
+
+	if (!conn->active) {
+		m_freem(data);
+		return (false);
+	}
+
+	xchg_data = conn->xchg_data;
+	recv_suspended = xchg_data->header_finished ?
+	    khttpd_fcgi_append_response_body(xchg_data, data) :
+	    khttpd_fcgi_process_response_header(xchg_data, data);
+
+	return (recv_suspended);
 }
 
 static void
@@ -1278,6 +1477,8 @@ khttpd_fcgi_upstream_fail_locked(struct khttpd_fcgi_upstream *upstream)
 {
 
 	KHTTPD_ENTRY("%s(%p)", __func__, upstream);
+	mtx_assert(&upstream->location_data->lock, MA_OWNED);
+
 	if (upstream->state == KHTTPD_FCGI_UPSTREAM_AVAILABLE) {
 		TAILQ_REMOVE(&upstream->location_data->avl_upstreams, upstream,
 		    tailqe);
@@ -1288,68 +1489,13 @@ khttpd_fcgi_upstream_fail_locked(struct khttpd_fcgi_upstream *upstream)
 static void
 khttpd_fcgi_upstream_fail(struct khttpd_fcgi_upstream *upstream)
 {
-	struct khttpd_fcgi_location_data *loc_data;
-
-	loc_data = upstream->location_data;
+	struct khttpd_fcgi_location_data *loc_data = upstream->location_data;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, upstream);
+
 	mtx_lock(&loc_data->lock);
 	khttpd_fcgi_upstream_fail_locked(upstream);
 	mtx_unlock(&loc_data->lock);
-}
-
-static void
-khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
-{
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_upstream *upstream;
-	bool new_conn;
-
-	KHTTPD_ENTRY("%s(%p)", __func__, conn);
-
-	upstream = conn->upstream;
-	loc_data = upstream->location_data;
-	new_conn = false;
-
-	mtx_lock(&loc_data->lock);
-
-	if (conn->connecting) {
-		--loc_data->nconnecting;
-	}
-
-	if (conn->idle) {
-		LIST_REMOVE(conn, idleliste);
-		conn->idle = false;
-	}
-
-	mtx_unlock(&loc_data->lock);
-
-	khttpd_stream_destroy(&conn->stream);
-	khttpd_task_delete(conn->attach_task);
-	conn->attach_task = NULL;
-
-	mtx_lock(&loc_data->lock);
-
-	/*
-	 * Don't decrement upstream->nconn before the socket is closed by
-	 * khttpd_stream_destroy().
-	 */
-	if (--upstream->nconn < upstream->max_conns &&
-	    upstream->state == KHTTPD_FCGI_UPSTREAM_FULL) {
-		TAILQ_INSERT_TAIL(&loc_data->avl_upstreams, upstream, tailqe);
-		upstream->state = KHTTPD_FCGI_UPSTREAM_AVAILABLE;
-	}
-
-	mtx_unlock(&loc_data->lock);
-
-	mtx_lock(&khttpd_fcgi_lock);
-	LIST_REMOVE(conn, allliste);
-	if (LIST_EMPTY(&khttpd_fcgi_conns)) {
-		wakeup(&khttpd_fcgi_conns);
-	}
-	mtx_unlock(&khttpd_fcgi_lock);
-
-	uma_zfree(khttpd_fcgi_conn_zone, conn);
 }
 
 static struct khttpd_socket *
@@ -1362,15 +1508,12 @@ khttpd_fcgi_conn_socket(struct khttpd_fcgi_conn *conn)
 static void
 khttpd_fcgi_conn_on_configured(struct khttpd_stream *stream)
 {
-	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_upstream *upstream;
-	struct khttpd_fcgi_location_data *loc_data;
+	struct khttpd_fcgi_conn *conn = stream->up;
+	struct khttpd_fcgi_upstream *upstream = conn->upstream;
+	struct khttpd_fcgi_location_data *loc_data = upstream->location_data;
 
-	conn = stream->up;
-	upstream = conn->upstream;
-	loc_data = upstream->location_data;
-
-	conn->connecting = false;
+	KHTTPD_ENTRY("%s(%p)", __func__, stream);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
 	mtx_lock(&loc_data->lock);
 	--loc_data->nconnecting;
@@ -1381,51 +1524,46 @@ static int
 khttpd_fcgi_did_connected(struct khttpd_socket *socket, void *arg,
 	struct khttpd_socket_config *conf)
 {
-	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_upstream *upstream;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_task_queue *queue;
+	struct khttpd_fcgi_conn *conn = arg;
+	struct khttpd_task_queue *tq;
 
-	conn = arg;
-	upstream = conn->upstream;
-	loc_data = upstream->location_data;
-	queue = khttpd_socket_task_queue(socket);
+	KHTTPD_ENTRY("%s(%p,%p,%p)", __func__, socket, arg, conf);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
+
+	tq = khttpd_socket_task_queue(socket);
+	khttpd_task_set_queue(conn->attach_task, tq);
+	khttpd_task_set_queue(conn->release_task, tq);
+	khttpd_task_set_queue(conn->abort_req_task, tq);
 
 	conf->stream = &conn->stream;
-	conf->timeout = upstream->idle_timeout;
-	conn->attach_task = khttpd_task_new(queue,
-	    khttpd_fcgi_attach_conn, conn, "attach");
+	conf->timeout = conn->upstream->idle_timeout;
 
 	return (0);
 }
 
 static void
-khttpd_fcgi_handle_connection_failure(void *arg, struct khttpd_mbuf_json *error)
+khttpd_fcgi_handle_connection_failure(void *arg,
+    struct khttpd_mbuf_json *error)
 {
-	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_upstream *upstream;
-	struct khttpd_fcgi_location_data *loc_data;
+	struct khttpd_fcgi_conn *conn = arg;
+	struct khttpd_fcgi_upstream *upstream = conn->upstream;
+	struct khttpd_fcgi_location_data *loc_data = upstream->location_data;
 
-	KHTTPD_ENTRY("%s(%p,%d)", __func__, arg, error);
-
-	conn = arg;
-	upstream = conn->upstream;
-	loc_data = upstream->location_data;
-	KASSERT(conn->attaching == NULL, ("attaching %p", conn->attaching));
-	KASSERT(conn->connecting, ("!connecting"));
+	KHTTPD_ENTRY("%s(%p,%d)", __func__, conn, error);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
 	khttpd_fcgi_upstream_fail(upstream);
+	khttpd_fcgi_conn_destroy(conn);
 
-	conn->connecting = false;
 	mtx_lock(&loc_data->lock);
 	--loc_data->nconnecting;
+	khttpd_fcgi_connect(loc_data);
 	mtx_unlock(&loc_data->lock);
 
-	khttpd_fcgi_conn_destroy(conn);
 	khttpd_fcgi_report_error(upstream, error);
 }
 
-static int
+static void
 khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
     struct khttpd_fcgi_upstream *upstream)
 {
@@ -1433,28 +1571,39 @@ khttpd_fcgi_conn_new(struct khttpd_fcgi_location_data *loc_data,
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, loc_data, upstream);
 
-	conn = uma_zalloc_arg(khttpd_fcgi_conn_zone, upstream, M_WAITOK);
-	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
-	conn->connecting = true;
-
 	mtx_lock(&khttpd_fcgi_lock);
-	LIST_INSERT_HEAD(&khttpd_fcgi_conns, conn, allliste);
+	++khttpd_fcgi_conn_count;
 	mtx_unlock(&khttpd_fcgi_lock);
 
+	conn = uma_zalloc_arg(khttpd_fcgi_conn_zone, upstream, M_WAITOK);
+
 	mtx_lock(&loc_data->lock);
-	++loc_data->nconnecting;
-	if (upstream->max_conns <= ++upstream->nconn &&
-	    upstream->state == KHTTPD_FCGI_UPSTREAM_AVAILABLE) {
-		TAILQ_REMOVE(&loc_data->avl_upstreams, upstream, tailqe);
-		upstream->state = KHTTPD_FCGI_UPSTREAM_FULL;
+	if (upstream->state != KHTTPD_FCGI_UPSTREAM_AVAILABLE) {
+		mtx_unlock(&loc_data->lock);
+
+		uma_zfree(khttpd_fcgi_conn_zone, conn);
+
+		mtx_lock(&khttpd_fcgi_lock);
+		if (--khttpd_fcgi_conn_count == 0) {
+			wakeup(&khttpd_fcgi_conn_count);
+		}
+		mtx_unlock(&khttpd_fcgi_lock);
+
+		return;
 	}
+
+	if (upstream->max_conns == ++upstream->nconn) {
+		upstream->state = KHTTPD_FCGI_UPSTREAM_FULL;
+		TAILQ_REMOVE(&loc_data->avl_upstreams, upstream, tailqe);
+	}
+
+	++loc_data->nconnecting;
+
 	mtx_unlock(&loc_data->lock);
 
 	khttpd_socket_connect((struct sockaddr *)&upstream->sockaddr,
 	    NULL, khttpd_fcgi_did_connected, conn,
 	    khttpd_fcgi_handle_connection_failure);
-
-	return (0);
 }
 
 static void
@@ -1482,6 +1631,44 @@ khttpd_fcgi_connect(struct khttpd_fcgi_location_data *loc_data)
 }
 
 static void
+khttpd_fcgi_choose_conn(struct khttpd_exchange *exchange)
+{
+	struct khttpd_location *location;
+	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_xchg_data *xchg_data;
+	struct khttpd_fcgi_location_data *loc_data;
+
+	KHTTPD_ENTRY("%s(%p)", __func__, exchange);
+
+	location = khttpd_exchange_location(exchange);
+	loc_data = khttpd_location_data(location);
+	xchg_data = khttpd_exchange_ops_arg(exchange);
+
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
+
+ 	mtx_lock(&loc_data->lock);
+	if ((conn = LIST_FIRST(&loc_data->idle_conn)) == NULL) {
+		KASSERT(!xchg_data->waiting, ("waiting"));
+		xchg_data->waiting = true;
+		STAILQ_INSERT_TAIL(&loc_data->queue, xchg_data, link);
+		++loc_data->nwaiting;
+		khttpd_fcgi_connect(loc_data);
+		mtx_unlock(&loc_data->lock);
+		return;
+	}
+
+	LIST_REMOVE(conn, idleliste);
+	conn->xchg_data = xchg_data;
+	xchg_data->conn = conn;
+	mtx_unlock(&loc_data->lock);
+
+	khttpd_task_queue_take_over
+	    (khttpd_socket_task_queue(conn->stream.down),
+	    khttpd_fcgi_attach_conn, conn);
+}
+
+static void
 khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
     uint32_t app_status, int protocol_status)
 {
@@ -1495,34 +1682,28 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 	struct khttpd_mbuf_json logent;
 	struct khttpd_exchange *exchange;
 	struct khttpd_fcgi_xchg_data *xchg_data;
-	long space;
 	int status;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%d)", __func__, conn, app_status, 
 	    protocol_status);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
 	if (!conn->active) {
-		KHTTPD_NOTE("%s inactive", __func__);
+		KHTTPD_NOTE("%s !active", __func__);
 		return;
 	}
-	conn->active = false;
 
-	if ((xchg_data = conn->xchg_data) == NULL) {
-		KHTTPD_NOTE("%s null xchg_data", __func__);
-		khttpd_stream_send_bufstat(&conn->stream, NULL, NULL, &space);
-		khttpd_fcgi_conn_release(conn);
-		return;
-	}
+	xchg_data = conn->xchg_data;
+	khttpd_fcgi_detach_conn(xchg_data, false);
 
 	exchange = xchg_data->exchange;
-	status = conn->status;
+	status = xchg_data->status;
 
-	if (!conn->stdout_end) {
-		conn->stdout_end = true;
-		if (conn->suspend_get) {
-			conn->suspend_get = false;
-			khttpd_exchange_continue_sending
-			    (conn->xchg_data->exchange);
+	if (!xchg_data->get_finished) {
+		xchg_data->get_finished = true;
+		if (xchg_data->get_suspended) {
+			xchg_data->get_suspended = false;
+			khttpd_exchange_continue_sending(exchange);
 		}
 	}
 
@@ -1537,8 +1718,7 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 
 	if (app_status != 0) {
 		khttpd_mbuf_json_property(&logent, "appStatus");
-		khttpd_mbuf_json_format(&logent, false, "%u",
-		    app_status);
+		khttpd_mbuf_json_format(&logent, false, "%u", app_status);
 	}
 
 	if (protocol_status != 0) {
@@ -1553,68 +1733,68 @@ khttpd_fcgi_end_request(struct khttpd_fcgi_conn *conn,
 	}
 
 	khttpd_fcgi_report_error(conn->upstream, &logent);
-
-	/*
-	 * XXX Because we have already sent the stdout data to the client, it's
-	 * too late to send an unsuccessful http status code to the client.
-	 *
-	 * We should buffer all the stdout data until we receives end_request
-	 * record, and then send them if both the app_status and
-	 * protocol_status is 0.
-	 */
 }
 
 static void
 khttpd_fcgi_found_eof(struct khttpd_fcgi_conn *conn)
 {
 	struct khttpd_mbuf_json logent;
-	struct khttpd_fcgi_xchg_data *xchg_data;
+	struct khttpd_fcgi_upstream *upstream;
+	struct khttpd_fcgi_location_data *loc_data;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, conn);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
-	if ((xchg_data = conn->xchg_data) == NULL) {
-		KHTTPD_NOTE("%s no xchg_data", __func__);
-		khttpd_fcgi_conn_destroy(conn);
+	if (conn->active) {
+		KHTTPD_NOTE("%s active", __func__);
+		khttpd_fcgi_protocol_error_new(&logent);
+		khttpd_problem_set_detail(&logent,
+		    "upstream server closed the connection prematurely");
+		khttpd_fcgi_report_error(conn->upstream, &logent);
+
+		conn->recv_eof = true;
+		khttpd_fcgi_abort_exchange(conn->xchg_data);
+
 		return;
 	}
 
-	KHTTPD_NOTE("%s xchg_data %p", __func__, xchg_data);
-	khttpd_fcgi_protocol_error_new(&logent);
-	khttpd_problem_set_detail(&logent,
-	    "upstream server closed the connection prematurely");
-	khttpd_fcgi_report_error(conn->upstream, &logent);
+	callout_drain(&conn->end_request_co);
+	khttpd_task_cancel(conn->abort_req_task);
 
-	conn->recv_eof = true;
-	khttpd_fcgi_abort_exchange(conn);
+	upstream = conn->upstream;
+	loc_data = upstream->location_data;
+	mtx_lock(&loc_data->lock);
+
+	if (conn->xchg_data != NULL) {
+		/* attaching */
+		conn->recv_eof = true;
+		mtx_unlock(&loc_data->lock);
+	} else {
+		/* idle */
+		LIST_REMOVE(conn, idleliste);
+		khttpd_fcgi_conn_destroy_locked(conn, upstream, loc_data);
+	}
 }
 
 static void
 khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 {
-	struct khttpd_fcgi_end_request_body {
-		uint32_t	app_status;
-		uint8_t		protocol_status;
-		uint8_t		reserved[3];
-	} __attribute__ ((packed));;
-
-	struct khttpd_mbuf_json logent;
-	struct khttpd_fcgi_hdr hdr;
 	struct khttpd_fcgi_end_request_body endreq_body;
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_hdr hdr;
+	struct khttpd_mbuf_json logent;
+	struct khttpd_fcgi_conn *conn = stream->up;
 	struct mbuf *m;
 	ssize_t resid;
 	int mlen, cntlen, padlen, pktlen;
 	int error;
-	bool suspend_recv;
+	bool recv_suspended;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 
-	conn = stream->up;
-	suspend_recv = false;
-	resid = SSIZE_MAX;
-	error = khttpd_stream_receive(&conn->stream, &resid, &m);
-	if (error != 0) {
-		KHTTPD_NOTE("%s error %d", __func__, error);
+	recv_suspended = false;
+	do {
+		resid = SSIZE_MAX;
+		error = khttpd_stream_receive(&conn->stream, &resid, &m);
 
 		if (error == EWOULDBLOCK) {
 			khttpd_stream_continue_receiving(stream,
@@ -1624,148 +1804,143 @@ khttpd_fcgi_conn_data_is_available(struct khttpd_stream *stream)
 			return;
 		}
 
-		khttpd_fcgi_protocol_error_new(&logent);
-		khttpd_problem_set_detail(&logent, "receive failure");
-		khttpd_problem_set_errno(&logent, error);
-		khttpd_fcgi_report_error(conn->upstream, &logent);
+		if (error != 0) {
+			KHTTPD_NOTE("%s error %d", __func__, error);
 
-		m_freem(conn->recv_buf);
-		conn->recv_buf = NULL;
-
-		khttpd_socket_reset(khttpd_fcgi_conn_socket(conn));
-		return;
-	}
-
-	if (m == NULL) {
-		khttpd_fcgi_found_eof(conn);
-		return;
-	}
-
-	if (conn->recv_buf == NULL) {
-		conn->recv_buf = m;
-	} else {
-		m_cat(conn->recv_buf, m);
-		m = conn->recv_buf;
-	}
-	mlen = m_length(m, NULL);
-	KHTTPD_NOTE("%s mlen %d", __func__, mlen);
-
-	for (; sizeof(struct khttpd_fcgi_hdr) <= mlen;
-	     m = conn->recv_buf) {
-		KHTTPD_NOTE("m_length(%p)=%d", m, m_length(m, NULL));
-		
-		m_copydata(m, 0, sizeof(hdr), (char *)&hdr);
-
-		if (hdr.version != 1) {
-			KHTTPD_NOTE("%s invalid version %d %d %d %d %d %d",
-			    __func__, hdr.version, hdr.type,
-			    ntohs(hdr.request_id),
-			    ntohs(hdr.content_length));
 			khttpd_fcgi_protocol_error_new(&logent);
-			khttpd_problem_set_detail(&logent,
-			    "unknown protocol version \"%d\"", hdr.version);
+			khttpd_problem_set_detail(&logent, "receive failure");
+			khttpd_problem_set_errno(&logent, error);
 			khttpd_fcgi_report_error(conn->upstream, &logent);
 
+			m_freem(conn->recv_buf);
 			conn->recv_buf = NULL;
-			m_freem(m);
 
 			khttpd_socket_reset(khttpd_fcgi_conn_socket(conn));
 			return;
 		}
 
-		cntlen = ntohs(hdr.content_length);
-		padlen = hdr.padding_length;
-		pktlen = sizeof(hdr) + cntlen + padlen;
-		KHTTPD_NOTE("%s cntlen %d, padlen %d, pktlen %d",
-		    __func__, cntlen, padlen, pktlen);
-		if (mlen < pktlen) {
-			break;
+		if (m == NULL) {
+			khttpd_fcgi_found_eof(conn);
+			return;
 		}
 
-		conn->recv_buf = m_split(m, pktlen, M_WAITOK);
-		mlen -= pktlen;
+		if (conn->recv_buf == NULL) {
+			conn->recv_buf = m;
+		} else {
+			m_cat(conn->recv_buf, m);
+			m = conn->recv_buf;
+		}
+		mlen = m_length(m, NULL);
 
-		switch (hdr.type) {
+		for (; sizeof(struct khttpd_fcgi_hdr) <= mlen;
+		     m = conn->recv_buf) {
+			m_copydata(m, 0, sizeof(hdr), (char *)&hdr);
 
-		case KHTTPD_FCGI_TYPE_END_REQUEST:
-			m_copydata(m, sizeof(hdr), sizeof(endreq_body),
-			    (char *)&endreq_body);
-			m_freem(m);
-			khttpd_fcgi_end_request(conn,
-			    ntohl(endreq_body.app_status),
-			    endreq_body.protocol_status);
-			break;
+			if (hdr.version != 1) {
+				khttpd_fcgi_protocol_error_new(&logent);
+				khttpd_problem_set_detail(&logent,
+				    "unknown protocol version \"%d\"",
+				    hdr.version);
+				khttpd_fcgi_report_error(conn->upstream,
+				    &logent);
 
-		case KHTTPD_FCGI_TYPE_STDOUT:
-			if (cntlen == 0) {
+				conn->recv_buf = NULL;
 				m_freem(m);
-				m = NULL;
-			} else {
-				m_adj(m, sizeof(hdr));
-				m_adj(m, -padlen);
-			}
-			if (khttpd_fcgi_process_stdout_record(conn, m)) {
-				suspend_recv = true;
-			}
-			break;
 
-		case KHTTPD_FCGI_TYPE_STDERR:
-			if (hdr.content_length == 0) {
-				m_freem(m);
+				khttpd_socket_reset
+				    (khttpd_fcgi_conn_socket(conn));
+				return;
+			}
+
+			cntlen = ntohs(hdr.content_length);
+			padlen = hdr.padding_length;
+			pktlen = sizeof(hdr) + cntlen + padlen;
+			if (mlen < pktlen) {
 				break;
 			}
 
-			m_adj(m, sizeof(hdr));
-			m_adj(m, -padlen);
-			khttpd_problem_log_new(&logent, LOG_WARNING,
-			    "fcgi_stderr", "FastCGI stderr");
-			khttpd_mbuf_json_property(&logent, "content");
-			khttpd_mbuf_json_mbuf(&logent, true, m);
-			khttpd_fcgi_report_error(conn->upstream, &logent);
-			break;
+			conn->recv_buf = m_split(m, pktlen, M_WAITOK);
+			mlen -= pktlen;
 
-		default:
-			m_freem(m);
+			switch (hdr.type) {
 
-			khttpd_fcgi_protocol_error_new(&logent);
-			khttpd_problem_set_detail(&logent,
-			    "invalid record type \"%d\"", hdr.type);
-			khttpd_fcgi_report_error(conn->upstream, &logent);
+			case KHTTPD_FCGI_TYPE_END_REQUEST:
+				m_copydata(m, sizeof(hdr), sizeof(endreq_body),
+				    (char *)&endreq_body);
+				m_freem(m);
+				khttpd_fcgi_end_request(conn, 
+				    ntohl(endreq_body.app_status),
+				    endreq_body.protocol_status);
+				break;
+
+			case KHTTPD_FCGI_TYPE_STDOUT:
+				if (cntlen == 0) {
+					m_freem(m);
+					m = NULL;
+				} else {
+					m_adj(m, sizeof(hdr));
+					m_adj(m, -padlen);
+				}
+				if (khttpd_fcgi_process_stdout_record
+				    (conn, m)) {
+					recv_suspended = true;
+				}
+				break;
+
+			case KHTTPD_FCGI_TYPE_STDERR:
+				if (hdr.content_length == 0) {
+					m_freem(m);
+					break;
+				}
+
+				m_adj(m, sizeof(hdr));
+				m_adj(m, -padlen);
+				khttpd_problem_log_new(&logent, LOG_WARNING,
+				    "fcgi_stderr", "FastCGI stderr");
+				khttpd_mbuf_json_property(&logent, "content");
+				khttpd_mbuf_json_mbuf(&logent, true, m);
+				khttpd_fcgi_report_error(conn->upstream,
+				    &logent);
+				break;
+
+			default:
+				m_freem(m);
+
+				khttpd_fcgi_protocol_error_new(&logent);
+				khttpd_problem_set_detail(&logent,
+				    "invalid record type \"%d\"", hdr.type);
+				khttpd_fcgi_report_error(conn->upstream,
+				    &logent);
+			}
 		}
+	} while (!recv_suspended);
 
-		KHTTPD_NOTE("%s continue mlen %d", __func__, mlen);
-	}
-
-	if (!suspend_recv) {
-		khttpd_stream_continue_receiving(stream,
-		    conn->upstream->busy_timeout);
-	}
+	conn->recv_suspended = true;
 }
 
 static void
 khttpd_fcgi_conn_clear_to_send(struct khttpd_stream *stream, long space)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = stream->up;
 
-	KHTTPD_ENTRY("%s(%p,%#x)", __func__, stream, space);
+	KHTTPD_ENTRY("%s(conn %p,%#x)", __func__, conn, space);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
-	conn = stream->up;
-	if (conn->active && conn->xchg_data != NULL) {
-		khttpd_fcgi_send_stdin(conn, space);
+	if (conn->active) {
+		khttpd_fcgi_send_stdin(conn->xchg_data, space);
 	}
 }
 
 static void
 khttpd_fcgi_conn_reset(struct khttpd_stream *stream)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = stream->up;
 
-	KHTTPD_ENTRY("%s(%p)", __func__, stream);
-	conn = stream->up;
+	KHTTPD_ENTRY("%s(conn %p)", __func__, conn);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
-	if (conn->suspend_recv) {
-		KHTTPD_NOTE("%s suspend_recv", __func__);
-		conn->suspend_recv = false;
+	if (conn->recv_suspended) {
+		conn->recv_suspended = false;
 		khttpd_stream_continue_receiving(&conn->stream, 0);
 	}
 }
@@ -1774,11 +1949,11 @@ static void
 khttpd_fcgi_conn_error(struct khttpd_stream *stream,
     struct khttpd_mbuf_json *entry)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = stream->up;
 
-	KHTTPD_ENTRY("%s(%p,%p)", __func__, stream, entry);
+	KHTTPD_ENTRY("%s(conn %p,%p)", __func__, conn, entry);
+	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
-	conn = stream->up;
 	khttpd_fcgi_report_error(conn->upstream, entry);
 }
 
@@ -1799,7 +1974,7 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_fcgi_upstream *upstream;
 	int64_t max_conns;
-	int error, status;
+	int status;
 
 	KHTTPD_ENTRY("%s(,%p,...)", __func__, loc_data);
 
@@ -1843,20 +2018,8 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 	TAILQ_INSERT_TAIL(&loc_data->avl_upstreams, upstream, tailqe);
 	mtx_unlock(&loc_data->lock);
 
-	if ((error = khttpd_fcgi_conn_new(loc_data, upstream)) == 0) {
-		status = KHTTPD_STATUS_OK;
-
-	} else {
-		prop_spec.name = "address";
-		prop_spec.link = input_prop_spec;
-		khttpd_problem_invalid_value_response_begin(output);
-		khttpd_problem_set_detail(output,
-		    "failed to connect to the specified address");
-		khttpd_problem_set_property(output, &prop_spec);
-		khttpd_problem_set_errno(output, error);
-
-		status = KHTTPD_STATUS_BAD_REQUEST;
-	}
+	khttpd_fcgi_conn_new(loc_data, upstream);
+	status = KHTTPD_STATUS_OK;
 
  end:
 	if (KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
@@ -1872,117 +2035,80 @@ static void
 khttpd_fcgi_exchange_dtor(struct khttpd_exchange *exchange, void *arg)
 {
 	struct khttpd_fcgi_conn *conn;
-	struct khttpd_fcgi_xchg_data *xchg_data;
 	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_fcgi_hdr *hdr;
-	struct mbuf *m;
+	struct khttpd_fcgi_xchg_data *xchg_data = arg;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, exchange, arg);
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
 
-	xchg_data = arg;
-	loc_data = khttpd_location_data(khttpd_exchange_location(exchange));
+	if (xchg_data->active) {
+		KHTTPD_NOTE("%s active", __func__);
+		khttpd_fcgi_detach_conn(xchg_data, true);
 
-	if (!xchg_data->connected) {
-		KHTTPD_NOTE("%s !connected", __func__);
+	} else {
+		loc_data = 
+		    khttpd_location_data(khttpd_exchange_location(exchange));
 		mtx_lock(&loc_data->lock);
-		if (xchg_data->waiting) {
+
+		if ((conn = xchg_data->conn) != NULL) {
+			KHTTPD_NOTE("%s attaching", __func__);
+			conn->xchg_data = NULL;
+
+		} else if (xchg_data->waiting) {
 			KHTTPD_NOTE("%s waiting", __func__);
 			STAILQ_REMOVE(&loc_data->queue, xchg_data,
 			    khttpd_fcgi_xchg_data, link);
 			--loc_data->nwaiting;
 		}
 
-		if ((conn = xchg_data->conn) != NULL) {
-			KHTTPD_NOTE("%s conn %p", __func__, conn);
-			KASSERT(conn->attaching == NULL ||
-			    conn->attaching == xchg_data,
-			    ("attaching %p", conn->attaching));
-			conn->xchg_data = conn->attaching = NULL;
-		}
-
 		mtx_unlock(&loc_data->lock);
-
-		uma_zfree(khttpd_fcgi_xchg_data_zone, arg);
-		return;
 	}
-
-	conn = xchg_data->conn;
-	xchg_data->conn = NULL;
-	conn->xchg_data = NULL;
 
 	uma_zfree(khttpd_fcgi_xchg_data_zone, xchg_data);
-
-	if (conn->recv_eof) {
-		KHTTPD_NOTE("%s eof", __func__);
-		khttpd_fcgi_conn_destroy(conn);
-
-	} else {
-		if (conn->suspend_recv) {
-			KHTTPD_NOTE("%s suspend_recv", __func__);
-			conn->suspend_recv = false;
-			khttpd_stream_continue_receiving(&conn->stream,
-				conn->upstream->busy_timeout);
-		}
-
-		if (!conn->header_finished) {
-			KHTTPD_NOTE("%s abort_request", __func__);
-			m = m_get(M_WAITOK, MT_DATA);
-			m->m_len = sizeof(struct khttpd_fcgi_hdr);
-			hdr = mtod(m, struct khttpd_fcgi_hdr *);
-			khttpd_fcgi_init_record_header(hdr,
-			    KHTTPD_FCGI_TYPE_ABORT_REQUEST, 0);
-			khttpd_stream_send(&conn->stream, m,
-			    KHTTPD_STREAM_FLUSH);
-		}
-	}
 }
 
 static int
 khttpd_fcgi_exchange_get(struct khttpd_exchange *exchange, void *arg,
     long space, struct mbuf **data_out)
 {
-	struct khttpd_fcgi_xchg_data *xchg_data;
+	struct khttpd_fcgi_xchg_data *xchg_data = arg;
 	struct khttpd_fcgi_conn *conn;
 	struct mbuf *hd;
-	bool would_block;
 
 	KHTTPD_ENTRY("%s(%p,%p,%#lx)", __func__, exchange, arg, space);
-
-	xchg_data = arg;
-	would_block = false;
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
 
 	if (xchg_data->aborted) {
 		KHTTPD_NOTE("%s aborted", __func__);
 		return (ECONNABORTED);
 	}
 
-	if (!xchg_data->connected) {
-		KHTTPD_NOTE("%s !connected", __func__);
-		xchg_data->suspend_get = true;
+	if (!xchg_data->active) {
+		KHTTPD_NOTE("%s !active", __func__);
+		xchg_data->get_suspended = true;
 		return (EWOULDBLOCK);
 	}
 
 	conn = xchg_data->conn;
 
-	if ((hd = conn->stdout) == NULL) {
-		KHTTPD_NOTE("%s stdout_end %d, recv_eof %d", __func__,
-			conn->stdout_end, conn->recv_eof);
-		if (!conn->stdout_end && !conn->recv_eof) {
-			conn->suspend_get = true;
+	if ((hd = xchg_data->get_buf) == NULL) {
+		if (!xchg_data->get_finished && !conn->recv_eof) {
+			xchg_data->get_suspended = true;
 			return (EWOULDBLOCK);
 		}
 		*data_out = NULL;
 		return (0);
 	}
 
-	if ((conn->stdout = m_split(hd, space, M_WAITOK)) == NULL &&
-	    conn->suspend_recv) {
-		conn->suspend_recv = false;
+	if ((xchg_data->get_buf = m_split(hd, space, M_WAITOK)) == NULL &&
+	    conn->recv_suspended) {
+		conn->recv_suspended = false;
 		khttpd_stream_continue_receiving(&conn->stream,
 		    conn->upstream->busy_timeout);
 	}
 
-	KHTTPD_NOTE("%s send %#x", __func__, m_length(hd, NULL));
 	*data_out = hd;
 	return (0);
 }
@@ -1991,13 +2117,12 @@ static void
 khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
     struct mbuf *data, bool *pause_out)
 {
-	struct khttpd_fcgi_xchg_data *xchg_data;
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_xchg_data *xchg_data = arg;
 	long space;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, exchange, arg);
-
-	xchg_data = arg;
+	KASSERT(khttpd_fcgi_xchg_data_on_worker_thread(xchg_data),
+	    ("wrong thread"));
 
 	if (xchg_data->aborted) {
 		KHTTPD_NOTE("%s aborted", __func__);
@@ -2010,38 +2135,21 @@ khttpd_fcgi_exchange_put(struct khttpd_exchange *exchange, void *arg,
 		return;
 	}
 
-	if (!xchg_data->connected) {
-		if (data == NULL) {
-			xchg_data->send_eof = true;
-			return;
-		}
-
-		if (xchg_data->put_buf == NULL) {
-			xchg_data->put_buf = data;
-		} else {
-			m_cat(xchg_data->put_buf, data);
-		}
-
-		*pause_out = true;
-		return;
-	}
-
-	conn = xchg_data->conn;
-
 	if (data == NULL) {
-		conn->stdin_send_eof = true;
-	} else if (conn->stdin == NULL) {
-		conn->stdin = data;
+		xchg_data->put_eof = true;
+	} else if (xchg_data->put_buf == NULL) {
+		xchg_data->put_buf = data;
 	} else {
-		m_cat(conn->stdin, data);
+		m_cat(xchg_data->put_buf, data);
 	}
 
-	if (conn->send_busy) {
-		*pause_out = conn->suspend_put = data != NULL;
+	if (!xchg_data->active || xchg_data->put_busy) {
+		*pause_out = xchg_data->put_suspended = data != NULL;
 	} else {
-		conn->send_busy = true;
-		khttpd_stream_send_bufstat(&conn->stream, NULL, NULL, &space);
-		khttpd_fcgi_send_stdin(conn, space);
+		xchg_data->put_busy = true;
+		khttpd_stream_send_bufstat(&xchg_data->conn->stream,
+		    NULL, NULL, &space);
+		khttpd_fcgi_send_stdin(xchg_data, space);
 	}
 }
 
@@ -2062,6 +2170,8 @@ khttpd_fcgi_filter(struct khttpd_location *location,
 
 	KHTTPD_ENTRY("%s(%p,%p,%s)", __func__, location, exchange,
 	    khttpd_ktr_printf("%s", suffix));
+	KASSERT(khttpd_exchange_on_worker_thread(exchange),
+	    ("wrong thread"));
 
 	td = curthread;
 	loc_data = khttpd_location_data(location);
@@ -2216,22 +2326,14 @@ khttpd_fcgi_filter(struct khttpd_location *location,
 static void
 khttpd_fcgi_do_method(struct khttpd_exchange *exchange)
 {
-	struct khttpd_fcgi_xchg_data *xchg_data;
-	struct khttpd_fcgi_location_data *loc_data;
-	struct khttpd_location *location;
-	struct khttpd_fcgi_conn *conn;
-	struct thread *td;
 	int status;
 
 	KHTTPD_ENTRY("%s(%p=%s)", __func__, exchange,
 	    khttpd_ktr_printf("{target: \"%s\", method: \"%s\"}",
 		khttpd_exchange_target(exchange),
 		khttpd_method_name(khttpd_exchange_method(exchange))));
-
-	td = curthread;
-	location = khttpd_exchange_location(exchange);
-	loc_data = khttpd_location_data(location);
-	xchg_data = khttpd_exchange_ops_arg(exchange);
+	KASSERT(khttpd_exchange_on_worker_thread(exchange),
+	    ("wrong thread"));
 
 	if (khttpd_exchange_request_is_chunked(exchange)) {
 		status = KHTTPD_STATUS_LENGTH_REQUIRED;
@@ -2241,43 +2343,27 @@ khttpd_fcgi_do_method(struct khttpd_exchange *exchange)
 		return;
 	}
 
- 	mtx_lock(&loc_data->lock);
-	if ((conn = LIST_FIRST(&loc_data->idle_conn)) == NULL) {
-		xchg_data->waiting = true;
-		STAILQ_INSERT_TAIL(&loc_data->queue, xchg_data, link);
-		++loc_data->nwaiting;
-		khttpd_fcgi_connect(loc_data);
-		mtx_unlock(&loc_data->lock);
-		return;
-	}
-
-	LIST_REMOVE(conn, idleliste);
-	conn->idle = false;
-	conn->attaching = xchg_data;
-	xchg_data->conn = conn;
-	mtx_unlock(&loc_data->lock);
-
-	khttpd_task_queue_take_over(khttpd_socket_task_queue(conn->stream.down),
-	    khttpd_fcgi_attach_conn, conn);
+	khttpd_fcgi_choose_conn(exchange);
 }
 
 static int
 khttpd_fcgi_conn_init(void *mem, int size, int flags)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
 
-	conn = mem;
-	sbuf_new(&conn->line, conn->line_buf,
-	    sizeof(conn->line_buf), SBUF_AUTOEXTEND);
-	sbuf_new(&conn->location, conn->location_buf,
-	    sizeof(conn->location_buf), SBUF_AUTOEXTEND);
-	conn->attach_task = NULL;
 	conn->stream.up_ops = &khttpd_fcgi_conn_ops;
 	conn->stream.up = conn;
 	conn->stream.down = NULL;
 	conn->xchg_data = NULL;
+	conn->attach_task = khttpd_task_new(NULL, khttpd_fcgi_attach_conn,
+	    conn, "attach");
+	conn->release_task = khttpd_task_new(NULL, khttpd_fcgi_do_conn_release,
+	    conn, "release");
+	conn->abort_req_task = khttpd_task_new(NULL,
+	    khttpd_fcgi_conn_do_abort_request, conn, "abort");
+	callout_init(&conn->end_request_co, 1);
 
 	return (0);
 }
@@ -2285,26 +2371,25 @@ khttpd_fcgi_conn_init(void *mem, int size, int flags)
 static void
 khttpd_fcgi_conn_fini(void *mem, int size)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x)", __func__, mem, size);
 
-	conn = mem;
-	sbuf_delete(&conn->line);
-	sbuf_delete(&conn->location);
+	khttpd_task_delete(conn->attach_task);
+	khttpd_task_delete(conn->release_task);
+	khttpd_task_delete(conn->abort_req_task);
 }
 
 static int
 khttpd_fcgi_conn_ctor(void *mem, int size, void *arg, int flags)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%p,%#x)", __func__, mem, size, arg, flags);
 
-	conn = mem;
 	conn->upstream = arg;
 	bzero(&conn->khttpd_fcgi_conn_zctor_begin,
-	    offsetof(struct khttpd_fcgi_conn, khttpd_fcgi_conn_zctor_end) -
+	    sizeof(struct khttpd_fcgi_conn) -
 	    offsetof(struct khttpd_fcgi_conn, khttpd_fcgi_conn_zctor_begin));
 
 	return (0);
@@ -2313,34 +2398,32 @@ khttpd_fcgi_conn_ctor(void *mem, int size, void *arg, int flags)
 static void
 khttpd_fcgi_conn_dtor(void *mem, int size, void *arg)
 {
-	struct khttpd_fcgi_conn *conn;
+	struct khttpd_fcgi_conn *conn = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%p)", __func__, mem, size, arg);
+	KASSERT(conn->xchg_data == NULL, ("xchg_data %p", conn->xchg_data));
+	KASSERT(conn->stream.down == NULL, 
+	    ("stream.down %p", conn->stream.down));
 
-	conn = mem;
-	KASSERT(conn->xchg_data == NULL,
-	    ("busy. conn %p, xchg_data %p", conn, conn->xchg_data));
-
-	sbuf_clear(&conn->line);
-	sbuf_clear(&conn->location);
-	khttpd_stream_destroy(&conn->stream);
+	callout_drain(&conn->end_request_co);
 	m_freem(conn->recv_buf);
-	m_freem(conn->stdin);
-	m_freem(conn->stdout);
 }
 
 static int
 khttpd_fcgi_xchg_data_init(void *mem, int size, int flags)
 {
-	struct khttpd_fcgi_xchg_data *data;
+	struct khttpd_fcgi_xchg_data *xchg_data = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
 
-	data = mem;
-	sbuf_new(&data->path_info, data->path_info_buf,
-	    sizeof(data->path_info_buf), SBUF_AUTOEXTEND);
-	sbuf_new(&data->script_name, data->script_name_buf,
-	    sizeof(data->script_name_buf), SBUF_AUTOEXTEND);
+	sbuf_new(&xchg_data->path_info, xchg_data->path_info_buf,
+	    sizeof(xchg_data->path_info_buf), SBUF_AUTOEXTEND);
+	sbuf_new(&xchg_data->script_name, xchg_data->script_name_buf,
+	    sizeof(xchg_data->script_name_buf), SBUF_AUTOEXTEND);
+	sbuf_new(&xchg_data->line, xchg_data->line_buf,
+	    sizeof(xchg_data->line_buf), SBUF_AUTOEXTEND);
+	sbuf_new(&xchg_data->location, xchg_data->location_buf,
+	    sizeof(xchg_data->location_buf), SBUF_AUTOEXTEND);
 
 	return (0);
 }
@@ -2348,25 +2431,25 @@ khttpd_fcgi_xchg_data_init(void *mem, int size, int flags)
 static void
 khttpd_fcgi_xchg_data_fini(void *mem, int size)
 {
-	struct khttpd_fcgi_xchg_data *data;
+	struct khttpd_fcgi_xchg_data *xchg_data = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x)", __func__, mem, size);
 
-	data = mem;
-	sbuf_delete(&data->path_info);
-	sbuf_delete(&data->script_name);
+	sbuf_delete(&xchg_data->path_info);
+	sbuf_delete(&xchg_data->script_name);
+	sbuf_delete(&xchg_data->line);
+	sbuf_delete(&xchg_data->location);
 }
 
 static int
 khttpd_fcgi_xchg_data_ctor(void *mem, int size, void *arg, int flags)
 {
-	struct khttpd_fcgi_xchg_data *data;
+	struct khttpd_fcgi_xchg_data *xchg_data = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%p,%#x)", __func__, mem, size, arg, flags);
 
-	data = mem;
-	data->exchange = arg;
-	bzero(&data->khttpd_fcgi_xchg_data_zctor_begin,
+	xchg_data->exchange = arg;
+	bzero(&xchg_data->khttpd_fcgi_xchg_data_zctor_begin,
 	    offsetof(struct khttpd_fcgi_xchg_data,
 		khttpd_fcgi_xchg_data_zctor_end) -
 	    offsetof(struct khttpd_fcgi_xchg_data,
@@ -2378,14 +2461,16 @@ khttpd_fcgi_xchg_data_ctor(void *mem, int size, void *arg, int flags)
 static void
 khttpd_fcgi_xchg_data_dtor(void *mem, int size, void *arg)
 {
-	struct khttpd_fcgi_xchg_data *xchg_data;
+	struct khttpd_fcgi_xchg_data *xchg_data = mem;
 
 	KHTTPD_ENTRY("%s(%p,%#x,%p)", __func__, mem, size, arg);
 
-	xchg_data = mem;
 	sbuf_clear(&xchg_data->path_info);
 	sbuf_clear(&xchg_data->script_name);
+	sbuf_clear(&xchg_data->line);
+	sbuf_clear(&xchg_data->location);
 	m_freem(xchg_data->put_buf);
+	m_freem(xchg_data->get_buf);
 }
 
 static void
@@ -2393,9 +2478,9 @@ khttpd_fcgi_shutdown(void *arg)
 {
 
 	mtx_lock(&khttpd_fcgi_lock);
-	while (!LIST_EMPTY(&khttpd_fcgi_conns)) {
-		mtx_sleep(&khttpd_fcgi_conns, &khttpd_fcgi_lock, 0, "fcgidown",
-		    0);
+	while (0 < khttpd_fcgi_conn_count) {
+		mtx_sleep(&khttpd_fcgi_conn_count, &khttpd_fcgi_lock, 0,
+		    "fcgidown", 0);
 	}
 	mtx_unlock(&khttpd_fcgi_lock);
 }
@@ -2414,12 +2499,10 @@ khttpd_fcgi_run(void)
 	khttpd_fcgi_conn_zone = uma_zcreate("fcgiconn",
 	    sizeof(struct khttpd_fcgi_conn),
 	    khttpd_fcgi_conn_ctor, khttpd_fcgi_conn_dtor,
-	    khttpd_fcgi_conn_init, khttpd_fcgi_conn_fini,
-	    UMA_ALIGN_PTR, 0);
+	    khttpd_fcgi_conn_init, khttpd_fcgi_conn_fini, UMA_ALIGN_PTR, 0);
 	khttpd_fcgi_shutdown_tag =
 	    EVENTHANDLER_REGISTER(khttpd_main_shutdown,
 		khttpd_fcgi_shutdown, NULL, EVENTHANDLER_PRI_LAST - 1);
-
 
 	return (0);
 }
@@ -2455,10 +2538,6 @@ khttpd_fcgi_location_data_destroy(struct khttpd_fcgi_location_data *data)
 	KASSERT(STAILQ_EMPTY(&data->queue), ("queue is not empty"));
 
 	td = curthread;
-
-	mtx_lock(&khttpd_fcgi_lock);
-	LIST_REMOVE(data, liste);
-	mtx_unlock(&khttpd_fcgi_lock);
 
 	mtx_destroy(&data->lock);
 	LIST_FOREACH_SAFE(upstream, &data->upstreams, liste, tmpupstream) {
@@ -2513,10 +2592,6 @@ khttpd_fcgi_location_data_new
 	    offsetof(struct khttpd_fcgi_location_data,
 		khttpd_fcgi_location_data_zctor_begin));
 	location_data->fs_path_fd = -1;
-
-	mtx_lock(&khttpd_fcgi_lock);
-	LIST_INSERT_HEAD(&khttpd_fcgi_locations, location_data, liste);
-	mtx_unlock(&khttpd_fcgi_lock);
 
 	status = khttpd_webapi_get_string_property(&str, 
 	    "fsPath", input_prop_spec, input, output, false);

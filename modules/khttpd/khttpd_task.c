@@ -115,22 +115,24 @@ static const char *
 khttpd_task_queue_ktr_print(struct khttpd_task_queue *queue)
 {
 
-	return (khttpd_ktr_printf("%p(name %s)", queue, queue->name));
+	return (queue == NULL ? "NULL" :
+	    khttpd_ktr_printf("%p(%s)", queue, queue->name));
 }
 
 static const char *
 khttpd_task_worker_ktr_print(struct khttpd_task_worker *worker)
 {
 
-	return (khttpd_ktr_printf("%p(name %s)", worker,
-		worker->thread->td_name));
+	return (worker == NULL ? "NULL" : 
+	    khttpd_ktr_printf("%p(%s)", worker, worker->thread->td_name));
 }
 
 static const char *
 khttpd_task_ktr_print(struct khttpd_task *task)
 {
 
-	return (khttpd_ktr_printf("%p(name %s)", task, task->name));
+	return (task == NULL ? "NULL" :
+	    khttpd_ktr_printf("%p(%s)", task, task->name));
 }
 
 static void
@@ -225,51 +227,6 @@ khttpd_task_exit(void)
 	mtx_unlock(&khttpd_task_lock);
 
 	khttpd_free(khttpd_task_workers);
-	uma_zdestroy(khttpd_task_zone);
-}
-
-static int
-khttpd_task_queue_ctor(void *mem, int size, void *arg, int flags)
-{
-	static SIPHASH_CTX siphash_ctx;
-	u_long count, hash;
-	struct khttpd_task_queue *queue;
-
-	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
-	KASSERT(0 < khttpd_task_worker_count,
-	    ("khttpd_task_worker_count %d", khttpd_task_worker_count));
-
-	queue = mem;
-	count = atomic_fetchadd_long(&khttpd_task_siphash_counter, 1);
-	hash = SipHash24(&siphash_ctx, khttpd_task_siphash_key, &count,
-	    sizeof(count));
-	queue->worker = khttpd_task_workers[hash % khttpd_task_worker_count];
-	queue->take_over_in_progress = false;
-
-	return (0);
-}
-
-static int
-khttpd_task_queue_init(void *mem, int size, int flags)
-{
-	struct khttpd_task_queue *queue;
-
-	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
-
-	queue = mem;
-	rm_init(&queue->lock, "taskq");
-	return (0);
-}
-
-static void
-khttpd_task_queue_fini(void *mem, int size)
-{
-	struct khttpd_task_queue *queue;
-
-	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size);
-
-	queue = mem;
-	rm_destroy(&queue->lock);
 }
 
 static int
@@ -279,14 +236,6 @@ khttpd_task_run(void)
 	int error, i, n;
 
 	KHTTPD_ENTRY("%s()", __func__);
-
-	khttpd_task_zone = uma_zcreate("task",
-	    sizeof(struct khttpd_task), NULL, NULL, NULL, NULL,
-	    UMA_ALIGN_CACHE, 0);
-	khttpd_task_queue_zone = uma_zcreate("taskq",
-	    sizeof(struct khttpd_task_queue), khttpd_task_queue_ctor, NULL,
-	    khttpd_task_queue_init, khttpd_task_queue_fini,
-	    UMA_ALIGN_CACHE, 0);
 
 	arc4rand(khttpd_task_siphash_key, sizeof(khttpd_task_siphash_key),
 	    false);
@@ -328,6 +277,123 @@ khttpd_task_run(void)
 KHTTPD_INIT(khttpd_task, khttpd_task_run, khttpd_task_exit,
     KHTTPD_INIT_PHASE_RUN);
 
+#ifdef KHTTPD_TRACE_MALLOC
+
+static int
+khttpd_task_ctor(void *mem, int size, void *arg, int flags)
+{
+
+	KHTTPD_TR_ALLOC(mem, size);
+	return (0);
+}
+
+static void
+khttpd_task_dtor(void *mem, int size, void *arg)
+{
+
+	KHTTPD_TR_FREE(mem);
+}
+
+#endif	/* KHTTPD_TRACE_MALLOC */
+
+static int
+khttpd_task_queue_ctor(void *mem, int size, void *arg, int flags)
+{
+	static SIPHASH_CTX siphash_ctx;
+	u_long count, hash;
+	struct khttpd_task_queue *queue;
+
+	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
+	KASSERT(0 < khttpd_task_worker_count,
+	    ("khttpd_task_worker_count %d", khttpd_task_worker_count));
+
+	KHTTPD_TR_ALLOC(mem, size);
+
+	queue = mem;
+	count = atomic_fetchadd_long(&khttpd_task_siphash_counter, 1);
+	hash = SipHash24(&siphash_ctx, khttpd_task_siphash_key, &count,
+	    sizeof(count));
+	queue->worker = khttpd_task_workers[hash % khttpd_task_worker_count];
+	queue->take_over_in_progress = false;
+
+	return (0);
+}
+
+#ifdef KHTTPD_TRACE_MALLOC
+
+static void
+khttpd_task_queue_dtor(void *mem, int size, void *arg)
+{
+
+	KHTTPD_TR_FREE(mem);
+}
+
+#endif	/* KHTTPD_TRACE_MALLOC */
+
+static int
+khttpd_task_queue_init(void *mem, int size, int flags)
+{
+	struct khttpd_task_queue *queue;
+
+	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size, flags);
+
+	queue = mem;
+	rm_init(&queue->lock, "taskq");
+	return (0);
+}
+
+static void
+khttpd_task_queue_fini(void *mem, int size)
+{
+	struct khttpd_task_queue *queue;
+
+	KHTTPD_ENTRY("%s(%p,%#x,%#x)", __func__, mem, size);
+
+	queue = mem;
+	rm_destroy(&queue->lock);
+}
+
+static void
+khttpd_task_local_fini(void)
+{
+
+	KHTTPD_ENTRY("%s()", __func__);
+
+	uma_zdestroy(khttpd_task_queue_zone);
+	uma_zdestroy(khttpd_task_zone);
+}
+
+static int
+khttpd_task_local_init(void)
+{
+
+	KHTTPD_ENTRY("%s()", __func__);
+
+	khttpd_task_zone = uma_zcreate("task",
+	    sizeof(struct khttpd_task),
+#ifdef KHTTPD_TRACE_MALLOC
+	    khttpd_task_ctor, khttpd_task_dtor,
+#else
+	    NULL, NULL,
+#endif
+	    NULL, NULL, UMA_ALIGN_CACHE, 0);
+
+	khttpd_task_queue_zone = uma_zcreate("taskq",
+	    sizeof(struct khttpd_task_queue), khttpd_task_queue_ctor,
+#ifdef KHTTPD_TRACE_MALLOC
+	    khttpd_task_queue_dtor,
+#else
+	    NULL,
+#endif
+	    khttpd_task_queue_init, khttpd_task_queue_fini,
+	    UMA_ALIGN_CACHE, 0);
+
+	return (0);
+}
+
+KHTTPD_INIT(khttpd_task, khttpd_task_local_init, khttpd_task_local_fini,
+    KHTTPD_INIT_PHASE_LOCAL);
+
 struct khttpd_task *
 khttpd_task_new(struct khttpd_task_queue *queue,
     khttpd_task_fn_t fn, void *arg, const char *name_fmt, ...)
@@ -368,6 +434,15 @@ khttpd_task_is_active(struct khttpd_task *task)
 {
 
 	return (task->scheduled);
+}
+
+void
+khttpd_task_set_queue(struct khttpd_task *task,
+    struct khttpd_task_queue *queue)
+{
+
+	KASSERT(!khttpd_task_is_active(task), ("active"));
+	task->queue = queue;
 }
 
 bool

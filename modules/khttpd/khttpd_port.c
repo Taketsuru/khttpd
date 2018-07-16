@@ -518,13 +518,17 @@ khttpd_socket_stream_notify_of_drain(struct khttpd_stream *stream)
 static void
 khttpd_socket_destroy(struct khttpd_socket *socket)
 {
+	struct khttpd_stream *stream;
 	struct socket *so;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, socket);
 	khttpd_socket_assert_curthread(socket);
 	KASSERT(socket->so != NULL, ("so is NULL"));
 
-	socket->stream = NULL;
+	if ((stream = socket->stream) != NULL) {
+		stream->down = NULL;
+		socket->stream = NULL;
+	}
 
 	mtx_lock(&khttpd_port_lock);
 	LIST_REMOVE(socket, liste);
@@ -564,6 +568,7 @@ khttpd_socket_stream_destroy(struct khttpd_stream *stream)
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 
 	khttpd_socket_destroy(stream->down);
+	stream->down = NULL;
 }
 
 static bool
@@ -840,7 +845,6 @@ khttpd_socket_do_cnf_task(void *arg)
 	struct sockopt sockopt;
 	struct khttpd_socket *socket;
 	struct khttpd_stream *stream;
-	struct sockaddr *name;
 	struct socket *so;
 	int error, soptval;
 
@@ -861,26 +865,6 @@ khttpd_socket_do_cnf_task(void *arg)
 			khttpd_mbuf_json_delete(&problem);
 		}
 		goto error;
-	}
-
-	if (!socket->is_client) {
-		error = soaccept(so, &name);
-		if (error != 0) {
-			KHTTPD_NOTE("%s soaccept error %d", __func__, error);
-			if (socket->error_fn != NULL) {
-				khttpd_problem_log_new(&problem, LOG_ERR,
-				    "socket_error", "socket error");
-				khttpd_problem_set_detail(&problem,
-				    "accept failed");
-				khttpd_problem_set_errno(&problem, error);
-				socket->error_fn(arg, &problem);
-				khttpd_mbuf_json_delete(&problem);
-			}
-			goto error;
-		}
-
-		bcopy(name, &socket->peeraddr,
-		    MIN(sizeof(socket->peeraddr), name->sa_len));
 	}
 
 	so = socket->so;
@@ -1110,6 +1094,7 @@ khttpd_port_fini(struct khttpd_port *port)
 	KHTTPD_ENTRY("%s(%p)", __func__, port);
 	khttpd_task_delete(port->arrival_task);
 	khttpd_task_delete(port->stop_task);
+	khttpd_task_queue_delete(port->queue);
 	khttpd_free(port);
 }
 
@@ -1120,7 +1105,9 @@ khttpd_port_do_arrival_task(void *arg)
 {
 	struct khttpd_port *port;
 	struct khttpd_socket *socket;
+	struct sockaddr *name;
 	struct socket *head, *so;
+	int error;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, arg);
 
@@ -1154,6 +1141,13 @@ khttpd_port_do_arrival_task(void *arg)
 		SOCK_UNLOCK(so);
 		ACCEPT_UNLOCK();
 
+		error = soaccept(so, &name);
+		if (error != 0) {
+			KHTTPD_NOTE("%s soaccept %d", __func__, error);
+			soclose(so);
+			continue;
+		}
+
 		socket = uma_zalloc(khttpd_socket_zone, M_WAITOK);
 		socket->port = khttpd_port_acquire(arg);
 		socket->so = so;
@@ -1161,6 +1155,8 @@ khttpd_port_do_arrival_task(void *arg)
 		socket->config_arg = port->config_arg;
 		socket->is_tcp = port->addr.ss_family == AF_INET ||
 		    port->addr.ss_family == AF_INET6;
+		bcopy(name, &socket->peeraddr,
+		    MIN(sizeof(socket->peeraddr), name->sa_len));
 
 		if (khttpd_socket_enter(socket)) {
 			uma_zfree(khttpd_socket_zone, socket);

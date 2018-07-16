@@ -69,6 +69,7 @@ void	khttpd_http_error(struct khttpd_mbuf_json *);
 
 struct khttpd_mbuf_json *
 	khttpd_exchange_log_entry(struct khttpd_exchange *);
+bool	khttpd_exchange_on_worker_thread(struct khttpd_exchange *);
 struct khttpd_socket *
 	khttpd_exchange_socket(struct khttpd_exchange *);
 const struct sockaddr *

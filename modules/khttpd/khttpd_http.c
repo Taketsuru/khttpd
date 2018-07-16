@@ -75,6 +75,7 @@
 #include "khttpd_stream.h"
 #include "khttpd_string.h"
 #include "khttpd_strtab.h"
+#include "khttpd_task.h"
 #include "khttpd_vhost.h"
 
 struct khttpd_session;
@@ -117,6 +118,8 @@ struct khttpd_exchange {
 	unsigned		response_chunked:1;
 	unsigned		responding:1;
 	unsigned		response_pending:1;
+	unsigned		busy:1;
+	unsigned		finished:1;
 
 #define khttpd_exchange_zctor_end	method
 	signed char		method;
@@ -138,6 +141,8 @@ struct khttpd_session {
 	struct khttpd_stream	stream;
 	struct sbuf		host;
 	struct khttpd_socket	*socket;
+	struct khttpd_task	*next_task;
+	struct khttpd_task	*delete_task;
 	char			*chunkbuf_begin;
 	char			*chunkbuf_end;
 	khttpd_session_fn_t	receive;
@@ -149,7 +154,6 @@ struct khttpd_session {
 	struct khttpd_port	*port;
 	struct mbuf		*recv_ptr;
 	unsigned		recv_paused:1;
-	unsigned		xmit_waiting_for_drain:1;
 	unsigned		https:1;
 	unsigned		is_default_port:1;
 
@@ -261,6 +265,9 @@ khttpd_session_next(struct khttpd_session *session)
 	KHTTPD_ENTRY("%s(%p)", __func__, session);
 
 	exchange = &session->exchange;
+
+	khttpd_http_log(khttpd_log_chan_access, &exchange->log_entry);
+
 	session->receive = exchange->close ? khttpd_session_receive_trash :
 	    khttpd_session_receive_request;
 	khttpd_socket_set_smesg(session->socket, 
@@ -272,17 +279,32 @@ khttpd_session_next(struct khttpd_session *session)
 }
 
 static void
+khttpd_session_do_next(void *arg)
+{
+
+	khttpd_session_next(arg);
+}
+
+static void
+khttpd_session_do_delete(void *arg)
+{
+	struct khttpd_session *session = arg;
+
+	uma_zfree(session->zone, session);
+}
+
+static void
 khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 {
 	struct khttpd_exchange *exchange;
 	int flags;
-	bool full;
 
 	KHTTPD_ENTRY("%s(%p,%p)", __func__, session, m);
 
 	exchange = &session->exchange;
+	exchange->finished = true;
 	flags = exchange->close ? KHTTPD_STREAM_CLOSE : KHTTPD_STREAM_FLUSH;
-	full = khttpd_stream_send(&session->stream, m, flags);
+	khttpd_stream_send(&session->stream, m, flags);
 
 	if (exchange->response_payload_size != 0) {
 		khttpd_mbuf_json_property(&exchange->log_entry,
@@ -294,14 +316,7 @@ khttpd_session_transmit_finish(struct khttpd_session *session, struct mbuf *m)
 	khttpd_mbuf_json_property(&exchange->log_entry, "completionTime");
 	khttpd_mbuf_json_now(&exchange->log_entry);
 
-	khttpd_http_log(khttpd_log_chan_access, &exchange->log_entry);
-
-	if (full) {
-		session->xmit_waiting_for_drain = true;
-		khttpd_stream_notify_of_drain(&session->stream);
-	} else {
-		khttpd_session_next(session);
-	}
+	khttpd_task_schedule(session->next_task);
 }
 
 static void
@@ -479,9 +494,15 @@ khttpd_exchange_bailout(struct khttpd_exchange *exchange, int status)
 
 	KHTTPD_ENTRY("%s(%p,%d)", __func__, exchange, status);
 
+	session = khttpd_exchange_session(exchange);
+
+	if (exchange->finished) {
+		khttpd_socket_reset(session->socket);
+		return;
+	}
+
 	if (exchange->responding) {
 		exchange->close = true;
-		session = khttpd_exchange_session(exchange);
 		khttpd_session_transmit_finish(session, NULL);
 		khttpd_socket_reset(session->socket);
 		return;
@@ -1349,6 +1370,8 @@ khttpd_session_receive_request(struct khttpd_session *session)
 		return (ENOMSG);
 	}
 
+	exchange->busy = true;
+
 	microtime(&exchange->arrival_time);
 
 	khttpd_mbuf_json_new(&exchange->log_entry);
@@ -1628,9 +1651,17 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 		case EBUSY:
 			goto pause;
 
+		case ENOMSG:
+			/* We need to delay freeing the session because we
+			 * might have scheduled next_task in the above
+			 * receive().
+			 */
+			khttpd_task_schedule(session->delete_task);
+			return;
+
 		default:
 			KHTTPD_NOTE("%s error=%d", __func__, error);
-			uma_zfree(session->zone, session);
+			khttpd_task_schedule(session->delete_task);
 			return;
 		}
 	}
@@ -1642,16 +1673,9 @@ khttpd_session_data_is_available(struct khttpd_stream *stream)
 static void
 khttpd_session_clear_to_send(struct khttpd_stream *stream, ssize_t space)
 {
-	struct khttpd_session *session;
 
 	KHTTPD_ENTRY("%s(%p,%#x)", __func__, stream, space);
-	session = stream->up;
-	if (session->xmit_waiting_for_drain) {
-		session->xmit_waiting_for_drain = false;
-		khttpd_session_next(session);
-	} else {
-		khttpd_session_transmit(session, space);
-	}
+	khttpd_session_transmit(stream->up, space);
 }
 
 static void
@@ -1661,8 +1685,10 @@ khttpd_session_reset(struct khttpd_stream *stream)
 
 	KHTTPD_ENTRY("%s(%p)", __func__, stream);
 	session = stream->up;
-	session->exchange.close = true;
-	khttpd_session_next(session);
+	if (session->exchange.busy && !session->exchange.finished) {
+		session->exchange.close = true;
+		khttpd_task_schedule(session->next_task);
+	}
 }
 
 static void
@@ -1718,6 +1744,10 @@ khttpd_session_init(struct khttpd_session *session, uma_zone_t zone)
 	session->chunkbuf_begin = khttpd_malloc(khttpd_chunkbuf_size);
 
 	session->zone = zone;
+	session->next_task = khttpd_task_new(NULL, khttpd_session_do_next,
+	    session, "next");
+	session->delete_task = khttpd_task_new(NULL, khttpd_session_do_delete,
+	    session, "delete");
 }
 
 static void
@@ -1728,6 +1758,8 @@ khttpd_session_fini(struct khttpd_session *session)
 	sbuf_delete(&session->host);
 	khttpd_free(session->chunkbuf_begin);
 	khttpd_exchange_fini(&session->exchange);
+	khttpd_task_delete(session->next_task);
+	khttpd_task_delete(session->delete_task);
 }
 
 static void
@@ -1828,7 +1860,7 @@ khttpd_http_local_fini(void)
 }
 
 KHTTPD_INIT(khttpd_http, khttpd_http_local_init, khttpd_http_local_fini,
-    KHTTPD_INIT_PHASE_LOCAL);
+    KHTTPD_INIT_PHASE_LOCAL, khttpd_task);
 
 void
 khttpd_http_error(struct khttpd_mbuf_json *entry)
@@ -1842,6 +1874,14 @@ khttpd_exchange_log_entry(struct khttpd_exchange *exchange)
 {
 
 	return (&exchange->log_entry);
+}
+
+bool
+khttpd_exchange_on_worker_thread(struct khttpd_exchange *exchange)
+{
+
+	return (khttpd_task_queue_on_worker_thread
+	    (khttpd_socket_task_queue(khttpd_exchange_socket(exchange))));
 }
 
 struct khttpd_socket *
@@ -2395,6 +2435,10 @@ khttpd_http_accept_http_client(struct khttpd_port *port,
 	bcopy(sess_conf, &session->config, sizeof(session->config));
 	session->port = khttpd_port_acquire(port);
 	session->socket = socket;
+	khttpd_task_set_queue(session->next_task,
+	    khttpd_socket_task_queue(socket));
+	khttpd_task_set_queue(session->delete_task,
+	    khttpd_socket_task_queue(socket));
 	khttpd_socket_set_smesg(session->socket, "request");
 
 	addr = khttpd_port_address(port);

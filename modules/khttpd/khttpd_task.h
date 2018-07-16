@@ -43,6 +43,8 @@ struct khttpd_task *
 	    khttpd_task_fn_t _fn, void *_arg, const char *name_fmt, ...);
 void	khttpd_task_delete(struct khttpd_task *_task);
 bool	khttpd_task_is_active(struct khttpd_task *_task);
+void	khttpd_task_set_queue(struct khttpd_task *_task,
+	    struct khttpd_task_queue *_queue);
 bool	khttpd_task_schedule(struct khttpd_task *_task);
 bool	khttpd_task_cancel(struct khttpd_task *_task);
 bool	khttpd_task_queue_on_worker_thread(struct khttpd_task_queue *_queue);
