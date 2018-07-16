@@ -291,13 +291,13 @@ khttpd_file_open_for_read(int dirfd,
 	if (vattr.va_type == VDIR) {
 		KHTTPD_BRANCH("is VDIR");
 		error = EISDIR;
-		goto error1;
+		goto error2;
 	}
 
 	if (vattr.va_type != VREG) {
 		KHTTPD_BRANCH("va_type is %d, not VREG", vattr.va_type);
 		error = ENOENT;
-		goto error1;
+		goto error2;
 	}
 
 	data->end_offset = vattr.va_size;
