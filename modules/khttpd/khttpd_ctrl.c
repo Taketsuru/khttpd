@@ -1558,6 +1558,7 @@ khttpd_ctrl_log_set_file(int chan, struct khttpd_mbuf_json *output,
 	}
 
 	prop_spec.name = "path";
+	prop_spec.link = input_prop_spec;
 
 	if (path_str[0] != '/') {
 		khttpd_problem_invalid_value_response_begin(output);

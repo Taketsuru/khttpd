@@ -2,13 +2,9 @@
   http_host_field_no_port_reject, http_host_field_with_port_ok, and
   http_host_field_with_port_reject.
 
-- BUG: specifing invalid path to errorLog crashes the kernel
+- Add tests for 'redirect' feature
 
-- More functional tests
-
-- Feature to redirect accesses
-
-- FastCGI timeout/redirect
+- Add tests for FastCGI timeout/redirect
 
 - Support range requests for khttpd_file locations.
 
@@ -39,9 +35,3 @@
     - Log construction functions should be redesigned.
 
 - Add configuration parameter 'translucent' to khttpd_file location handler.
-
-- BUG: closing a socket just after sending a request that targeted to a
-  resource served by a fastcgi server doesn't abort the request sent to
-  the fastcgi server.  This is because khttpd doesn't monitor the http
-  socket in the interval from the arrival of a request till the sending of
-  the response.

@@ -1,2 +1,2 @@
 #!/bin/sh
-exec ssh 192.168.56.3 "sudo kldunload khttpd.ko"
+exec ssh 192.168.56.3 "sudo kldunload -f khttpd.ko"

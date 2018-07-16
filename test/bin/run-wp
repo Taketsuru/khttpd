@@ -6,7 +6,7 @@ case "$0" in
 esac
 
 if kldstat -q -m khttpd; then
-    kldunload khttpd.ko
+    kldunload -f khttpd.ko
 fi
 
 rm -f $proj_dir/test/log/{ktr,access,error}.log
