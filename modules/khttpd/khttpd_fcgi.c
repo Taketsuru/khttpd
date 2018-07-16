@@ -798,12 +798,15 @@ khttpd_fcgi_send_stdin(struct khttpd_fcgi_xchg_data *xchg_data, long space)
 
 		} else {
 			stdin_len = m_length(stdin, NULL);
-			max_stdin_len = MIN
-			    (KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH,
+			max_stdin_len =
+			    MIN(KHTTPD_FCGI_MAX_RECORD_CONTENT_LENGTH,
 			    rounddown2(space - sizeof(struct khttpd_fcgi_hdr),
 			    KHTTPD_FCGI_RECORD_ALIGN));
 
-			if (max_stdin_len < stdin_len) {
+			if (stdin_len <= max_stdin_len) {
+				xchg_data->put_buf = NULL;
+
+			} else {
 				stdin_len = rounddown2(max_stdin_len,
 				    KHTTPD_FCGI_RECORD_ALIGN);
 				xchg_data->put_buf = m_split(stdin, stdin_len,
