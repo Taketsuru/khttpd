@@ -95,7 +95,6 @@ struct khttpd_file_get_exchange_data {
 	struct mtx	lock;
 	LIST_ENTRY(khttpd_file_get_exchange_data) orphan_link; /* (b) */
 	struct sbuf	path;				       /* (o) */
-	off_t		xmit_residual;		     /* (e) */
 	off_t		end_offset;		     /* (o) */
 	off_t		io_offset;		     /* (p) */
 	struct khttpd_exchange *exchange;	     /* (o) */
@@ -515,13 +514,15 @@ khttpd_file_get_exchange_get(struct khttpd_exchange *exchange, void *arg,
 	data = arg;
 	td = curthread;
 
-	if (data->xmit_residual == 0) {
+	if (data->io_offset == data->end_offset) {
 		*data_out = NULL;
 		return (0);
 	}
 
 	if (data->io_size == 0) {
-		data->io_size = MIN(space, data->xmit_residual);
+		data->io_size = MIN(ptoa(nitems(data->pages)) -
+		    (data->io_offset & PAGE_MASK),
+		    MIN(space, data->end_offset - data->io_offset));
 		khttpd_file_read_file(data);
 	}
 
@@ -595,7 +596,6 @@ retry:
 	*data_out = hd;
 
 	len = data->io_size;
-	data->xmit_residual -= len;
 	data->io_offset += len;
 
 	KASSERT(0 < len, ("data->io_size == 0"));
@@ -605,7 +605,8 @@ retry:
 		m_length(hd, NULL), len));
 
 	if (data->io_offset < data->end_offset) {
-		data->io_size = MIN(nitems(data->pages) * PAGE_SIZE,
+		data->io_size = MIN(ptoa(nitems(data->pages)) -
+		    (data->io_offset & PAGE_MASK),
 		    MIN(space, data->end_offset - data->io_offset));
 		khttpd_file_read_file(data);
 	}
@@ -662,7 +663,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 		goto not_found;
 
 	data->io_offset = 0;
-	data->xmit_residual = data->end_offset - data->io_offset;
 
 	sbuf_new(&type_sbuf, type_buf, sizeof(type_buf), SBUF_AUTOEXTEND);
 	sbuf_new(&charset_sbuf, charset_buf, sizeof(charset_buf), 
@@ -698,7 +698,7 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	sbuf_delete(&charset_sbuf);
 
 	khttpd_exchange_set_response_content_length(exchange,
-	    data->xmit_residual);
+	    data->end_offset - data->io_offset);
 	khttpd_exchange_respond(exchange, KHTTPD_STATUS_OK);
 
 	return;
