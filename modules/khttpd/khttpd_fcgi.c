@@ -2207,7 +2207,7 @@ khttpd_fcgi_filter(struct khttpd_location *location,
 
 	KHTTPD_ENTRY("%s(%p,%p,%s)", __func__, location, exchange,
 	    khttpd_ktr_printf("%s", suffix));
-	KASSERT(khttpd_exchange_on_worker_thread(exchange),
+	KASSERT(exchange == NULL || khttpd_exchange_on_worker_thread(exchange),
 	    ("wrong thread"));
 
 	td = curthread;
