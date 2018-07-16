@@ -638,11 +638,6 @@ khttpd_file_get(struct khttpd_exchange *exchange)
 	mtx_unlock(&khttpd_file_lock);
 
 	data = uma_zalloc(khttpd_file_get_exchange_data_zone, M_WAITOK);
-	bzero(&data->khttpd_file_get_exchange_data_zctor_begin,
-	    offsetof(struct khttpd_file_get_exchange_data,
-		khttpd_file_get_exchange_data_zctor_end) -
-	    offsetof(struct khttpd_file_get_exchange_data,
-		khttpd_file_get_exchange_data_zctor_begin));
 	data->exchange = exchange;
 
 	khttpd_exchange_set_ops(exchange, &khttpd_file_get_exchange_ops, data);
