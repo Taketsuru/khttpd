@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,17 +49,18 @@ enum {
 struct khttpd_json_problem {
 	const char	*type;
 	const char	*title;
-	struct sbuf	*detail; /* NULL or a sbuf allocated by sbuf_auto_new */
+	struct sbuf	*detail; /* NULL or a sbuf from sbuf_auto_new */
 	unsigned	line;
 	unsigned	column;
 };
 
 struct khttpd_json *khttpd_json_null_new(void);
 struct khttpd_json *khttpd_json_integer_new(int64_t value);
-struct khttpd_json *khttpd_json_boolean_new(boolean_t value);
+struct khttpd_json *khttpd_json_boolean_new(bool value);
 struct khttpd_json *khttpd_json_string_new(void);
 struct khttpd_json *khttpd_json_array_new(void);
-struct khttpd_json *khttpd_json_object_new(int size_hint);
+struct khttpd_json *khttpd_json_object_new(void);
+struct khttpd_json *khttpd_json_copy(struct khttpd_json *value);
 void khttpd_json_delete(struct khttpd_json *value);
 int khttpd_json_type(struct khttpd_json *value);
 int64_t khttpd_json_integer_value(struct khttpd_json *value);
@@ -79,5 +80,5 @@ struct khttpd_json *khttpd_json_object_get_at(struct khttpd_json *value,
     int index, struct khttpd_json **name_out);
 void khttpd_json_object_add(struct khttpd_json *value,
     struct khttpd_json *name, struct khttpd_json *elem);
-boolean_t khttpd_json_parse(struct khttpd_json **result,
+bool khttpd_json_parse(struct khttpd_json **result,
     struct khttpd_json_problem *, struct mbuf *input, int depth_limit);

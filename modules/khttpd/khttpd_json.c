@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017 Taketsuru <taketsuru11@gmail.com>.
+ * Copyright (c) 2018 Taketsuru <taketsuru11@gmail.com>.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -221,7 +221,7 @@ khttpd_json_integer_new(int64_t value)
 }
 
 struct khttpd_json *
-khttpd_json_boolean_new(boolean_t value)
+khttpd_json_boolean_new(bool value)
 {
 	struct khttpd_json *result;
 
@@ -262,22 +262,15 @@ khttpd_json_array_new(void)
 }
 
 struct khttpd_json *
-khttpd_json_object_new(int size_hint)
+khttpd_json_object_new(void)
 {
 	struct khttpd_json *result;
-	size_t len;
 
 	result = khttpd_malloc(KHTTPD_JSON_INSTANCE_SIZE);
 	result->type = KHTTPD_JSON_OBJECT;
 	result->size = 0;
-	len = size_hint * sizeof(struct khttpd_json *) * 2;
-	if (len <= KHTTPD_JSON_EMBEDDED_DATA_SIZE) {
-		result->storage_size = 0;
-		result->storage = (void *)result->data;
-	} else {
-		result->storage_size = len;
-		result->storage = khttpd_malloc(len);
-	}
+	result->storage_size = 0;
+	result->storage = (void *)result->data;
 
 	return (result);
 }
@@ -353,14 +346,13 @@ static void
 khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 {
 	void *storage;
-	size_t size, ssize;
+	size_t ssize;
 
 	KASSERT(value->type == KHTTPD_JSON_ARRAY ||
 	    value->type == KHTTPD_JSON_OBJECT ||
 	    value->type == KHTTPD_JSON_STRING,
 	    ("invalid type %d", value->type));
 
-	size = value->size;
 	ssize = value->storage_size;
 	if (ssize == 0) {
 		ssize = KHTTPD_JSON_EMBEDDED_DATA_SIZE;
@@ -379,8 +371,77 @@ khttpd_json_resize(struct khttpd_json *value, size_t newsize)
 		value->storage = khttpd_realloc(storage, ssize);
 	else {
 		value->storage = khttpd_malloc(ssize);
-		bcopy(value->data, value->storage, size);
+		bcopy(value->data, value->storage, value->size);
 	}
+}
+
+static void
+khttpd_json_copy_deeply(struct khttpd_json *dst, struct khttpd_json *src)
+{
+	struct khttpd_json **selms, **delms;
+	size_t i, nelms;
+
+	KASSERT(src->size % sizeof(struct khttpd_json *) == 0,
+	    ("invalid size %zd", src->size));
+
+	if (src->storage_size != 0) {
+		khttpd_json_resize(dst, src->size);
+	}
+	dst->size = src->size;
+
+	selms = (struct khttpd_json **)src->storage;
+	delms = (struct khttpd_json **)dst->storage;
+	nelms = src->size / sizeof(struct khttpd_json *);
+	for (i = 0; i < nelms; ++i) {
+		delms[i] = khttpd_json_copy(selms[i]);
+	}
+}
+
+struct khttpd_json *
+khttpd_json_copy(struct khttpd_json *value)
+{
+	struct khttpd_json *result;
+
+	switch (khttpd_json_type(value)) {
+
+	case KHTTPD_JSON_ARRAY:
+		result = khttpd_json_array_new();
+		khttpd_json_copy_deeply(result, value);
+		break;
+
+	case KHTTPD_JSON_OBJECT:
+		result = khttpd_json_object_new();
+		khttpd_json_copy_deeply(result, value);
+		break;
+
+	case KHTTPD_JSON_INTEGER:
+		result = khttpd_json_integer_new
+		    (khttpd_json_integer_value(value));
+		break;
+
+	case KHTTPD_JSON_BOOL:
+		result = khttpd_json_boolean_new
+		    (khttpd_json_integer_value(value));
+		break;
+
+	case KHTTPD_JSON_STRING:
+		result = khttpd_json_string_new();
+		if (value->storage_size != 0) {
+			khttpd_json_resize(result, value->size);
+		}
+		result->size = value->size;
+		bcopy(value->storage, result->storage, value->size);
+		break;
+
+	case KHTTPD_JSON_NULL:
+		result = khttpd_json_null_new();
+		break;
+
+	default:
+		panic("invalid json type %d", khttpd_json_type(value));
+	}
+
+	return (result);
 }
 
 int
@@ -575,16 +636,16 @@ khttpd_json_object_add(struct khttpd_json *value, struct khttpd_json *name,
 	value->size = newsize;
 }
 
-static boolean_t
+static bool
 khttpd_json_parse_expect_char(struct khttpd_mbuf_pos *iter, char expected)
 {
 	char ch;
 
 	ch = khttpd_mbuf_getc(iter);
 	if (ch == expected)
-		return (TRUE);
+		return (true);
 	khttpd_mbuf_ungetc(iter, ch);
-	return (FALSE);
+	return (false);
 }
 
 static void
@@ -735,7 +796,7 @@ khttpd_json_parse_object(struct khttpd_json **value_out,
 	int error;
 
 	error = 0;
-	value = khttpd_json_object_new(0);
+	value = khttpd_json_object_new();
 
 	khttpd_json_mbuf_skip_ws(iter);
 	if (khttpd_json_parse_expect_char(iter, '}')) {
@@ -853,14 +914,14 @@ khttpd_json_parse_integer(struct khttpd_json **value_out,
 {
 	int ch;
 	uint64_t value;
-	boolean_t negative;
+	bool negative;
 
-	negative = FALSE;
+	negative = false;
 
 	khttpd_json_mbuf_skip_ws(iter);
 	ch = khttpd_mbuf_getc(iter);
 	if (ch == '-')
-		negative = TRUE;
+		negative = true;
 	else
 		khttpd_mbuf_ungetc(iter, ch);
 
@@ -945,13 +1006,13 @@ khttpd_json_parse_value(struct khttpd_json **value_out,
 	case 't':
 		error = khttpd_json_parse_expect_seq(output, iter, "rue");
 		if (error == 0)
-			value = khttpd_json_boolean_new(TRUE);
+			value = khttpd_json_boolean_new(true);
 		break;
 
 	case 'f':
 		error = khttpd_json_parse_expect_seq(output, iter, "alse");
 		if (error == 0)
-			value = khttpd_json_boolean_new(FALSE);
+			value = khttpd_json_boolean_new(false);
 		break;
 
 	case 'n':
@@ -979,16 +1040,16 @@ khttpd_json_parse_value(struct khttpd_json **value_out,
 	return (error);
 }
 
-boolean_t
+bool
 khttpd_json_parse(struct khttpd_json **result,
     struct khttpd_json_problem *output, struct mbuf *input, int depth_limit)
 {
 	struct khttpd_json *dummy;
 	struct khttpd_mbuf_pos origin, iter;
 	int error;
-	boolean_t ok;
+	bool ok;
 
-	ok = FALSE;
+	ok = false;
 	bzero(output, sizeof(*output));
 
 	khttpd_mbuf_pos_init(&iter, input, 0);
@@ -999,7 +1060,7 @@ khttpd_json_parse(struct khttpd_json **result,
 		error = khttpd_json_parse_value(&dummy, output, &iter,
 		    depth_limit);
 		if (error == ENOMSG)
-			ok = TRUE;
+			ok = true;
 		else {
 			if (error == 0)
 				khttpd_json_delete(dummy);
