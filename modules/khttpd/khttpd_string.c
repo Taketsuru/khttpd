@@ -348,9 +348,6 @@ khttpd_string_normalize_request_target(struct sbuf *dst, const char *begin,
 	const char *cp;
 	int ch, code, digit, query_off;
 
-	KHTTPD_ENTRY("%s(,%s,)", __func__,
-	    khttpd_ktr_printf("%.*s", (int)(end - begin), begin));
-
 	/* The request target must start with '/'. */
 	if (end <= begin || *begin != '/') {
 		if (query_off_out != NULL) {
