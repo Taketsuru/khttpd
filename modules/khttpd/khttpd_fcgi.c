@@ -2366,9 +2366,10 @@ khttpd_fcgi_do_method(struct khttpd_exchange *exchange)
 	int status;
 
 	KHTTPD_ENTRY("%s(%p=%s)", __func__, exchange,
-	    khttpd_ktr_printf("{target: \"%s\", method: \"%s\"}",
+	    khttpd_ktr_printf("{target: \"%s\", method: \"%s\", query:\"%s\"}",
 		khttpd_exchange_target(exchange),
-		khttpd_method_name(khttpd_exchange_method(exchange))));
+		khttpd_method_name(khttpd_exchange_method(exchange)),
+		khttpd_exchange_query(exchange)));
 	KASSERT(khttpd_exchange_on_worker_thread(exchange),
 	    ("wrong thread"));
 
