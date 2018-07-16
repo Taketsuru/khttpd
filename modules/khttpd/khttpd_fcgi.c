@@ -1974,6 +1974,7 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 	struct khttpd_problem_property prop_spec;
 	struct khttpd_fcgi_upstream *upstream;
 	int64_t max_conns;
+	int64_t intval;
 	int status;
 
 	KHTTPD_ENTRY("%s(,%p,...)", __func__, loc_data);
@@ -2005,6 +2006,44 @@ khttpd_fcgi_upstream_new(struct khttpd_fcgi_upstream **upstream_out,
 		goto end;
 	}
 	upstream->max_conns_config = max_conns;
+
+	prop_spec.name = "idleTimeout";
+	status = khttpd_webapi_get_integer_property(&intval, prop_spec.name,
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		goto end;
+
+	} else if (status == KHTTPD_STATUS_NO_CONTENT) {
+		upstream->idle_timeout = 0;
+
+	} else if (intval < 0 || SBT_MAX >> 32 < intval) {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto end;
+
+	} else {
+		upstream->idle_timeout = intval << 32;
+	}
+
+	prop_spec.name = "busyTimeout";
+	status = khttpd_webapi_get_integer_property(&intval, prop_spec.name,
+	    input_prop_spec, input, output, true);
+	if (!KHTTPD_STATUS_IS_SUCCESSFUL(status)) {
+		return (status);
+
+	} else if (status == KHTTPD_STATUS_NO_CONTENT) {
+		upstream->busy_timeout = 0;
+
+	} else if (intval < 0 || SBT_MAX >> 32 < intval) {
+		khttpd_problem_invalid_value_response_begin(output);
+		khttpd_problem_set_property(output, &prop_spec);
+		status = KHTTPD_STATUS_BAD_REQUEST;
+		goto end;
+
+	} else {
+		upstream->busy_timeout = intval << 32;
+	}
 
 	status = khttpd_webapi_get_sockaddr_property
 	    ((struct sockaddr *)&upstream->sockaddr,
