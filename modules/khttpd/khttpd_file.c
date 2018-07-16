@@ -420,7 +420,7 @@ khttpd_file_read_file(void *arg)
 		data->error = 0;
 		data->in_progress = 1;
 		npages = howmany(pageoff + io_size, PAGE_SIZE);
-		KASSERT(npages <  nitems(data->pages),
+		KASSERT(npages <= nitems(data->pages),
 		    ("npages %d, nitems(data->pages) %zd",
 			npages, nitems(data->pages)));
 		data->npages = npages;
