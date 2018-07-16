@@ -895,9 +895,7 @@ khttpd_fcgi_conn_destroy(struct khttpd_fcgi_conn *conn)
 	struct khttpd_fcgi_upstream *upstream;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, conn);
-
-	callout_drain(&conn->end_request_co);
-	khttpd_task_cancel(conn->abort_req_task);
+	KASSERT(!conn->waiting_end, ("waiting_end"));
 
 	upstream = conn->upstream;
 	loc_data = upstream->location_data;
@@ -1015,9 +1013,7 @@ khttpd_fcgi_conn_release(struct khttpd_fcgi_conn *conn)
 	struct khttpd_fcgi_location_data *loc_data;
 
 	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
-
-	callout_drain(&conn->end_request_co);
-	khttpd_task_cancel(conn->abort_req_task);
+	KASSERT(!conn->waiting_end, ("waiting_end"));
 
 	loc_data = conn->upstream->location_data;
 	mtx_lock(&loc_data->lock);
@@ -1046,7 +1042,10 @@ khttpd_fcgi_conn_do_abort_request(void *arg)
 	struct mbuf *m;
 
 	KHTTPD_ENTRY("%s(%p,%#lx)", __func__, conn);
-	KASSERT(conn->waiting_end, ("!waiting_end"));
+
+	if (!conn->waiting_end) {
+		return;
+	}
 
 	m = m_get(M_WAITOK, MT_DATA);
 	m->m_len = sizeof(struct khttpd_fcgi_hdr);
@@ -1095,9 +1094,9 @@ khttpd_fcgi_detach_conn(struct khttpd_fcgi_xchg_data *xchg_data,
 		conn->waiting_end = true;
 		callout_reset_sbt_curcpu(&conn->end_request_co, SBT_1S,
 		    SBT_1S, khttpd_fcgi_end_request_timeout_expired, conn, 0);
+	} else {
+		khttpd_task_schedule(conn->release_task);
 	}
-
-	khttpd_task_schedule(conn->release_task);
 }
 
 static void
@@ -1748,21 +1747,17 @@ khttpd_fcgi_found_eof(struct khttpd_fcgi_conn *conn)
 	KHTTPD_ENTRY("%s(%p)", __func__, conn);
 	KASSERT(khttpd_fcgi_conn_on_worker_thread(conn), ("wrong thread"));
 
+	conn->recv_eof = true;
+
 	if (conn->active) {
 		KHTTPD_NOTE("%s active", __func__);
 		khttpd_fcgi_protocol_error_new(&logent);
 		khttpd_problem_set_detail(&logent,
 		    "upstream server closed the connection prematurely");
 		khttpd_fcgi_report_error(conn->upstream, &logent);
-
-		conn->recv_eof = true;
 		khttpd_fcgi_abort_exchange(conn->xchg_data);
-
 		return;
 	}
-
-	callout_drain(&conn->end_request_co);
-	khttpd_task_cancel(conn->abort_req_task);
 
 	upstream = conn->upstream;
 	loc_data = upstream->location_data;
@@ -1770,8 +1765,17 @@ khttpd_fcgi_found_eof(struct khttpd_fcgi_conn *conn)
 
 	if (conn->xchg_data != NULL) {
 		/* attaching */
-		conn->recv_eof = true;
 		mtx_unlock(&loc_data->lock);
+
+	} else if (conn->waiting_end) {
+		/* waiting end_request */
+		conn->waiting_end = false;
+		khttpd_task_schedule(conn->release_task);
+		mtx_unlock(&loc_data->lock);
+
+		callout_drain(&conn->end_request_co);
+		khttpd_task_cancel(conn->abort_req_task);
+
 	} else {
 		/* idle */
 		LIST_REMOVE(conn, idleliste);
