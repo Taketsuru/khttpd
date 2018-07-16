@@ -92,6 +92,8 @@ void	khttpd_exchange_set_ops(struct khttpd_exchange *,
 const char *
 	khttpd_exchange_target(struct khttpd_exchange *);
 size_t	khttpd_exchange_target_length(struct khttpd_exchange *);
+void	khttpd_exchange_request_uri(struct khttpd_exchange *_xchg,
+	    struct sbuf *_output);
 bool	khttpd_exchange_request_is_chunked(struct khttpd_exchange *);
 bool	khttpd_exchange_response_is_chunked(struct khttpd_exchange *);
 size_t	khttpd_exchange_request_content_length(struct khttpd_exchange *);

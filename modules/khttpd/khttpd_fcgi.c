@@ -693,11 +693,7 @@ khttpd_fcgi_append_params(struct khttpd_fcgi_xchg_data *xchg_data,
 	    "SCRIPT_NAME", sbuf_data(&sbuf), sbuf_len(&sbuf));
 	sbuf_clear(&sbuf);
 
-	sbuf_cpy(&sbuf, khttpd_exchange_target(exchange));
-	if (query != NULL) {
-		sbuf_putc(&sbuf, '?');
-		sbuf_cat(&sbuf, query);
-	}
+	khttpd_exchange_request_uri(exchange, &sbuf);
 	sbuf_finish(&sbuf);
 	tail = khttpd_fcgi_append_param(&head, tail, &len,
 	    "REQUEST_URI", sbuf_data(&sbuf), sbuf_len(&sbuf));

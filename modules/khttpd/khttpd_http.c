@@ -1980,6 +1980,22 @@ khttpd_exchange_target_length(struct khttpd_exchange *exchange)
 	    exchange->query - sbuf_data(&exchange->target));
 }
 
+void
+khttpd_exchange_request_uri(struct khttpd_exchange *exchange,
+    struct sbuf *output)
+{
+	const char *begin, *end;
+	const char *tbegin, *tend;
+
+	begin = exchange->request_header;
+	end = exchange->request_header_end;
+	tbegin = memchr(begin, ' ', end - begin);
+	KASSERT(tbegin != NULL, ("invalid header"));
+	++tbegin;
+	tend = memchr(tbegin, ' ', end - tbegin);
+	sbuf_bcpy(output, tbegin, tend - tbegin);
+}
+
 bool
 khttpd_exchange_request_is_chunked(struct khttpd_exchange *exchange)
 {
