@@ -232,7 +232,11 @@ khttpd_socket_set_rcv_upcall(struct khttpd_socket *socket, sbintime_t timeout,
 	KASSERT((so->so_rcv.sb_flags & SB_UPCALL) == 0,
 	    ("socket %p already set upcall", socket));
 
-	if (!soreadable(so)) {
+	if (soreadable(so)) {
+		khttpd_task_schedule(socket->rcv_task);
+		SOCKBUF_UNLOCK(&so->so_rcv);
+
+	} else {
 		KHTTPD_NOTE("%s soupcall_set %p", __func__, so);
 		soupcall_set(so, SO_RCV, khttpd_socket_on_rcv_upcall, socket);
 
@@ -242,14 +246,6 @@ khttpd_socket_set_rcv_upcall(struct khttpd_socket *socket, sbintime_t timeout,
 			    timeout, khttpd_port_timeout_pr,
 			    khttpd_socket_on_timeout, socket, 0);
 		}
-		SOCKBUF_UNLOCK(&so->so_rcv);
-
-	} else if (on_worker_thread) {
-		SOCKBUF_UNLOCK(&so->so_rcv);
-		khttpd_stream_data_is_available(socket->stream);
-
-	} else {
-		khttpd_task_schedule(socket->rcv_task);
 		SOCKBUF_UNLOCK(&so->so_rcv);
 	}
 }
