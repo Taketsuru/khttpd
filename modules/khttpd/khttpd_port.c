@@ -695,7 +695,6 @@ khttpd_socket_connect(struct sockaddr *peeraddr, struct sockaddr *sockaddr,
 	int error;
 
 	KHTTPD_ENTRY("%s(%p)", __func__, peeraddr, sockaddr);
-	KASSERT(khttpd_port_ready, ("!ready"));
 
 	td = curthread;
 	detail = NULL;
