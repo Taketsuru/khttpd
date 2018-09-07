@@ -684,8 +684,11 @@ khttpd_json_parse_string(struct khttpd_json **value_out,
 	int ch, code, error, i, surrogate;
 
 	khttpd_json_mbuf_skip_ws(iter);
-	if (!khttpd_json_parse_expect_char(iter, '\"'))
+	if (!khttpd_json_parse_expect_char(iter, '\"')) {
+		output->type = "khttpd_json::string_expected";
+		output->title = "a string is expected";
 		return (EINVAL);
+	}
 
 	error = 0;
 	value = khttpd_json_string_new();
@@ -734,6 +737,10 @@ khttpd_json_parse_string(struct khttpd_json **value_out,
 				for (i = 0; i < 4; ++i) {
 					ch = khttpd_mbuf_getc(iter);
 					if (!isxdigit(ch)) {
+						output->type = "khttpd_json::"
+						    "hex_digit_expected";
+						output->title = "a hex digit "
+						    "is expected";
 						error = EINVAL;
 						goto quit;
 					}
@@ -832,6 +839,8 @@ khttpd_json_parse_object(struct khttpd_json **value_out,
 			break;
 
 		if (!khttpd_json_parse_expect_char(iter, ',')) {
+			output->type = "khttpd_json::comma_expected";
+			output->title = "a comma is expected";
 			error = EINVAL;
 			break;
 		}
@@ -927,7 +936,7 @@ khttpd_json_parse_integer(struct khttpd_json **value_out,
 
 	ch = khttpd_mbuf_getc(iter);
 	if (ch == '0') {
-		*value_out = 0;
+		*value_out = khttpd_json_integer_new(0);
 		return (0);
 	}
 	if (!isdigit(ch)) {
