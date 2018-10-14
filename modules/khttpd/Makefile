@@ -83,3 +83,5 @@ cscope:
 	find . -name '*.[ch]' -print > cscope.files
 	find /usr/src/sys -type f -name '*.[ch]' -print |egrep -v '^/usr/src/sys/(netatalk|ia64|arm|i386|pc98|riscv|sparc64|mips|boot|contrib|gnu|powerpc|tools|cddl)/' >> cscope.files
 	cscope -b -q
+
+CLEANFILES += $(SRCS:.c=.c.gcov) $(SRCS:.c=.gcno) $(SRCS:.c=.gcda)
