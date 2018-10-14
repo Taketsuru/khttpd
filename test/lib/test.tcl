@@ -53,6 +53,7 @@ namespace eval test {
 	return $result
     }
 
+    # Declare 'fail' of the test if the given expression is not true.
     proc assert {cond {msg ""}} {
 	if {![uplevel 1 expr [list $cond]]} {
 	    set expcond [uplevel 1 subst [list $cond]]
@@ -62,10 +63,11 @@ namespace eval test {
 			     "\"$cond\" is false." \
 			     "The condition is expanded to $expcond"]
 	    }
-	    return -code error -errorcode [list KHTTPD TEST fail] $msg
+	    return -code error -errorcode [list TEST fail] $msg
 	}
     }
 
+    # Declare 'error' of the test if the given expression is not true.
     proc assume {cond {msg ""}} {
 	if {![uplevel 1 expr [list $cond]]} {
 	    set expcond [uplevel 1 subst [list $cond]]
@@ -75,10 +77,11 @@ namespace eval test {
 			     "\"$cond\" is false." \
 			     "The condition is expanded to $expcond"]
 	    }
-	    return -code error -errorcode [list KHTTPD TEST error] $msg
+	    return -code error -errorcode [list TEST error] $msg
 	}
     }
 
+    # Declare 'skipped' of the test if the given expression is not true.
     proc continue_if {cond {msg ""}} {
 	if {![uplevel 1 expr [list $cond]]} {
 	    set expcond [uplevel 1 subst [list $cond]]
@@ -88,14 +91,16 @@ namespace eval test {
 			     "\"$cond\" is false." \
 			     "The condition is expanded to $expcond"]
 	    }
-	    return -code error -errorcode [list KHTTPD TEST skip] $msg
+	    return -code error -errorcode [list TEST skip] $msg
 	}
     }
 
+    # Add a name value pair to the report.
     proc add_data {name value} {
 	[test::test_driver instance] add_data $name $value
     }
 
+    # Define a testcase.
     proc define {testname classname args} {
 	set setup ""
 	set teardown ""
@@ -114,11 +119,11 @@ namespace eval test {
 		    set teardown [lindex $args $i]
 		}
 		-* {
-		    throw [list KHTTPD TEST error] "unknown option $arg"
+		    throw [list TEST error] "unknown option $arg"
 		}
 		default {
 		    if {$i != [expr {$nargs - 1}]} {
-			throw [list KHTTPD TEST error] "invalid value $arg"
+			throw [list TEST error] "invalid value $arg"
 		    }
 		    set body $arg
 		}
@@ -161,7 +166,7 @@ namespace eval test {
 
 	    try {
 		if {![info object class $obj testcase]} {
-		    return -code error -errorcode [list KHTTPD TEST error] \
+		    return -code error -errorcode [list TEST error] \
 			"class $classname must be a subclass of test::testcase"
 		}
 	    } finally {
@@ -263,7 +268,7 @@ namespace eval test {
 	}
 
 	method on_timeout {} {
-	    return -code error -errorcode [list KHTTPD TEST fail] "timeout"
+	    return -code error -errorcode [list TEST fail] "timeout"
 	}
 
 	method _setup {} {
@@ -275,7 +280,7 @@ namespace eval test {
 
     proc test_chan {args} {
 	if {[llength $args] < 1} {
-	    return -code error -errorcode [list KHTTPD TEST error] \
+	    return -code error -errorcode [list TEST error] \
 		"wrong # args: should be \"test_chan ?-timeout millis?\
 		?-result result_var? ?-props props? chan body"
 	}
@@ -299,7 +304,7 @@ namespace eval test {
 		    set timeout [lindex $args $i]
 		}
 		default {
-		    return -code error -errorcode [KHTTPD TEST error] \
+		    return -code error -errorcode [TEST error] \
 			"bad option \"$arg\": must be -props, -result,\
 			or -timeout"
 		}
@@ -456,8 +461,8 @@ namespace eval test {
 	    } on ok {msg opt} {
 		set status pass
 
-	    } trap {KHTTPD TEST} {msg opt} {
-		set status [lindex [dict get $opt -errorcode] 2]
+	    } trap {TEST} {msg opt} {
+		set status [lindex [dict get $opt -errorcode] 1]
 		puts $chan [my _format_error_options $opt]
 
 	    } on error {msg opt} - \
@@ -482,8 +487,8 @@ namespace eval test {
 		    my _check
 		} on ok {msg opt} {
 
-		} trap {KHTTPD TEST} {msg opt} {
-		    set status [lindex [dict get $opt -errorcode] 2]
+		} trap {TEST} {msg opt} {
+		    set status [lindex [dict get $opt -errorcode] 1]
 		    puts $chan [my _format_error_options $opt]
 
 		} on error {msg opt} - \
@@ -552,7 +557,7 @@ namespace eval test {
 
 	method add {class file line} {
 	    if {[dict exists $test_classes $class]} {
-		return -code error -errorcode {KHTTPD TEST error} \
+		return -code error -errorcode {TEST error} \
 		    "duplicate test $class"
 	    }
 	    dict set test_classes $class [list $file $line]
@@ -697,7 +702,7 @@ namespace eval test {
     oo::objdefine test::test_driver {
 	method set_instance {obj} {
 	    if {[catch {my instance} result] == 0} {
-		return -code error -errorcode {KHTTPD TEST error} \
+		return -code error -errorcode {TEST error} \
 		    "duplicate test_driver"
 	    }
 

@@ -253,7 +253,7 @@ namespace eval test {
 		test::assert {[dict get $value status] == 400}
 		apply $_start_fn $value
 	    } on ok {msg opts} {
-		throw [list KHTTPD TEST fail] "'start' is expected to fail"
+		throw [list TEST fail] "'start' is expected to fail"
 	    }
 	}
     }
@@ -285,7 +285,7 @@ namespace eval test {
 
 	    set leaks [exec -- $findleak $ktr_log]
 	    if {$leaks != ""} {
-		throw [list KHTTPD TEST fail] "memory leak is detected\n$leaks"
+		throw [list TEST fail] "memory leak is detected\n$leaks"
 	    }
 	}
 

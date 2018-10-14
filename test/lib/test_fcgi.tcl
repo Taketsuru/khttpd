@@ -539,7 +539,7 @@ oo::class create ::test::fastcgi::basic_client {
     constructor {script_name fs_path resp_hdr resp_body 
 	counter counter_script upstream chan addr port} {
 	if {$counter != 0 && $counter_script eq ""} {
-	    error "counter_script is not given" -errorcode [KHTTPD TEST error]
+	    error "counter_script is not given" -errorcode [TEST error]
 	}
 
 	set _script_name $script_name
@@ -668,7 +668,7 @@ oo::class create ::test::fastcgi::basic_client {
 	    }
 
 	    default {
-		throw [list KHTTPD TEST error] "unknown state $_state"
+		throw [list TEST error] "unknown state $_state"
 	    }
 	}
     }
