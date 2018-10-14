@@ -29,6 +29,30 @@ namespace eval test {
 
     namespace export {[a-z]*}
 
+    # See whether the given testcase passes the given filter specification.
+    #
+    # A filter specification is a list.  Each element of it is a regular
+    # expression or a regular expression preceded by character '!'.
+    proc filter_testcase {filter_spec testcase} {
+	set class [string range [info object class $testcase] 2 end]
+	set result [expr {[llength $filter_spec] == 0 ||
+			  [string match !* [lindex $filter_spec 0]]}]
+
+	foreach pattern $filter_spec {
+	    if {[string match !* $pattern]} {
+		if {[regexp -- [string range $pattern 1 end] $class]} {
+		    set result 0
+		}
+	    } else {
+		if {[regexp -- $pattern $class]} {
+		    set result 1
+		}
+	    }
+	}
+
+	return $result
+    }
+
     proc assert {cond {msg ""}} {
 	if {![uplevel 1 expr [list $cond]]} {
 	    set expcond [uplevel 1 subst [list $cond]]

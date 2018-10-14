@@ -2,34 +2,8 @@
 # \
 exec tclsh8.7 "$0" ${1+"$@"}
 
-proc match_test {testcase} {
-    global argc argv
-
-    if {$argc == 0} {
-	return 1
-    }
-
-    set class [string range [info object class $testcase] 2 end]
-    set result [string match !* [lindex $argv 0]]
-
-    foreach pattern $argv {
-	if {[string match !* $pattern]} {
-	    if {[regexp -- [string range $pattern 1 end] $class]} {
-		set result 0
-	    }
-	} else {
-	    if {[regexp -- $pattern $class]} {
-		set result 1
-	    }
-	}
-    }
-
-    return $result
-}
-
-
-set root [file join [file dirname [info script]] ..]
-lappend auto_path [file join $root lib]
+set test_dir [file join [file dirname [info script]] ..]
+lappend auto_path [file join $test_dir lib]
 
 source lib/test.tcl
 source lib/test_http.tcl
@@ -44,7 +18,11 @@ source functional/fcgi.tcl
 
 source benchmarks/siege.tcl
 
-[test::test_driver instance] select {{testcase} {match_test $testcase}}
+[test::test_driver instance] select {{testcase} {
+    global argv
+    return [test::filter_testcase $argv $testcase]
+}}
+
 [test::test_driver instance] run report.xml
 
 # Local Variables:
