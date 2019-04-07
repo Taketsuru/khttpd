@@ -1,6 +1,6 @@
 #!/bin/sh
 # \
-exec tclsh8.7 "$0" ${1+"$@"}
+exec tclsh8.6 "$0" ${1+"$@"}
 
 set test_dir [file join [file dirname [info script]] ..]
 lappend auto_path [file join $test_dir lib]

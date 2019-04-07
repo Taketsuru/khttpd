@@ -37,7 +37,7 @@ namespace eval test {
     variable remote_abs_project_root \
 	[file join $::env(HOME) $remote_rel_project_root]
     variable problem_base_uri http://example.com/khttpd/problems/
-    variable timeout_fudge 1000
+    variable timeout_fudge 5000
 
     proc remote_path {path} {
 	variable remote_abs_project_root
@@ -125,7 +125,7 @@ namespace eval test {
     }
 
     proc check_access_log {khttpd responces} {
-	set time_fudge 1.0
+	set time_fudge 2.0
 	set logname [local_file [dict get [$khttpd logs] access-log]]
 	set last_nents 0
 	set retry 0

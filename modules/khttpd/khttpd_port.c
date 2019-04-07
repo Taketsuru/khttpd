@@ -391,10 +391,10 @@ khttpd_socket_send(struct khttpd_socket *socket)
 		prev->m_next = NULL;
 	}
 
-	flags = MSG_DONTWAIT;
+	flags = 0;
 	if (end != NULL ||
 	    (!socket->xmit_close_scheduled && !socket->xmit_flush_scheduled)) {
-		flags |= MSG_MORETOCOME;
+		flags |= PRUS_MORETOCOME;
 	}
 
 	need_close = end == NULL && socket->xmit_close_scheduled;
@@ -1109,32 +1109,15 @@ khttpd_port_do_arrival_task(void *arg)
 	port = arg;
 	head = port->so;
 
-	ACCEPT_LOCK();
-	while ((so = TAILQ_FIRST(&head->so_comp)) != NULL) {
+	for (;;) {
+		SOLISTEN_LOCK(head);
+		error = solisten_dequeue(head, &so, 0);
 
-		if ((head->so_rcv.sb_state & SBS_CANTRCVMORE) != 0) {
-			KHTTPD_NOTE("%s sb_state %#x", __func__,
-			    head->so_rcv.sb_state);
+		if (error != 0) {
+			/* XXX what should I do? */
+			KHTTPD_NOTE("%s solisten_dequeue %d", __func__, error);
 			break;
 		}
-
-		if (head->so_error != 0) {
-			KHTTPD_NOTE("%s error %d", __func__, head->so_error);
-			head->so_error = 0;
-		}
-
-		KHTTPD_NOTE("%s so %p", __func__, so);
-		SOCK_LOCK(so);
-		soref(so);
-
-		TAILQ_REMOVE(&head->so_comp, so, so_list);
-		--head->so_qlen;
-		so->so_state |= SS_NBIO;
-		so->so_qstate &= ~SQ_COMP;
-		so->so_head = NULL;
-
-		SOCK_UNLOCK(so);
-		ACCEPT_UNLOCK();
 
 		error = soaccept(so, &name);
 		if (error != 0) {
@@ -1158,10 +1141,7 @@ khttpd_port_do_arrival_task(void *arg)
 		} else {
 			khttpd_task_schedule(socket->cnf_task);
 		}
-		
-		ACCEPT_LOCK();
 	}
-	ACCEPT_UNLOCK();
 }
 
 static void
@@ -1181,11 +1161,18 @@ khttpd_port_do_stop_task(void *arg)
 	port->so = NULL;
 	khttpd_port_release(port);
 
-	SOCKBUF_LOCK(&so->so_rcv);
-	if ((so->so_rcv.sb_flags & SB_UPCALL) != 0) {
-		soupcall_clear(so, SO_RCV);
+	if (SOLISTENING(so)) {
+		SOLISTEN_LOCK(so);
+		solisten_upcall_set(so, NULL, NULL);
+		SOLISTEN_UNLOCK(so);
+	} else {
+		SOCKBUF_LOCK(&so->so_rcv);
+		if ((so->so_rcv.sb_flags & SB_UPCALL) != 0) {
+			soupcall_clear(so, SO_RCV);
+		}
+		SOCKBUF_UNLOCK(&so->so_rcv);
 	}
-	SOCKBUF_UNLOCK(&so->so_rcv);
+
 	soclose(so);
 
 	mtx_lock(&khttpd_port_lock);
@@ -1385,9 +1372,10 @@ khttpd_port_do_start_task(void *arg)
 
 	khttpd_free(arg);
 
-	SOCKBUF_LOCK(&so->so_rcv);
-	soupcall_set(so, SO_RCV, khttpd_port_do_arrival_upcall, port);
-	SOCKBUF_UNLOCK(&so->so_rcv);
+	SOLISTEN_LOCK(so);
+	so->so_state |= SS_NBIO;
+	solisten_upcall_set(so, khttpd_port_do_arrival_upcall, port);
+	SOLISTEN_UNLOCK(so);
 
 	khttpd_port_do_arrival_task(port);
 	return;

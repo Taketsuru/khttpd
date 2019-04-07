@@ -104,7 +104,7 @@ khttpd_mbuf_append(struct mbuf *dst, const char *begin, const char *end)
 }
 
 static void
-khttpd_mbuf_vprintf_free(struct mbuf *buf, void *arg1, void *arg2)
+khttpd_mbuf_vprintf_free(struct mbuf *buf)
 {
 
 	khttpd_free(mtod(buf, char *) - sizeof(u_int));

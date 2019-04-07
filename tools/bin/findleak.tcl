@@ -1,6 +1,6 @@
 #!/bin/sh
 # \
-exec tclsh8.7 "$0" ${1+"$@"}
+exec tclsh8.6 "$0" ${1+"$@"}
 
 # findleak --
 #

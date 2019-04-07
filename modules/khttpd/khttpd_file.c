@@ -802,6 +802,36 @@ khttpd_file_read_file(void *arg)
 	khttpd_file_read_file_done(data, NULL, 0, 0);
 }
 
+static void
+khttpd_file_free_mext(struct mbuf *m)
+{
+	struct sf_buf *sf;
+	struct vm_page *pg;
+	struct vm_object *obj;
+
+	KASSERT(m->m_flags & M_EXT && m->m_ext.ext_type == EXT_SFBUF,
+	    ("%s: m %p !M_EXT or !EXT_SFBUF", __func__, m));
+
+	sf = m->m_ext.ext_arg1;
+	pg = sf_buf_page(sf);
+
+	sf_buf_free(sf);
+
+	vm_page_lock(pg);
+
+	if (!vm_page_unwire_noq(pg)) {
+
+	} else if ((obj = pg->object) == NULL) {
+		vm_page_free(pg);
+	} else if (vm_page_active(pg)) {
+		vm_page_reference(pg);
+	} else {
+		vm_page_deactivate(pg);
+	}
+
+	vm_page_unlock(pg);
+}
+
 static int
 khttpd_file_exchange_get(struct khttpd_exchange *exchange, void *arg,
     ssize_t space, struct mbuf **data_out)
@@ -889,6 +919,7 @@ retry:
 		mb->m_flags |= M_EXT | M_RDONLY;
 		mb->m_ext.ext_buf = (char *)sf_buf_kva(sf);
 		mb->m_ext.ext_size = PAGE_SIZE;
+		mb->m_ext.ext_free = khttpd_file_free_mext; 
 		mb->m_ext.ext_arg1 = sf;
 		mb->m_ext.ext_arg2 = NULL;
 		mb->m_ext.ext_type = EXT_SFBUF;

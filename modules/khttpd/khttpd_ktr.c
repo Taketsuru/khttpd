@@ -39,6 +39,7 @@
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/kernel.h>
+#include <sys/uio.h>
 #include <sys/linker.h>
 #include <sys/systm.h>
 #include <sys/fcntl.h>
